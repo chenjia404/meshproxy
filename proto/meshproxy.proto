@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package meshproxy;
+
+option go_package = "meshproxy/proto;meshproxyproto";
+
+// NodeDescriptor describes a node's capabilities and public information.
+message NodeDescriptor {
+  string version = 1;
+  string peer_id = 2;
+  bytes pubkey = 3;
+  repeated string roles = 4;
+  repeated string listen_addrs = 5;
+  bool relay = 6;
+  bool exit = 7;
+  string pricing = 8;
+  int64 expires_at = 9;
+  bytes signature = 10;
+}
+
+message CreateCircuitReq {
+  string circuit_id = 1;
+  repeated string path_peer_ids = 2;
+}
+
+message CreateCircuitResp {
+  string circuit_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message ExtendReq {
+  string circuit_id = 1;
+  string next_peer_id = 2;
+}
+
+message ExtendResp {
+  string circuit_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message BeginTcp {
+  string circuit_id = 1;
+  string stream_id = 2;
+  string target_host = 3;
+  int32 target_port = 4;
+}
+
+message Connected {
+  string circuit_id = 1;
+  string stream_id = 2;
+  bool ok = 3;
+  string error = 4;
+}
+
+message DataCell {
+  string circuit_id = 1;
+  string stream_id = 2;
+  bytes payload = 3;
+}
+
+message EndCell {
+  string circuit_id = 1;
+  string stream_id = 2;
+  string reason = 3;
+}
+
+// KeyExchangeInit is sent from the circuit initiator to each hop
+// to start a per-hop key agreement. The concrete algorithm is
+// negotiated out-of-band; this message only carries opaque params.
+message KeyExchangeInit {
+  string circuit_id = 1;
+  string peer_id = 2;
+  bytes  payload = 3; // opaque key exchange payload
+}
+
+// KeyExchangeResp carries the hop's response to a key exchange init.
+message KeyExchangeResp {
+  string circuit_id = 1;
+  string peer_id = 2;
+  bytes  payload = 3; // opaque key exchange payload
+}
+
+// OnionCell wraps inner relay cells with layered encryption.
+// Each hop removes exactly one layer and forwards the remaining blob.
+message OnionCell {
+  string circuit_id = 1;
+  string stream_id = 2;
+  uint32 hop_index = 3;
+  bytes  ciphertext = 4;
+}
+
+// To generate Go code (when protoc environment is ready):
+// protoc --go_out=./ --go_opt=module=meshproxy \
+//   --go-grpc_out=./ --go-grpc_opt=module=meshproxy \
+//   proto/meshproxy.proto
+

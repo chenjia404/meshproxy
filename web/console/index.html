@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>meshproxy 控制台</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    .layout { display: flex; min-height: 100vh; }
+    .sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 1rem 0; flex-shrink: 0; }
+    .sidebar h2 { font-size: 0.85rem; font-weight: 600; color: var(--muted); padding: 0 1rem; margin: 0 0 0.5rem; }
+    .sidebar a { display: block; padding: 0.5rem 1rem; color: var(--text); text-decoration: none; font-size: 0.9rem; border-left: 3px solid transparent; }
+    .sidebar a:hover { background: rgba(255,255,255,0.05); }
+    .sidebar a.active { border-left-color: var(--accent); background: rgba(88,166,255,0.08); }
+    .main { flex: 1; padding: 1.5rem; overflow: auto; }
+    .main h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .card h3 { font-size: 0.95rem; margin: 0 0 0.75rem; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    tr:last-child td { border-bottom: 0; }
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 0.25rem 1rem; font-size: 0.875rem; }
+    .kv dt { color: var(--muted); margin: 0; }
+    .kv dd { margin: 0; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; }
+    .badge.ok { background: rgba(63,185,80,0.2); color: var(--ok); }
+    .badge.warn { background: rgba(210,153,34,0.2); color: var(--warn); }
+    .badge.err { background: rgba(248,81,73,0.2); color: var(--err); }
+    .log-line { font-family: ui-monospace, monospace; font-size: 0.8rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+    .log-line .ts { color: var(--muted); margin-right: 0.5rem; }
+    .log-line .cat { color: var(--accent); margin-right: 0.5rem; }
+    .empty { color: var(--muted); font-style: italic; }
+    .refresh { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .path-hop { display: inline-block; margin-right: 0.25rem; padding: 0.1rem 0.4rem; background: var(--border); border-radius: 4px; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav class="sidebar">
+      <h2>控制台</h2>
+      <a href="#status" data-page="status" class="active">節點狀態</a>
+      <a href="#relays" data-page="relays">Relay / Exit</a>
+      <a href="#circuits" data-page="circuits">Circuit 列表</a>
+      <a href="#streams" data-page="streams">Stream 列表</a>
+      <a href="#traffic" data-page="traffic">即時流量</a>
+      <a href="#routing" data-page="routing">路由規則</a>
+      <a href="#exit-policy" data-page="exit-policy">出口策略</a>
+      <a href="#logs" data-page="logs">日誌面板</a>
+    </nav>
+    <main class="main">
+      <div id="content"></div>
+    </main>
+  </div>
+  <script>
+    const API = ''; // same origin
+    function api(path) { return (API || '') + path; }
+    function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
+
+    function renderStatus(data) {
+      const pool = data.circuit_pool || {};
+      const poolHtml = Object.keys(pool.kinds || {}).length
+        ? '<dl class="kv"><dt>電路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(pool.kinds, null, 2) + '</pre></dd></dl>'
+        : '';
+      return `
+        <h1>節點狀態</h1>
+        <div class="card">
+          <h3>基本資訊</h3>
+          <dl class="kv">
+            <dt>Peer ID</dt><dd><code>${escapeHtml(data.peer_id || '-')}</code></dd>
+            <dt>模式</dt><dd><span class="badge ok">${escapeHtml(data.mode || '-')}</span></dd>
+            <dt>SOCKS5</dt><dd>${escapeHtml(data.socks5_listen || '-')}</dd>
+            <dt>運行時長</dt><dd>${formatUptime(data.uptime_seconds)}</dd>
+            <dt>已知 Relay</dt><dd>${data.relays_known ?? '-'}</dd>
+            <dt>已知 Exit</dt><dd>${data.exits_known ?? '-'}</dd>
+            <dt>P2P 監聽</dt><dd><pre style="margin:0;font-size:0.8rem">${(data.p2p_listen_addrs || []).map(escapeHtml).join('\n') || '-'}</pre></dd>
+          </dl>
+          ${poolHtml}
+        </div>
+      `;
+    }
+    function renderNodeTable(list, title) {
+      if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚無節點</p></div>';
+      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th></tr></thead><tbody>' +
+        list.map(n => '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td></tr>').join('') + '</tbody></table></div>';
+    }
+    function renderRelaysExits(relays, exits) {
+      const r = Array.isArray(relays) ? relays : [];
+      const e = Array.isArray(exits) ? exits : [];
+      return '<h1>Relay / Exit</h1>' + renderNodeTable(r, '已知 Relay') + renderNodeTable(e, '已知 Exit');
+    }
+    function renderCircuits(data) {
+      const list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前無電路</p></div>';
+      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>狀態</th><th>路徑</th><th>建立時間</th></tr></thead><tbody>' +
+        list.map(c => {
+          const path = (c.plan && c.plan.hops) ? c.plan.hops.map(h => '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>').join(' → ') : '-';
+          return '<tr><td><code>' + escapeHtml(c.id?.slice(0,8) || '-') + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + path + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    function renderStreams(data) {
+      const list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>Stream 列表</h1><div class="card"><p class="empty">目前無 stream</p></div>';
+      return '<h1>Stream 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>Circuit</th><th>目標</th><th>狀態</th></tr></thead><tbody>' +
+        list.map(s => '<tr><td><code>' + escapeHtml(s.id?.slice(0,8) || '-') + '</code></td><td><code>' + escapeHtml(s.circuit_id?.slice(0,8) || '-') + '</code></td><td>' + escapeHtml(s.target_host || '-') + ':' + (s.target_port || '-') + '</td><td>' + escapeHtml(s.state || '-') + '</td></tr>').join('') + '</tbody></table></div>';
+    }
+    function renderTraffic(data) {
+      if (!data || typeof data !== 'object') return '<h1>即時流量</h1><div class="card"><p class="empty">無法取得指標</p></div>';
+      return '<h1>即時流量</h1><div class="card"><h3>彙總</h3><dl class="kv">' +
+        '<dt>電路總數</dt><dd>' + (data.circuits_total ?? '-') + '</dd>' +
+        '<dt>活躍 Stream</dt><dd>' + (data.streams_active ?? '-') + '</dd>' +
+        '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
+        '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
+        '<dt>最近錯誤數</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' +
+        (data.pool_status && data.pool_status.kinds ? '<dt>電路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(data.pool_status.kinds, null, 2) + '</pre></dd>' : '') +
+        '</dl></div>';
+    }
+    function renderRouting() {
+      return '<h1>路由規則</h1><div class="card"><p class="empty">路由規則介面尚未開放，請透過設定檔或 API 設定。</p></div>';
+    }
+    function renderExitPolicy() {
+      return '<h1>出口策略</h1><div class="card"><p class="empty">出口策略介面尚未開放，請透過設定檔或 API 設定。</p></div>';
+    }
+    function renderLogs(data) {
+      const list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>日誌面板</h1><div class="card"><p class="empty">尚無最近錯誤紀錄</p></div>';
+      return '<h1>日誌面板</h1><div class="card"><h3>最近錯誤</h3>' +
+        list.map(e => '<div class="log-line"><span class="ts">' + (e.at ? new Date(e.at).toLocaleTimeString() : '') + '</span><span class="cat">[' + escapeHtml(e.category || '') + ']</span>' + escapeHtml(e.message || '') + '</div>').join('') + '</div>';
+    }
+    function escapeHtml(s) {
+      if (s == null) return '';
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+    function formatUptime(sec) {
+      if (sec == null) return '-';
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+      return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
+    }
+
+    const pages = {
+      status: () => get('/api/v1/status').then(renderStatus),
+      relays: () => Promise.all([get('/api/v1/relays').catch(() => []), get('/api/v1/exits').catch(() => [])]).then(([r,e]) => renderRelaysExits(r, e)),
+      circuits: () => get('/api/v1/circuits').then(renderCircuits),
+      streams: () => get('/api/v1/streams').then(renderStreams),
+      traffic: () => get('/api/v1/metrics/summary').then(renderTraffic),
+      routing: () => Promise.resolve(renderRouting()),
+      'exit-policy': () => Promise.resolve(renderExitPolicy()),
+      logs: () => get('/api/v1/errors/recent').then(renderLogs),
+    };
+    function show(page) {
+      const el = document.getElementById('content');
+      el.innerHTML = '<p class="refresh">載入中…</p>';
+      (pages[page] || pages.status)()
+        .then(html => { el.innerHTML = html; })
+        .catch(err => { el.innerHTML = '<div class="card"><p class="empty">載入失敗: ' + escapeHtml(err.message) + '</p></div>'; });
+    }
+    function onNav() {
+      const hash = (location.hash || '#status').slice(1) || 'status';
+      document.querySelectorAll('.sidebar a').forEach(a => { a.classList.toggle('active', a.dataset.page === hash); });
+      show(hash);
+    }
+    window.addEventListener('hashchange', onNav);
+    window.addEventListener('load', () => { onNav(); setInterval(onNav, 8000); });
+  </script>
+</body>
+</html>

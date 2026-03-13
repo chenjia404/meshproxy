@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  exit1:
+    build: .
+    container_name: meshproxy-exit1
+    command:
+      - "/usr/local/bin/meshproxy"
+      - "-config"
+      - "/app/config.yaml"
+      - "-mode"
+      - "relay+exit"
+      - "-socks5"
+      - "0.0.0.0:1080"
+      - "-api"
+      - "0.0.0.0:19080"
+    ports:
+      - "1080:1080"    # SOCKS5
+      - "19080:19080"  # API
+      - "4001:4001"    # P2P (from config.example.yaml)
+    networks:
+      - meshnet
+
+  relay1:
+    build: .
+    container_name: meshproxy-relay1
+    command:
+      - "/usr/local/bin/meshproxy"
+      - "-config"
+      - "/app/config.yaml"
+      - "-mode"
+      - "relay"
+      - "-socks5"
+      - "0.0.0.0:1080"
+      - "-api"
+      - "0.0.0.0:19080"
+    ports:
+      - "1081:1080"    # SOCKS5 for relay1
+      - "19081:19080"  # API for relay1
+      - "4002:4001"    # P2P for relay1
+    networks:
+      - meshnet
+
+  relay2:
+    build: .
+    container_name: meshproxy-relay2
+    command:
+      - "/usr/local/bin/meshproxy"
+      - "-config"
+      - "/app/config.yaml"
+      - "-mode"
+      - "relay"
+      - "-socks5"
+      - "0.0.0.0:1080"
+      - "-api"
+      - "0.0.0.0:19080"
+    ports:
+      - "1082:1080"    # SOCKS5 for relay2
+      - "19082:19080"  # API for relay2
+      - "4003:4001"    # P2P for relay2
+    networks:
+      - meshnet
+
+networks:
+  meshnet:
+    driver: bridge
+
