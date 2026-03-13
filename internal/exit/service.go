@@ -132,6 +132,7 @@ func (s *Service) serveStream(str network.Stream) {
 				writeMu.Lock()
 				_ = protocol.WriteFrame(str, outFrame)
 				writeMu.Unlock()
+				// 若連線建立失敗，僅回傳 CONNECTED 錯誤，不啟動後續數據泵。
 				if err != nil {
 					return
 				}
@@ -223,7 +224,9 @@ func (s *Service) closeConn(streamID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.conns[streamID]; ok {
-		_ = c.Close()
+		if c != nil {
+			_ = c.Close()
+		}
 		delete(s.conns, streamID)
 	}
 }
