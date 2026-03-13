@@ -98,6 +98,8 @@ func Default() Config {
 			ListenAddrs: []string{
 				"/ip4/0.0.0.0/tcp/4001",
 				"/ip6/::/tcp/4001",
+				"/ip4/0.0.0.0/udp/4001/quic-v1",
+				"/ip6/::/udp/4001/quic-v1",
 			},
 			BootstrapPeers: []string{
 				"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
