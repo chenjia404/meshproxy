@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -11,6 +12,7 @@ import (
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -23,9 +25,21 @@ type Host struct {
 
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
 func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*Host, error) {
+
+	connmgr_, _ := connmgr.NewConnManager(
+		50,  // Lowwater
+		400, // HighWater,
+		connmgr.WithGracePeriod(time.Minute),
+	)
+
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.UserAgent("meshproxy"),
+
+		//尝试开启upnp协议
+		libp2p.NATPortMap(),
+		libp2p.EnableNATService(),
+
 		libp2p.DefaultTransports,
 		libp2p.Security(noise.ID, noise.New),
 		// 中繼功能配置
@@ -41,6 +55,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 			d, err = dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
 			return d, err
 		}),
+		libp2p.ConnectionManager(connmgr_),
 	}
 
 	for _, addrStr := range listenAddrs {
