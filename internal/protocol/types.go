@@ -60,6 +60,21 @@ type EndCell struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// Ping represents a heartbeat ping request sent over an established circuit.
+type Ping struct {
+	CircuitID  string `json:"circuit_id"`
+	PingID     string `json:"ping_id"`
+	SentAtUnix int64  `json:"sent_at_unix"`
+}
+
+// Pong represents a heartbeat pong response from the exit node.
+type Pong struct {
+	CircuitID  string `json:"circuit_id"`
+	PingID     string `json:"ping_id"`
+	SentAtUnix int64  `json:"sent_at_unix"`
+	EchoAtUnix int64  `json:"echo_at_unix"`
+}
+
 // KeyExchangeInit is the JSON representation of a per-hop key exchange
 // initiation payload. The concrete cryptographic scheme is intentionally
 // left opaque at this layer.
@@ -85,10 +100,10 @@ type OnionCell struct {
 // onion implementation. Ciphertext carries the JSON-encoded OnionInner,
 // which then wraps either a BeginTCP, BeginUDP or DataCell.
 type OnionInner struct {
-	Kind     string     `json:"kind"`              // "begin" | "begin_udp" | "data"
-	Begin    *BeginTCP  `json:"begin,omitempty"`   // present when Kind == "begin"
-	BeginUDP *BeginUDP  `json:"begin_udp,omitempty"`
-	Data     *DataCell  `json:"data,omitempty"`     // present when Kind == "data"
+	Kind     string    `json:"kind"`            // "begin" | "begin_udp" | "data"
+	Begin    *BeginTCP `json:"begin,omitempty"` // present when Kind == "begin"
+	BeginUDP *BeginUDP `json:"begin_udp,omitempty"`
+	Data     *DataCell `json:"data,omitempty"` // present when Kind == "data"
 }
 
 // HopKeys describes the forward and backward keys for a single hop.
@@ -116,23 +131,23 @@ const (
 // HopSession 表示與單一 hop 的會話：X25519 臨時密鑰、共享密鑰、派生出的 forward/backward 密鑰及計數器。
 // 密鑰材料不通過 API 輸出。
 type HopSession struct {
-	PeerID          string    `json:"peer_id"`
-	Role            HopRole   `json:"role"`
-	EphemeralPub    []byte    `json:"ephemeral_pub,omitempty"`    // 本端臨時公鑰（可對外）
-	SharedSecret    []byte    `json:"-"`                         // 不序列化
-	ForwardKey      []byte    `json:"-"`
-	BackwardKey     []byte    `json:"-"`
-	ForwardCounter  uint64    `json:"-"`
-	BackwardCounter uint64    `json:"-"`
-	CreatedAt       int64     `json:"created_at,omitempty"`
+	PeerID          string  `json:"peer_id"`
+	Role            HopRole `json:"role"`
+	EphemeralPub    []byte  `json:"ephemeral_pub,omitempty"` // 本端臨時公鑰（可對外）
+	SharedSecret    []byte  `json:"-"`                       // 不序列化
+	ForwardKey      []byte  `json:"-"`
+	BackwardKey     []byte  `json:"-"`
+	ForwardCounter  uint64  `json:"-"`
+	BackwardCounter uint64  `json:"-"`
+	CreatedAt       int64   `json:"created_at,omitempty"`
 }
 
 // RelayLayerHeader 是 relay 解開一層後可見的局部控制信息（下一跳、內層類型等）。
 type RelayLayerHeader struct {
-	NextPeerID     string `json:"next_peer_id"`
+	NextPeerID       string `json:"next_peer_id"`
 	InnerPayloadType string `json:"inner_payload_type"` // "onion" | "payload"
-	StreamID       string `json:"stream_id,omitempty"`
-	Flags          uint8  `json:"flags,omitempty"`
+	StreamID         string `json:"stream_id,omitempty"`
+	Flags            uint8  `json:"flags,omitempty"`
 }
 
 // InnerPayloadType 內層業務負載類型。
@@ -142,19 +157,30 @@ const (
 	InnerPayloadTypeKeyExchange = "key_exchange" // extend 時轉發給下一跳的 32 字節公鑰
 )
 
+const (
+	OnionPayloadKindBegin     = "begin"
+	OnionPayloadKindBeginUDP  = "begin_udp"
+	OnionPayloadKindData      = "data"
+	OnionPayloadKindEnd       = "end"
+	OnionPayloadKindConnected = "connected"
+	OnionPayloadKindPing      = "ping"
+	OnionPayloadKindPong      = "pong"
+)
+
 // OnionPayload 表示最內層業務命令（exit 解密後得到）。
 type OnionPayload struct {
-	Kind      string     `json:"kind"` // "begin" | "begin_udp" | "data" | "end" | "connected" | "window_update"
+	Kind      string     `json:"kind"` // see OnionPayloadKind*
 	Begin     *BeginTCP  `json:"begin,omitempty"`
 	BeginUDP  *BeginUDP  `json:"begin_udp,omitempty"`
 	Data      *DataCell  `json:"data,omitempty"`
 	End       *EndCell   `json:"end,omitempty"`
 	Connected *Connected `json:"connected,omitempty"`
+	Ping      *Ping      `json:"ping,omitempty"`
+	Pong      *Pong      `json:"pong,omitempty"`
 }
 
 // OnionEnvelope 是單層洋蔥：Relay 解開後得到 Header + InnerCiphertext（或轉發給下一跳）。
 type OnionEnvelope struct {
-	Header         RelayLayerHeader `json:"header"`
-	InnerCiphertext []byte          `json:"inner_ciphertext"`
+	Header          RelayLayerHeader `json:"header"`
+	InnerCiphertext []byte           `json:"inner_ciphertext"`
 }
-

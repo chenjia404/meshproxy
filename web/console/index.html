@@ -201,10 +201,11 @@
     function renderCircuits(data) {
       const list = Array.isArray(data) ? data : [];
       if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前無電路</p></div>';
-      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>狀態</th><th>路徑</th><th>發送</th><th>接收</th><th>建立時間</th></tr></thead><tbody>' +
+      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>狀態</th><th>心跳</th><th>路徑</th><th>發送</th><th>接收</th><th>建立時間</th></tr></thead><tbody>' +
         list.map(c => {
           const path = (c.plan && c.plan.hops) ? c.plan.hops.map(h => '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>').join(' → ') : '-';
-          return '<tr><td><code>' + escapeHtml(c.id?.slice(0,8) || '-') + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>';
+          const heartbeatInfo = formatHealth(c.alive, c.smoothed_rtt_ms, c.consecutive_failures, c.last_ping_at, c.last_pong_at);
+          return '<tr><td><code>' + escapeHtml(c.id?.slice(0,8) || '-') + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + heartbeatInfo + '</td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>';
         }).join('') + '</tbody></table></div>';
     }
     function renderStreams(data) {
@@ -348,6 +349,28 @@
         return Math.round(n) + ' ' + units[idx];
       }
       return n.toFixed(1) + ' ' + units[idx];
+    }
+    function formatHealth(alive, rtt, failures, lastPing, lastPong) {
+      const badgeClass = alive ? 'badge ok' : 'badge err';
+      const label = alive ? '正常' : '失联';
+      const rttNum = Number(rtt);
+      const rttText = Number.isFinite(rttNum) ? rttNum.toFixed(1) + ' ms' : '—';
+      const failureText = failures > 0 ? ' fail×' + failures : '';
+      const titleParts = [];
+      if (lastPing) {
+        const d = new Date(lastPing);
+        if (!Number.isNaN(d.valueOf())) {
+          titleParts.push('Ping: ' + d.toLocaleTimeString());
+        }
+      }
+      if (lastPong) {
+        const d = new Date(lastPong);
+        if (!Number.isNaN(d.valueOf())) {
+          titleParts.push('Pong: ' + d.toLocaleTimeString());
+        }
+      }
+      const title = titleParts.length ? titleParts.join(' / ') : '心跳状态';
+      return '<span class="' + badgeClass + '" title="' + escapeHtml(title) + '">' + label + (alive && rttText !== '—' ? ' ' + rttText : '') + failureText + '</span>';
     }
     function formatUptime(sec) {
       if (sec == null) return '-';

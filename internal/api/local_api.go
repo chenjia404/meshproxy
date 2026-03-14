@@ -65,17 +65,22 @@ type StreamInfoResponse struct {
 
 // CircuitInfoResponse enriches protocol.CircuitInfo with derived fields for API.
 type CircuitInfoResponse struct {
-	ID            string                `json:"id"`
-	State         protocol.CircuitState `json:"state"`
-	Plan          protocol.PathPlan     `json:"plan"`
-	RelayPeerID   string                `json:"relay_peer_id,omitempty"`
-	ExitPeerID    string                `json:"exit_peer_id,omitempty"`
-	HopCount      int                   `json:"hop_count"`
-	StreamCount   int                   `json:"stream_count"`
-	CreatedAt     time.Time             `json:"created_at"`
-	UpdatedAt     time.Time             `json:"updated_at"`
-	BytesSent     uint64                `json:"bytes_sent"`
-	BytesReceived uint64                `json:"bytes_received"`
+	ID                  string                `json:"id"`
+	State               protocol.CircuitState `json:"state"`
+	Plan                protocol.PathPlan     `json:"plan"`
+	RelayPeerID         string                `json:"relay_peer_id,omitempty"`
+	ExitPeerID          string                `json:"exit_peer_id,omitempty"`
+	HopCount            int                   `json:"hop_count"`
+	StreamCount         int                   `json:"stream_count"`
+	CreatedAt           time.Time             `json:"created_at"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+	BytesSent           uint64                `json:"bytes_sent"`
+	BytesReceived       uint64                `json:"bytes_received"`
+	LastPingAt          time.Time             `json:"last_ping_at"`
+	LastPongAt          time.Time             `json:"last_pong_at"`
+	Alive               bool                  `json:"alive"`
+	ConsecutiveFailures int                   `json:"consecutive_failures"`
+	SmoothedRTTMillis   float64               `json:"smoothed_rtt_ms"`
 }
 
 // PoolKindStatusResponse is one pool kind's status for API.
@@ -300,17 +305,22 @@ func (a *LocalAPI) handleCircuits(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = append(out, CircuitInfoResponse{
-			ID:            c.ID,
-			State:         c.State,
-			Plan:          c.Plan,
-			RelayPeerID:   relayPeerID,
-			ExitPeerID:    exitPeerID,
-			HopCount:      hopCount,
-			StreamCount:   streamCounts[c.ID],
-			CreatedAt:     c.CreatedAt,
-			UpdatedAt:     c.UpdatedAt,
-			BytesSent:     c.BytesSent,
-			BytesReceived: c.BytesReceived,
+			ID:                  c.ID,
+			State:               c.State,
+			Plan:                c.Plan,
+			RelayPeerID:         relayPeerID,
+			ExitPeerID:          exitPeerID,
+			HopCount:            hopCount,
+			StreamCount:         streamCounts[c.ID],
+			CreatedAt:           c.CreatedAt,
+			UpdatedAt:           c.UpdatedAt,
+			BytesSent:           c.BytesSent,
+			BytesReceived:       c.BytesReceived,
+			LastPingAt:          c.LastPingAt,
+			LastPongAt:          c.LastPongAt,
+			Alive:               c.Alive,
+			ConsecutiveFailures: c.ConsecutiveFailures,
+			SmoothedRTTMillis:   c.SmoothedRTTMillis,
 		})
 	}
 	writeJSON(w, out)

@@ -192,6 +192,7 @@ func (m *CircuitManager) CloseCircuit(circuitID string) {
 	if rec != nil {
 		rec.State = protocol.CircuitClosed
 		rec.UpdatedAt = time.Now()
+		rec.Alive = false
 		m.store.Upsert(rec)
 	}
 	m.mu.Unlock()
@@ -208,7 +209,7 @@ func (m *CircuitManager) IsCircuitOpen(circuitID string) bool {
 		return false
 	}
 	rec, ok := m.store.Get(circuitID)
-	return ok && rec != nil && rec.State == protocol.CircuitOpen
+	return ok && rec != nil && rec.State == protocol.CircuitOpen && rec.Alive
 }
 
 // ReturnToPool returns a circuit to the pool for reuse (call when SOCKS5 connection ends cleanly).
@@ -252,10 +253,12 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 		Plan:      plan,
 		CreatedAt: now,
 		UpdatedAt: now,
+		Alive:     true,
 	}
 	m.store.Upsert(rec)
 	rec.State = protocol.CircuitCreating
 	rec.UpdatedAt = time.Now()
+	rec.Alive = true
 	m.store.Upsert(rec)
 
 	// 連到第一跳（relay 或直連 exit）
@@ -398,6 +401,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	m.mu.Lock()
 	rec.State = protocol.CircuitOpen
 	rec.UpdatedAt = time.Now()
+	rec.Alive = true
 	m.store.Upsert(rec)
 	go m.readLoop(id, stream)
 	m.mu.Unlock()
@@ -410,6 +414,7 @@ func (m *CircuitManager) closeCircuitLocked(id string) {
 	if rec, ok := m.store.Get(id); ok && rec != nil {
 		rec.State = protocol.CircuitClosed
 		rec.UpdatedAt = time.Now()
+		rec.Alive = false
 		m.store.Upsert(rec)
 	}
 	delete(m.activeStreams, id)
@@ -426,6 +431,7 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 		if rec, ok := m.store.Get(circuitID); ok && rec != nil {
 			rec.State = protocol.CircuitClosed
 			rec.UpdatedAt = time.Now()
+			rec.Alive = false
 			m.store.Upsert(rec)
 		}
 		m.mu.Unlock()
@@ -558,6 +564,7 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 		}
 		return nil
 	case <-ctx.Done():
+		m.markCircuitTimeout(circuitID)
 		return fmt.Errorf("wait for CONNECTED timed out")
 	}
 }
@@ -612,6 +619,7 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 		}
 		return nil
 	case <-ctx.Done():
+		m.markCircuitTimeout(circuitID)
 		return fmt.Errorf("wait for CONNECTED (udp) timed out")
 	}
 }
@@ -709,4 +717,18 @@ func (m *CircuitManager) addCircuitBytes(circuitID string, sent, recv uint64) {
 		return
 	}
 	m.store.AddStats(circuitID, sent, recv)
+}
+
+func (m *CircuitManager) markCircuitTimeout(circuitID string) {
+	if m.store == nil {
+		return
+	}
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return
+	}
+	rec.Alive = false
+	rec.ConsecutiveFailures++
+	rec.UpdatedAt = time.Now()
+	m.store.Upsert(rec)
 }

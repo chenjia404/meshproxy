@@ -3,6 +3,7 @@ package exit
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -24,7 +25,7 @@ const maxRecentRejects = 20
 // RejectEntry 單條拒絕記錄，供 API status 使用。
 type RejectEntry struct {
 	Reason string    `json:"reason"`
-	At    time.Time `json:"at"`
+	At     time.Time `json:"at"`
 }
 
 // udpSession 表示一個 UDP 會話：出口端用一個 UDPConn 與目標 host:port 收發報文。
@@ -241,6 +242,36 @@ func (s *Service) serveStream(str network.Stream) {
 						s.closeUDPSession(frame.StreamID)
 					}
 				}
+			case protocol.OnionPayloadKindPing:
+				if payload.Ping == nil {
+					continue
+				}
+				log.Printf("[exit] heartbeat_ping_received circuit=%s ping=%s", frame.CircuitID, payload.Ping.PingID)
+				pong := protocol.Pong{
+					CircuitID:  frame.CircuitID,
+					PingID:     payload.Ping.PingID,
+					SentAtUnix: payload.Ping.SentAtUnix,
+					EchoAtUnix: time.Now().UnixMilli(),
+				}
+				pongPayload := protocol.OnionPayload{
+					Kind: protocol.OnionPayloadKindPong,
+					Pong: &pong,
+				}
+				pongJSON, _ := json.Marshal(pongPayload)
+				wrapped, err := s.wrapBackward(streamKey, frame.CircuitID, frame.StreamID, pongJSON)
+				if err != nil {
+					continue
+				}
+				pongFrame := protocol.Frame{
+					Type:        protocol.MsgTypeOnionData,
+					CircuitID:   frame.CircuitID,
+					StreamID:    frame.StreamID,
+					PayloadJSON: wrapped,
+				}
+				writeMu.Lock()
+				_ = protocol.WriteFrame(str, pongFrame)
+				writeMu.Unlock()
+				log.Printf("[exit] heartbeat_pong_sent circuit=%s ping=%s", frame.CircuitID, payload.Ping.PingID)
 			default:
 				// ignore
 			}

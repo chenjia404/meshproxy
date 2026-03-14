@@ -14,11 +14,16 @@ type CircuitRecord struct {
 	Plan  protocol.PathPlan
 	// Keys holds per-hop forward/backward keys for this circuit. It will
 	// remain nil until key negotiation is implemented.
-	Keys          *protocol.CircuitKeys
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	BytesSent     uint64
-	BytesReceived uint64
+	Keys                *protocol.CircuitKeys
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	BytesSent           uint64
+	BytesReceived       uint64
+	LastPingAt          time.Time
+	LastPongAt          time.Time
+	ConsecutiveFailures int
+	SmoothedRTT         time.Duration
+	Alive               bool
 }
 
 // CircuitStore keeps track of all circuits in memory.
@@ -57,13 +62,18 @@ func (s *CircuitStore) GetAll() []protocol.CircuitInfo {
 	out := make([]protocol.CircuitInfo, 0, len(s.circuits))
 	for _, rec := range s.circuits {
 		out = append(out, protocol.CircuitInfo{
-			ID:            rec.ID,
-			State:         rec.State,
-			Plan:          rec.Plan,
-			CreatedAt:     rec.CreatedAt,
-			UpdatedAt:     rec.UpdatedAt,
-			BytesSent:     rec.BytesSent,
-			BytesReceived: rec.BytesReceived,
+			ID:                  rec.ID,
+			State:               rec.State,
+			Plan:                rec.Plan,
+			CreatedAt:           rec.CreatedAt,
+			UpdatedAt:           rec.UpdatedAt,
+			BytesSent:           rec.BytesSent,
+			BytesReceived:       rec.BytesReceived,
+			LastPingAt:          rec.LastPingAt,
+			LastPongAt:          rec.LastPongAt,
+			ConsecutiveFailures: rec.ConsecutiveFailures,
+			SmoothedRTTMillis:   float64(rec.SmoothedRTT.Nanoseconds()) / 1e6,
+			Alive:               rec.Alive,
 		})
 	}
 	return out
@@ -79,6 +89,23 @@ func (s *CircuitStore) AddStats(id string, sent, recv uint64) {
 	if rec, ok := s.circuits[id]; ok && rec != nil {
 		rec.BytesSent += sent
 		rec.BytesReceived += recv
+		rec.UpdatedAt = time.Now()
+	}
+}
+
+// SetHealth updates heartbeat-related metadata for the given circuit.
+func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.Time, consecutiveFailures int, smoothedRTT time.Duration) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.circuits[id]; ok && rec != nil {
+		rec.Alive = alive
+		rec.LastPingAt = lastPing
+		rec.LastPongAt = lastPong
+		rec.ConsecutiveFailures = consecutiveFailures
+		rec.SmoothedRTT = smoothedRTT
 		rec.UpdatedAt = time.Now()
 	}
 }
