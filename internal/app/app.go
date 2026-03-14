@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"github.com/chenjia404/meshproxy/internal/api"
 	"github.com/chenjia404/meshproxy/internal/client"
@@ -16,9 +19,10 @@ import (
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/geoip"
 	"github.com/chenjia404/meshproxy/internal/identity"
-	"github.com/chenjia404/meshproxy/internal/relay"
-	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/p2p"
+	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/relay"
+	"github.com/chenjia404/meshproxy/internal/relaycache"
 	"github.com/chenjia404/meshproxy/internal/store"
 )
 
@@ -40,21 +44,35 @@ type App struct {
 	socks5   *client.Socks5Server
 	localAPI *api.LocalAPI
 
-	circuitStore    *store.CircuitStore
-	pathSelector    *client.PathSelector
-	circuitManager  *client.CircuitManager
-	streamMgr       *client.StreamManager
+	circuitStore   *store.CircuitStore
+	pathSelector   *client.PathSelector
+	circuitManager *client.CircuitManager
+	streamMgr      *client.StreamManager
 	recentErrors   *api.RecentErrorsStore
+	relayCache     *relaycache.Cache
 }
 
 // New creates and initializes a new App instance.
 func New(ctx context.Context, cfg config.Config) (*App, error) {
+	if cfg.DataDir == "" {
+		cfg.DataDir = "data"
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	cachePath := filepath.Join(cfg.DataDir, "relays.json")
+	relayCache, err := relaycache.New(cachePath)
+	if err != nil {
+		return nil, fmt.Errorf("init relay cache: %w", err)
+	}
+
 	a := &App{
-		ctx:       ctx,
-		cfg:       cfg,
-		startTime: time.Now(),
-		store:     store.NewMemoryStore(),
+		ctx:          ctx,
+		cfg:          cfg,
+		startTime:    time.Now(),
+		store:        store.NewMemoryStore(),
 		circuitStore: store.NewCircuitStore(),
+		relayCache:   relayCache,
 	}
 
 	// Identity
@@ -101,6 +119,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
+	if a.relayCache != nil {
+		cfg.P2P.BootstrapPeers = appendUniquePeers(cfg.P2P.BootstrapPeers, a.relayCache.Addrs())
+		a.cfg.P2P.BootstrapPeers = cfg.P2P.BootstrapPeers
+	}
+	go a.runRelayCache(ctx)
 
 	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
 	go runPeerAddrLearner(ctx, h.Host, dhtComp.Routing(), discoveryStore, 25*time.Second)
@@ -172,6 +195,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	socks := client.NewSocks5Server(cfg.Socks5.Listen, cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
+	socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
 	if err := socks.Start(); err != nil {
 		return nil, fmt.Errorf("start socks5: %w", err)
 	}
@@ -179,18 +203,18 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	// Local API (full observability: status, nodes, relays, exits, circuits, streams, pool, scores, errors, metrics)
 	opts := &api.LocalAPIOpts{
-		Relays:         discoveryStore,
-		Exits:          discoveryStore,
-		Streams:        &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
-		Pool:           &poolStatusAPIAdapter{cm: cm},
-		Scores:         &scoresPlaceholder{},
-		Errors:         a.recentErrors,
-		Metrics:        &metricsSummaryAdapter{app: a},
+		Relays:              discoveryStore,
+		Exits:               discoveryStore,
+		Streams:             &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
+		Pool:                &poolStatusAPIAdapter{cm: cm},
+		Scores:              &scoresPlaceholder{},
+		Errors:              a.recentErrors,
+		Metrics:             &metricsSummaryAdapter{app: a},
 		ExitSelection:       selector,
 		ExitCandidates:      selector,
 		ExitCountryResolver: selector,
 		ConfigPath:          cfg.ConfigFilePath,
-		ExitService:    exitSvc,
+		ExitService:         exitSvc,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()
@@ -393,15 +417,132 @@ func (m *metricsSummaryAdapter) GetSummary() map[string]any {
 		}
 	}
 	return map[string]any{
-		"mode":               a.Mode(),
-		"peer_id":            a.PeerID(),
-		"uptime_seconds":     int64(time.Since(a.StartTime()).Seconds()),
-		"circuits_total":     len(circuits),
-		"streams_active":     len(streams),
-		"relays_known":       len(relays),
-		"exits_known":        len(exits),
+		"mode":                a.Mode(),
+		"peer_id":             a.PeerID(),
+		"uptime_seconds":      int64(time.Since(a.StartTime()).Seconds()),
+		"circuits_total":      len(circuits),
+		"streams_active":      len(streams),
+		"relays_known":        len(relays),
+		"exits_known":         len(exits),
 		"errors_recent_count": errorsCount,
-		"pool_status":       poolStatus,
+		"pool_status":         poolStatus,
 	}
 }
 
+func appendUniquePeers(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base))
+	for _, addr := range base {
+		seen[addr] = struct{}{}
+	}
+	for _, addr := range extra {
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		base = append(base, addr)
+		seen[addr] = struct{}{}
+	}
+	return base
+}
+
+func (a *App) runRelayCache(ctx context.Context) {
+	if a.relayCache == nil || a.discovery == nil {
+		return
+	}
+	a.syncRelayCache()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.syncRelayCache()
+		}
+	}
+}
+
+func (a *App) syncRelayCache() {
+	if a.relayCache == nil || a.discovery == nil {
+		return
+	}
+	for _, desc := range a.discovery.Store().ListRelays() {
+		addrs := a.relayAddrs(desc)
+		if len(addrs) == 0 {
+			continue
+		}
+		if err := a.relayCache.Add(desc.PeerID, addrs); err != nil {
+			log.Printf("[relaycache] persist relay %s: %v", desc.PeerID, err)
+		}
+	}
+}
+
+func (a *App) relayAddrs(desc *discovery.NodeDescriptor) []string {
+	if desc == nil {
+		return nil
+	}
+	if a.host != nil {
+		if pid, err := peer.Decode(desc.PeerID); err == nil {
+			if addrs := filterMultiaddrStrings(a.Host().Peerstore().Addrs(pid)); len(addrs) > 0 {
+				return addrs
+			}
+		}
+	}
+	return filterAddrStrings(desc.ListenAddrs)
+}
+
+func filterMultiaddrStrings(maddrs []multiaddr.Multiaddr) []string {
+	if len(maddrs) == 0 {
+		return nil
+	}
+	strs := make([]string, 0, len(maddrs))
+	for _, m := range maddrs {
+		strs = append(strs, m.String())
+	}
+	return filterAddrStrings(strs)
+}
+
+func filterAddrStrings(addrs []string) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		maddr, err := multiaddr.NewMultiaddr(addr)
+		if err != nil || !hasRealIP(maddr) {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+func hasRealIP(m multiaddr.Multiaddr) bool {
+	if m == nil {
+		return false
+	}
+	if v, err := m.ValueForProtocol(multiaddr.P_IP4); err == nil {
+		if v != "" && v != "0.0.0.0" {
+			return true
+		}
+	}
+	if v, err := m.ValueForProtocol(multiaddr.P_IP6); err == nil {
+		if v != "" && v != "::" {
+			return true
+		}
+	}
+	return false
+}
