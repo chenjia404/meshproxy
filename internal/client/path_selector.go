@@ -6,9 +6,9 @@ import (
 	"log"
 	"sync"
 
-	"meshproxy/internal/config"
-	"meshproxy/internal/discovery"
-	"meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
 // PathSelector chooses appropriate relay/exit paths based on discovery information and exit selection config.

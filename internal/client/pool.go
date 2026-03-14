@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/config"
 )
 
 // PoolKind is the circuit pool type by use case.

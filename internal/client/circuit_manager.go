@@ -14,8 +14,8 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
-	"meshproxy/internal/protocol"
-	"meshproxy/internal/store"
+	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/store"
 )
 
 // CircuitManager manages circuit lifecycle and delegates storage to CircuitStore.

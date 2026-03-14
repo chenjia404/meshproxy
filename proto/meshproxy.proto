@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package meshproxy;
 
-option go_package = "meshproxy/proto;meshproxyproto";
+option go_package = "github.com/chenjia404/meshproxy/proto;meshproxyproto";
 
 // NodeDescriptor describes a node's capabilities and public information.
 message NodeDescriptor {

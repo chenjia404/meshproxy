@@ -10,7 +10,7 @@ import (
 	host "github.com/libp2p/go-libp2p/core/host"
 	network "github.com/libp2p/go-libp2p/core/network"
 
-	"meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
 // Service implements the exit node: performs per-stream key exchange with the

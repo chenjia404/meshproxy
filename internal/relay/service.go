@@ -14,7 +14,7 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
-	"meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
 // Service 實現 relay 節點：與客戶端做每跳密鑰協商，收到 OnionData 時只解一層，將內層密文轉發給 next_hop。

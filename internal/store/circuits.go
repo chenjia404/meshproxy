@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
 // CircuitRecord stores mutable information about a circuit.

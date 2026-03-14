@@ -9,16 +9,16 @@ import (
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
-	"meshproxy/internal/api"
-	"meshproxy/internal/client"
-	"meshproxy/internal/config"
-	"meshproxy/internal/discovery"
-	"meshproxy/internal/exit"
-	"meshproxy/internal/identity"
-	"meshproxy/internal/relay"
-	"meshproxy/internal/protocol"
-	"meshproxy/internal/p2p"
-	"meshproxy/internal/store"
+	"github.com/chenjia404/meshproxy/internal/api"
+	"github.com/chenjia404/meshproxy/internal/client"
+	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/exit"
+	"github.com/chenjia404/meshproxy/internal/identity"
+	"github.com/chenjia404/meshproxy/internal/relay"
+	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/p2p"
+	"github.com/chenjia404/meshproxy/internal/store"
 )
 
 // App is the main meshproxy application wiring together all components.

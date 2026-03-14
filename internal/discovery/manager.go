@@ -8,7 +8,7 @@ import (
 
 	host "github.com/libp2p/go-libp2p/core/host"
 
-	"meshproxy/internal/p2p"
+	"github.com/chenjia404/meshproxy/internal/p2p"
 )
 
 // Manager manages node discovery through gossip and local cache.

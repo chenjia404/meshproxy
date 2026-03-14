@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"meshproxy/internal/config"
-	"meshproxy/internal/discovery"
-	"meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
 //go:embed console/*

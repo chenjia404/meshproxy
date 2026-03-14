@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"meshproxy/internal/app"
-	"meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/app"
+	"github.com/chenjia404/meshproxy/internal/config"
 )
 
 func main() {

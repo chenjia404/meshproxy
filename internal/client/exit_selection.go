@@ -3,8 +3,8 @@ package client
 import (
 	"strings"
 
-	"meshproxy/internal/config"
-	"meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/discovery"
 )
 
 // exitCountry returns the exit node's country code (from ExitInfo); empty if unknown.
