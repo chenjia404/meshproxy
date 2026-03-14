@@ -19,11 +19,34 @@
     * { box-sizing: border-box; }
     body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
     .layout { display: flex; min-height: 100vh; }
-    .sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 1rem 0; flex-shrink: 0; }
+    .sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 1rem 0; flex-shrink: 0; position: relative; transition: width 0.2s ease, border 0.2s ease; }
     .sidebar h2 { font-size: 0.85rem; font-weight: 600; color: var(--muted); padding: 0 1rem; margin: 0 0 0.5rem; }
     .sidebar a { display: block; padding: 0.5rem 1rem; color: var(--text); text-decoration: none; font-size: 0.9rem; border-left: 3px solid transparent; }
     .sidebar a:hover { background: rgba(255,255,255,0.05); }
     .sidebar a.active { border-left-color: var(--accent); background: rgba(88,166,255,0.08); }
+    .sidebar .nav-label {}
+    .collapse-toggle {
+      position: absolute;
+      top: 0.6rem;
+      right: 0.5rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      padding: 0.25rem 0.55rem;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.2rem;
+      transition: background 0.15s ease;
+    }
+    .collapse-toggle:hover { background: rgba(255,255,255,0.04); }
+    .sidebar.collapsed { width: 64px; border-right-color: rgba(255,255,255,0.08); }
+    .sidebar.collapsed .sidebar-title { display: none; }
+    .sidebar.collapsed .nav-label { display: none; }
+    .sidebar.collapsed a { padding: 0.4rem 0; text-align: center; border-left: none; }
+    .sidebar.collapsed .collapse-toggle { right: 0.35rem; }
     .main { flex: 1; padding: 1.5rem; overflow: auto; }
     .main h1 { font-size: 1.25rem; margin: 0 0 1rem; }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
@@ -64,21 +87,76 @@
     .msg { padding: 0.5rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.875rem; }
     .msg.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
     .msg.err { background: rgba(248,81,73,0.15); color: var(--err); }
+    @media (max-width: 900px) {
+      .layout { flex-direction: column; }
+      .sidebar {
+        width: 100%;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 0.3rem;
+        padding: 0.5rem 0.75rem;
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: var(--panel);
+      }
+      .sidebar h2 { display: none; }
+      .sidebar a {
+        flex: 1 1 120px;
+        border-left: none;
+        border-radius: 6px;
+        text-align: center;
+        font-size: 0.8rem;
+        padding: 0.4rem 0.5rem;
+      }
+      .main { padding: 1rem; }
+    }
+    @media (max-width: 640px) {
+      .sidebar {
+        justify-content: flex-start;
+        overflow-x: auto;
+      }
+      .sidebar a {
+        flex: 0 0 auto;
+        min-width: 120px;
+        white-space: nowrap;
+      }
+      .card {
+        padding: 0.9rem;
+      }
+      .kv {
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 0.25rem 0.85rem;
+      }
+      .card table {
+        font-size: 0.78rem;
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .main {
+        padding-top: 1rem;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="layout">
     <nav class="sidebar">
-      <h2>控制台</h2>
-      <a href="#status" data-page="status" class="active">节点状态</a>
-      <a href="#relays" data-page="relays">Relay / Exit</a>
-      <a href="#circuits" data-page="circuits">Circuit 列表</a>
-      <a href="#streams" data-page="streams">Stream 列表</a>
-      <a href="#traffic" data-page="traffic">实时流量</a>
-      <a href="#routing" data-page="routing">路由规则</a>
-      <a href="#exit-policy" data-page="exit-policy">出口选择</a>
-      <a href="#exit-operator-policy" data-page="exit-operator-policy">出口政策</a>
-      <a href="#logs" data-page="logs">日志面板</a>
+      <button class="collapse-toggle" type="button" aria-label="折叠菜单" aria-pressed="false">☰</button>
+      <h2 class="sidebar-title">控制台</h2>
+      <a href="#status" data-page="status" class="active"><span class="nav-label">节点状态</span></a>
+      <a href="#relays" data-page="relays"><span class="nav-label">Relay / Exit</span></a>
+      <a href="#circuits" data-page="circuits"><span class="nav-label">Circuit 列表</span></a>
+      <a href="#streams" data-page="streams"><span class="nav-label">Stream 列表</span></a>
+      <a href="#traffic" data-page="traffic"><span class="nav-label">实时流量</span></a>
+      <a href="#routing" data-page="routing"><span class="nav-label">路由规则</span></a>
+      <a href="#exit-policy" data-page="exit-policy"><span class="nav-label">出口选择</span></a>
+      <a href="#exit-operator-policy" data-page="exit-operator-policy"><span class="nav-label">出口政策</span></a>
+      <a href="#logs" data-page="logs"><span class="nav-label">日志面板</span></a>
     </nav>
     <main class="main">
       <div id="content"></div>
@@ -426,6 +504,32 @@
     function escapeHtml(s) { if (s == null) return ''; var div = document.createElement('div'); div.textContent = s; return div.innerHTML; }
     function formatUptime(sec) { if (sec == null) return '-'; var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60); return [h,m,s].map(function(v){ return String(v).padStart(2,'0'); }).join(':'); }
 
+    var COLLAPSE_KEY = 'meshproxy-console-sidebar-collapsed';
+    var sidebar = document.querySelector('.sidebar');
+    var collapseToggle = document.querySelector('.collapse-toggle');
+    function applySidebarState(collapsed) {
+      if (!sidebar) return;
+      sidebar.classList.toggle('collapsed', collapsed);
+      if (collapseToggle) {
+        collapseToggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+      }
+    }
+    function readSavedState() {
+      try {
+        return localStorage.getItem(COLLAPSE_KEY) === '1';
+      } catch (e) { return false; }
+    }
+    function writeState(value) {
+      try { localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0'); } catch (e) {}
+    }
+    if (sidebar && collapseToggle) {
+      applySidebarState(readSavedState());
+      collapseToggle.addEventListener('click', function() {
+        var nextState = !sidebar.classList.contains('collapsed');
+        applySidebarState(nextState);
+        writeState(nextState);
+      });
+    }
     var pages = {
       status: function(){ return get('/api/v1/status').then(renderStatus); },
       relays: function(){ return Promise.all([get('/api/v1/relays').catch(function(){ return []; }), get('/api/v1/exits').catch(function(){ return []; })]).then(function(r){ return renderRelaysExits(r[0], r[1]); }); },
