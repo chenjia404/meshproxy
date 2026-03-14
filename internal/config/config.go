@@ -92,6 +92,16 @@ type ClientConfig struct {
 	BeginTCPRetries int `yaml:"begin_tcp_retries"`
 	// ExitSelection configures how the last hop (exit) is chosen for each circuit.
 	ExitSelection ExitSelectionConfig `yaml:"exit_selection"`
+	// GeoIP configures how to resolve exit node country from IP (when descriptor has no ExitInfo.Country).
+	GeoIP GeoIPConfig `yaml:"geoip"`
+}
+
+// GeoIPConfig configures IP-to-country resolution for exit node selection/display.
+type GeoIPConfig struct {
+	// Provider: "none" (default), "ip-api", "geolite2". geolite2 uses data_dir/GeoLite2-Country.mmdb (downloads if missing).
+	Provider string `yaml:"provider"`
+	// CacheTTLMinutes is how long to cache IP->country (default 1440 = 24h). Only used when Provider is set.
+	CacheTTLMinutes int `yaml:"cache_ttl_minutes"`
 }
 
 // ExitSelectionMode is the strategy for choosing the exit node.
@@ -197,6 +207,10 @@ func Default() Config {
 				RequireTCPSupport:  true,
 				FallbackToAny:     true,
 				AllowDirectExit:   true,
+			},
+			GeoIP: GeoIPConfig{
+				Provider:         "none",
+				CacheTTLMinutes:  1440,
 			},
 		},
 	}

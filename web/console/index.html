@@ -112,8 +112,8 @@
     }
     function renderNodeTable(list, title) {
       if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚無節點</p></div>';
-      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th></tr></thead><tbody>' +
-        list.map(n => '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td></tr>').join('') + '</tbody></table></div>';
+      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th><th>國家/地區</th></tr></thead><tbody>' +
+        list.map(n => '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td><td>' + escapeHtml(n.country || '-') + '</td></tr>').join('') + '</tbody></table></div>';
     }
     function renderRelaysExits(relays, exits) {
       const r = Array.isArray(relays) ? relays : [];
@@ -186,8 +186,8 @@
         html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">儲存設定</button></div></div>';
         html += '<div class="card exit-candidates"><h3>目前可選出口（' + candidates.length + '）</h3>';
         if (!candidates.length) html += '<p class="empty">暫無符合目前規則的出口節點，或尚未發現任何 Exit。</p>';
-        else html += '<table><thead><tr><th>Peer ID</th><th>國家/地區</th></tr></thead><tbody>' +
-          candidates.map(c => '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.country || '-') + '</td></tr>').join('') + '</tbody></table>';
+        else html += '<table><thead><tr><th>Peer ID</th><th>版本</th><th>國家/地區</th></tr></thead><tbody>' +
+          candidates.map(c => '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.version || '-') + '</td><td>' + escapeHtml(c.country || '-') + '</td></tr>').join('') + '</tbody></table>';
         html += '</div>';
         setTimeout(() => {
           const store = { allowed_countries: allowed, preferred_countries: preferred, exclude_countries: excluded };

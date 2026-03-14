@@ -14,6 +14,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
+	"github.com/chenjia404/meshproxy/internal/geoip"
 	"github.com/chenjia404/meshproxy/internal/identity"
 	"github.com/chenjia404/meshproxy/internal/relay"
 	"github.com/chenjia404/meshproxy/internal/protocol"
@@ -101,6 +102,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
 
+	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
+	go runPeerAddrLearner(ctx, h.Host, dhtComp.Routing(), discoveryStore, 25*time.Second)
+
 	// Bootstrap
 	p2p.Bootstrap(ctx, h.Host, cfg.P2P.BootstrapPeers)
 
@@ -113,6 +117,38 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	localPeerID := a.PeerID()
 	selector := client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
 	selector.SetExitSelection(&cfg.Client.ExitSelection)
+	// GeoIP: resolve exit node country from IP when descriptor has no ExitInfo.Country
+	switch g := cfg.Client.GeoIP.Provider; g {
+	case "ip-api", "ip_api":
+		ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		selector.SetGeoIPResolver(geoip.NewCachedResolver(geoip.NewIPAPIResolver(), ttl))
+	case "geolite2", "maxmind":
+		inner, err := geoip.NewGeoLite2Resolver(cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("geoip geolite2: %w", err)
+		}
+		ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		selector.SetGeoIPResolver(geoip.NewCachedResolver(inner, ttl))
+	}
+	// Prefer peerstore/observed addrs for GeoIP so we get the peer's real public IP (not NAT/local from descriptor).
+	selector.SetPeerAddrsProvider(func(peerID string) []string {
+		pid, err := peer.Decode(peerID)
+		if err != nil {
+			return nil
+		}
+		addrs := a.Host().Peerstore().Addrs(pid)
+		out := make([]string, 0, len(addrs))
+		for _, m := range addrs {
+			out = append(out, m.String())
+		}
+		return out
+	})
 	a.pathSelector = selector
 	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr)
 	a.circuitManager = cm
@@ -150,9 +186,10 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Scores:         &scoresPlaceholder{},
 		Errors:         a.recentErrors,
 		Metrics:        &metricsSummaryAdapter{app: a},
-		ExitSelection:  selector,
-		ExitCandidates: selector,
-		ConfigPath:     cfg.ConfigFilePath,
+		ExitSelection:       selector,
+		ExitCandidates:      selector,
+		ExitCountryResolver: selector,
+		ConfigPath:          cfg.ConfigFilePath,
 		ExitService:    exitSvc,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)

@@ -114,6 +114,11 @@ type ExitCandidatesProvider interface {
 	ListExitCandidates() ([]*discovery.NodeDescriptor, error)
 }
 
+// ExitCountryResolver returns the effective country code for an exit descriptor (from ExitInfo or GeoIP). Optional.
+type ExitCountryResolver interface {
+	CountryForExit(*discovery.NodeDescriptor) string
+}
+
 // LocalAPIOpts holds optional providers for extended API endpoints.
 type LocalAPIOpts struct {
 	Relays          RelaysProvider
@@ -123,8 +128,9 @@ type LocalAPIOpts struct {
 	Scores          ScoresProvider
 	Errors          RecentErrorsProvider
 	Metrics         MetricsSummaryProvider
-	ExitSelection   ExitSelectionProvider
-	ExitCandidates  ExitCandidatesProvider
+	ExitSelection      ExitSelectionProvider
+	ExitCandidates     ExitCandidatesProvider
+	ExitCountryResolver ExitCountryResolver // optional: for resolved country in exit-candidates / display
 	// ConfigPath 若非空，保存出口選擇時會寫回該配置文件，使重啟後仍生效。
 	ConfigPath string
 	// ExitService 僅在 mode=relay+exit 時非空，用於出口策略/狀態 API。
@@ -315,7 +321,7 @@ func (a *LocalAPI) handleRelays(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []any{})
 		return
 	}
-	writeJSON(w, a.opts.Relays.ListRelays())
+	writeJSON(w, a.enrichNodesWithCountry(a.opts.Relays.ListRelays()))
 }
 
 func (a *LocalAPI) handleExits(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +333,30 @@ func (a *LocalAPI) handleExits(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []any{})
 		return
 	}
-	writeJSON(w, a.opts.Exits.ListExits())
+	writeJSON(w, a.enrichNodesWithCountry(a.opts.Exits.ListExits()))
+}
+
+// enrichNodesWithCountry returns a JSON-friendly list of node objects with a top-level "country" field for display.
+func (a *LocalAPI) enrichNodesWithCountry(nodes []*discovery.NodeDescriptor) []map[string]any {
+	out := make([]map[string]any, 0, len(nodes))
+	for _, d := range nodes {
+		var m map[string]any
+		if b, err := json.Marshal(d); err == nil {
+			_ = json.Unmarshal(b, &m)
+		}
+		if m == nil {
+			m = make(map[string]any)
+		}
+		if a.opts != nil && a.opts.ExitCountryResolver != nil {
+			m["country"] = a.opts.ExitCountryResolver.CountryForExit(d)
+		} else if d.ExitInfo != nil {
+			m["country"] = d.ExitInfo.Country
+		} else {
+			m["country"] = ""
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func (a *LocalAPI) handleStreams(w http.ResponseWriter, r *http.Request) {
@@ -428,11 +457,14 @@ func (a *LocalAPI) handleExitCandidates(w http.ResponseWriter, r *http.Request) 
 	type candidate struct {
 		PeerID  string `json:"peer_id"`
 		Country string `json:"country,omitempty"`
+		Version string `json:"version,omitempty"`
 	}
 	out := make([]candidate, 0, len(list))
 	for _, n := range list {
-		c := candidate{PeerID: n.PeerID}
-		if n.ExitInfo != nil {
+		c := candidate{PeerID: n.PeerID, Version: n.Version}
+		if a.opts != nil && a.opts.ExitCountryResolver != nil {
+			c.Country = a.opts.ExitCountryResolver.CountryForExit(n)
+		} else if n.ExitInfo != nil {
 			c.Country = n.ExitInfo.Country
 		}
 		out = append(out, c)

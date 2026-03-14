@@ -105,8 +105,8 @@
     }
     function renderNodeTable(list, title) {
       if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚无节点</p></div>';
-      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th></tr></thead><tbody>' +
-        list.map(function(n){ return '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th><th>国家/地区</th></tr></thead><tbody>' +
+        list.map(function(n){ return '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td><td>' + escapeHtml(n.country || '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
     function renderRelaysExits(relays, exits) {
       var r = Array.isArray(relays) ? relays : [];
@@ -183,8 +183,8 @@
 
         html += '<div class="card exit-candidates"><h3>当前可选出口（' + candidates.length + '）</h3>';
         if (!candidates.length) html += '<p class="empty">暂无符合当前规则的出口节点，或尚未发现任何 Exit。</p>';
-        else html += '<table><thead><tr><th>Peer ID</th><th>国家/地区</th></tr></thead><tbody>' +
-          candidates.map(function(c){ return '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.country || '-') + '</td></tr>'; }).join('') + '</tbody></table>';
+        else html += '<table><thead><tr><th>Peer ID</th><th>版本</th><th>国家/地区</th></tr></thead><tbody>' +
+          candidates.map(function(c){ return '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.version || '-') + '</td><td>' + escapeHtml(c.country || '-') + '</td></tr>'; }).join('') + '</tbody></table>';
         html += '</div>';
 
         setTimeout(function bindExitPolicy() {

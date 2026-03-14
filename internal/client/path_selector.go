@@ -8,16 +8,22 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/geoip"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
+// PeerAddrsProvider returns known multiaddr strings for a peer (e.g. from peerstore/observed addrs). Used to get real public IP behind NAT.
+type PeerAddrsProvider func(peerID string) []string
+
 // PathSelector chooses appropriate relay/exit paths based on discovery information and exit selection config.
 type PathSelector struct {
-	mu           sync.RWMutex
-	store        *discovery.Store
-	localPeer    string
-	routePolicy  RoutePolicy
-	exitSelection *config.ExitSelectionConfig
+	mu               sync.RWMutex
+	store            *discovery.Store
+	localPeer        string
+	routePolicy      RoutePolicy
+	exitSelection    *config.ExitSelectionConfig
+	geoIP            geoip.Resolver
+	peerAddrsProvider PeerAddrsProvider
 }
 
 // NewPathSelector creates a new PathSelector.
@@ -55,6 +61,38 @@ func (p *PathSelector) GetExitSelection() config.ExitSelectionConfig {
 		}
 	}
 	return *p.exitSelection
+}
+
+// SetGeoIPResolver sets the resolver used to infer exit country from IP when descriptor has no ExitInfo.Country. Nil = no lookup.
+func (p *PathSelector) SetGeoIPResolver(r geoip.Resolver) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.geoIP = r
+}
+
+// SetPeerAddrsProvider sets the provider for peer addresses (e.g. from peerstore). When set, IP for GeoIP is taken from these addrs first, so NAT nodes get their real public IP.
+func (p *PathSelector) SetPeerAddrsProvider(fn PeerAddrsProvider) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peerAddrsProvider = fn
+}
+
+// EffectiveCountryForDescriptor returns the country code for the given exit descriptor (from ExitInfo or GeoIP lookup). For API display.
+func (p *PathSelector) EffectiveCountryForDescriptor(d *discovery.NodeDescriptor) string {
+	p.mu.RLock()
+	r := p.geoIP
+	provider := p.peerAddrsProvider
+	p.mu.RUnlock()
+	var peerAddrs []string
+	if provider != nil {
+		peerAddrs = provider(d.PeerID)
+	}
+	return EffectiveCountry(d, r, peerAddrs)
+}
+
+// CountryForExit implements api.ExitCountryResolver: returns effective country for the descriptor.
+func (p *PathSelector) CountryForExit(d *discovery.NodeDescriptor) string {
+	return p.EffectiveCountryForDescriptor(d)
 }
 
 // SelectBestPath selects a path plan according to policy (relay+exit preferred).
@@ -192,7 +230,19 @@ func (p *PathSelector) filterExitsWithSelection(exclude map[string]bool) ([]*dis
 	}
 	mode := cfg.Mode
 	fallback := cfg.FallbackToAny
-	candidates := applyExitSelection(base, cfg, p.localPeer, p.routePolicy.AllowSelfExit, exclude)
+	var countryFunc countryGetter
+	if p.geoIP != nil || p.peerAddrsProvider != nil {
+		resolver := p.geoIP
+		provider := p.peerAddrsProvider
+		countryFunc = func(d *discovery.NodeDescriptor) string {
+			var peerAddrs []string
+			if provider != nil {
+				peerAddrs = provider(d.PeerID)
+			}
+			return EffectiveCountry(d, resolver, peerAddrs)
+		}
+	}
+	candidates := applyExitSelection(base, cfg, p.localPeer, p.routePolicy.AllowSelfExit, exclude, countryFunc)
 	if len(candidates) > 0 {
 		log.Printf("[path_selector] exit_selected mode=%s count=%d first=%s", mode, len(candidates), candidates[0].PeerID[:12])
 		return candidates, nil
@@ -208,7 +258,7 @@ func (p *PathSelector) filterExitsWithSelection(exclude map[string]bool) ([]*dis
 			FallbackToAny:      false,
 			AllowDirectExit:    cfg.AllowDirectExit,
 		}
-		candidates = applyExitSelection(base, fallbackCfg, p.localPeer, p.routePolicy.AllowSelfExit, exclude)
+		candidates = applyExitSelection(base, fallbackCfg, p.localPeer, p.routePolicy.AllowSelfExit, exclude, countryFunc)
 		if len(candidates) > 0 {
 			log.Printf("[path_selector] exit_selection fallback_to_any used (no match for mode=%s)", mode)
 			return candidates, nil
