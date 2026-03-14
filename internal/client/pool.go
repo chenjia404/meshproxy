@@ -36,6 +36,7 @@ type CircuitPoolFactory interface {
 	CreateForPool(kind PoolKind) (circuitID string, err error)
 	CloseCircuit(circuitID string)
 	IsCircuitOpen(circuitID string) bool
+	CircuitReuseScore(circuitID string) int
 }
 
 // CircuitPool holds pre-built circuits per kind and maintains min/max, idle timeout, replenish.
@@ -44,6 +45,8 @@ type CircuitPool struct {
 
 	minPerPool   int
 	maxPerPool   int
+	minTotal     int
+	maxTotal     int
 	idleTimeout  time.Duration
 	replenishInt time.Duration
 
@@ -62,15 +65,17 @@ type CircuitPool struct {
 // NewCircuitPool creates a circuit pool with the given config and factory.
 func NewCircuitPool(cfg config.CircuitPoolConfig, factory CircuitPoolFactory) *CircuitPool {
 	return &CircuitPool{
-		minPerPool:    cfg.MinPerPool,
-		maxPerPool:    cfg.MaxPerPool,
-		idleTimeout:   time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
-		replenishInt:  time.Duration(cfg.ReplenishIntervalSeconds) * time.Second,
-		factory:         factory,
-		idle:            make(map[PoolKind][]poolEntry),
-		circuitToKind:   make(map[string]PoolKind),
+		minPerPool:       cfg.MinPerPool,
+		maxPerPool:       cfg.MaxPerPool,
+		minTotal:         cfg.MinTotal,
+		maxTotal:         cfg.MaxTotal,
+		idleTimeout:      time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
+		replenishInt:     time.Duration(cfg.ReplenishIntervalSeconds) * time.Second,
+		factory:          factory,
+		idle:             make(map[PoolKind][]poolEntry),
+		circuitToKind:    make(map[string]PoolKind),
 		inUseStreamCount: make(map[string]int),
-		outCount:        make(map[PoolKind]int),
+		outCount:         make(map[PoolKind]int),
 	}
 }
 
@@ -78,43 +83,96 @@ func NewCircuitPool(cfg config.CircuitPoolConfig, factory CircuitPoolFactory) *C
 // (multiple streams per circuit) that is still open; if none, takes from idle or returns false.
 func (p *CircuitPool) GetFromPool(kind PoolKind) (circuitID string, ok bool) {
 	p.mu.Lock()
+	inUseIDs := make([]string, 0)
+	idleEntries := append([]poolEntry(nil), p.idle[kind]...)
 	for cid, n := range p.inUseStreamCount {
 		if n > 0 && p.circuitToKind[cid] == kind {
-			p.mu.Unlock()
-			if p.factory.IsCircuitOpen(cid) {
-				p.mu.Lock()
-				if p.inUseStreamCount[cid] > 0 {
-					p.inUseStreamCount[cid]++
-					cidRet := cid
-					p.mu.Unlock()
-					return cidRet, true
-				}
-			} else {
-				p.mu.Lock()
-			}
-			continue
+			inUseIDs = append(inUseIDs, cid)
 		}
-	}
-	// Take from idle; skip any that are no longer open
-	for len(p.idle[kind]) > 0 {
-		list := p.idle[kind]
-		entry := list[len(list)-1]
-		list = list[:len(list)-1]
-		p.idle[kind] = list
-		circuitID = entry.circuitID
-		p.mu.Unlock()
-		if p.factory.IsCircuitOpen(circuitID) {
-			p.mu.Lock()
-			p.inUseStreamCount[circuitID] = 1
-			p.outCount[kind]++
-			p.mu.Unlock()
-			return circuitID, true
-		}
-		p.mu.Lock()
-		delete(p.circuitToKind, circuitID)
 	}
 	p.mu.Unlock()
-	return "", false
+
+	if cid, ok := p.pickBestInUse(kind, inUseIDs); ok {
+		return cid, true
+	}
+	return p.pickBestIdle(kind, idleEntries)
+}
+
+func (p *CircuitPool) pickBestInUse(kind PoolKind, ids []string) (string, bool) {
+	bestID := ""
+	bestScore := -1
+	for _, cid := range ids {
+		if !p.factory.IsCircuitOpen(cid) {
+			continue
+		}
+		score := p.factory.CircuitReuseScore(cid)
+		if bestID == "" || score > bestScore {
+			bestID = cid
+			bestScore = score
+		}
+	}
+	if bestID == "" {
+		return "", false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.circuitToKind[bestID] != kind || p.inUseStreamCount[bestID] <= 0 {
+		return "", false
+	}
+	p.inUseStreamCount[bestID]++
+	return bestID, true
+}
+
+func (p *CircuitPool) pickBestIdle(kind PoolKind, entries []poolEntry) (string, bool) {
+	bestID := ""
+	bestScore := -1
+	staleIDs := make(map[string]struct{})
+	for _, entry := range entries {
+		cid := entry.circuitID
+		if !p.factory.IsCircuitOpen(cid) {
+			staleIDs[cid] = struct{}{}
+			continue
+		}
+		score := p.factory.CircuitReuseScore(cid)
+		if bestID == "" || score > bestScore {
+			bestID = cid
+			bestScore = score
+		}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(staleIDs) > 0 {
+		list := p.idle[kind]
+		kept := list[:0]
+		for _, entry := range list {
+			if _, stale := staleIDs[entry.circuitID]; stale {
+				delete(p.circuitToKind, entry.circuitID)
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		p.idle[kind] = kept
+	}
+	if bestID == "" {
+		return "", false
+	}
+	idx := -1
+	for i, entry := range p.idle[kind] {
+		if entry.circuitID == bestID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return "", false
+	}
+	list := p.idle[kind]
+	p.idle[kind] = append(list[:idx], list[idx+1:]...)
+	p.inUseStreamCount[bestID] = 1
+	p.outCount[kind]++
+	return bestID, true
 }
 
 // ReturnToPool is called when a stream on this circuit closes. Puts the circuit back to idle
@@ -192,6 +250,14 @@ func (p *CircuitPool) totalCount(kind PoolKind) int {
 	return len(p.idle[kind]) + p.outCount[kind]
 }
 
+func (p *CircuitPool) totalCountAll() int {
+	total := 0
+	for _, kind := range AllPoolKinds() {
+		total += p.totalCount(kind)
+	}
+	return total
+}
+
 // runMaintenance creates missing circuits, evicts idle circuits that exceeded timeout.
 func (p *CircuitPool) runMaintenance(ctx context.Context) {
 	ticker := time.NewTicker(p.replenishInt)
@@ -210,7 +276,6 @@ func (p *CircuitPool) runMaintenance(ctx context.Context) {
 func (p *CircuitPool) maintainOnce(ctx context.Context) {
 	for _, kind := range AllPoolKinds() {
 		p.mu.Lock()
-		total := p.totalCount(kind)
 		idleList := p.idle[kind]
 		toEvict := 0
 		now := time.Now()
@@ -235,31 +300,100 @@ func (p *CircuitPool) maintainOnce(ctx context.Context) {
 				p.factory.CloseCircuit(e.circuitID)
 			}
 		}
-
-		// Replenish up to min idle
-		for {
-			p.mu.Lock()
-			total = p.totalCount(kind)
-			idleLen := len(p.idle[kind])
-			need := p.minPerPool - idleLen
-			canCreate := total < p.maxPerPool && need > 0
-			p.mu.Unlock()
-
-			if !canCreate {
-				break
-			}
-			circuitID, err := p.factory.CreateForPool(kind)
-			if err != nil || circuitID == "" {
-				break
-			}
-			p.registerPoolCircuit(kind, circuitID)
-		}
 	}
+
+	p.trimExcessIdle()
+	p.replenishToMinimum()
 }
 
 // StartMaintenance starts the background pool maintainer. Call with app context.
 func (p *CircuitPool) StartMaintenance(ctx context.Context) {
 	go p.runMaintenance(ctx)
+}
+
+func (p *CircuitPool) trimExcessIdle() {
+	for {
+		p.mu.Lock()
+		total := p.totalCountAll()
+		if total <= p.maxTotal {
+			p.mu.Unlock()
+			return
+		}
+
+		var selectedKind PoolKind
+		var selectedEntry poolEntry
+		found := false
+		for _, kind := range AllPoolKinds() {
+			list := p.idle[kind]
+			if len(list) == 0 {
+				continue
+			}
+			entry := list[0]
+			if !found || entry.idleSince.Before(selectedEntry.idleSince) {
+				selectedKind = kind
+				selectedEntry = entry
+				found = true
+			}
+		}
+		if !found {
+			p.mu.Unlock()
+			return
+		}
+
+		list := p.idle[selectedKind]
+		idx := -1
+		for i, entry := range list {
+			if entry.circuitID == selectedEntry.circuitID {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			p.mu.Unlock()
+			return
+		}
+		p.idle[selectedKind] = append(list[:idx], list[idx+1:]...)
+		delete(p.circuitToKind, selectedEntry.circuitID)
+		p.mu.Unlock()
+
+		p.factory.CloseCircuit(selectedEntry.circuitID)
+	}
+}
+
+func (p *CircuitPool) replenishToMinimum() {
+	for {
+		p.mu.Lock()
+		total := p.totalCountAll()
+		if total >= p.minTotal || total >= p.maxTotal {
+			p.mu.Unlock()
+			return
+		}
+
+		var targetKind PoolKind
+		found := false
+		minKindTotal := 0
+		for _, kind := range AllPoolKinds() {
+			kindTotal := p.totalCount(kind)
+			if kindTotal >= p.maxPerPool {
+				continue
+			}
+			if !found || kindTotal < minKindTotal {
+				targetKind = kind
+				minKindTotal = kindTotal
+				found = true
+			}
+		}
+		p.mu.Unlock()
+
+		if !found {
+			return
+		}
+		circuitID, err := p.factory.CreateForPool(targetKind)
+		if err != nil || circuitID == "" {
+			return
+		}
+		p.registerPoolCircuit(targetKind, circuitID)
+	}
 }
 
 // PoolKindStatus is the status of one pool kind for API.
@@ -289,4 +423,35 @@ func (p *CircuitPool) Status() PoolStatus {
 		}
 	}
 	return PoolStatus{Kinds: kinds}
+}
+
+// GetConfig returns the current runtime pool configuration snapshot.
+func (p *CircuitPool) GetConfig() config.CircuitPoolConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return config.CircuitPoolConfig{
+		MinPerPool:               p.minPerPool,
+		MaxPerPool:               p.maxPerPool,
+		MinTotal:                 p.minTotal,
+		MaxTotal:                 p.maxTotal,
+		IdleTimeoutSeconds:       int(p.idleTimeout / time.Second),
+		ReplenishIntervalSeconds: int(p.replenishInt / time.Second),
+	}
+}
+
+// SetTotalLimits updates the runtime total circuit bounds.
+func (p *CircuitPool) SetTotalLimits(minTotal, maxTotal int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if minTotal <= 0 {
+		minTotal = 1
+	}
+	if maxTotal <= 0 {
+		maxTotal = 1
+	}
+	if maxTotal < minTotal {
+		maxTotal = minTotal
+	}
+	p.minTotal = minTotal
+	p.maxTotal = maxTotal
 }

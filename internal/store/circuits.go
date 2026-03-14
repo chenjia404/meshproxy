@@ -23,6 +23,7 @@ type CircuitRecord struct {
 	LastPingAt          time.Time
 	LastPongAt          time.Time
 	ConsecutiveFailures int
+	HeartbeatSuccesses  int
 	SmoothedRTT         time.Duration
 	Alive               bool
 }
@@ -83,6 +84,7 @@ func (s *CircuitStore) GetAll() []protocol.CircuitInfo {
 			LastPingAt:          rec.LastPingAt,
 			LastPongAt:          rec.LastPongAt,
 			ConsecutiveFailures: rec.ConsecutiveFailures,
+			HeartbeatSuccesses:  rec.HeartbeatSuccesses,
 			SmoothedRTTMillis:   float64(rec.SmoothedRTT.Nanoseconds()) / 1e6,
 			Alive:               rec.Alive,
 		})
@@ -106,7 +108,7 @@ func (s *CircuitStore) AddStats(id string, sent, recv uint64) {
 }
 
 // SetHealth updates heartbeat-related metadata for the given circuit.
-func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.Time, consecutiveFailures int, smoothedRTT time.Duration) {
+func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.Time, consecutiveFailures, heartbeatSuccesses int, smoothedRTT time.Duration) {
 	if id == "" {
 		return
 	}
@@ -117,6 +119,7 @@ func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.
 		rec.LastPingAt = lastPing
 		rec.LastPongAt = lastPong
 		rec.ConsecutiveFailures = consecutiveFailures
+		rec.HeartbeatSuccesses = heartbeatSuccesses
 		rec.SmoothedRTT = smoothedRTT
 		rec.UpdatedAt = time.Now()
 	}

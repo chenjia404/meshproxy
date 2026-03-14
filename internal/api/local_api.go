@@ -132,6 +132,7 @@ type LocalAPIOpts struct {
 	Exits               ExitsProvider
 	Streams             StreamsProvider
 	Pool                PoolStatusProvider
+	CircuitPoolConfig   CircuitPoolConfigProvider
 	Scores              ScoresProvider
 	Errors              RecentErrorsProvider
 	Metrics             MetricsSummaryProvider
@@ -147,6 +148,12 @@ type LocalAPIOpts struct {
 // PoolStatusProvider returns current circuit pool status.
 type PoolStatusProvider interface {
 	GetPoolStatus() *PoolStatusResponse
+}
+
+// CircuitPoolConfigProvider reads and updates runtime circuit pool configuration.
+type CircuitPoolConfigProvider interface {
+	GetPoolConfig() *config.CircuitPoolConfig
+	SetPoolTotalLimits(minTotal, maxTotal int) bool
 }
 
 // LocalAPI exposes HTTP API for node status, nodes, circuits, relays, exits, streams, pool, scores, errors, metrics.
@@ -179,6 +186,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/metrics/summary", api.handleMetricsSummary)
 	mux.HandleFunc("/api/v1/client/exit-selection", api.handleExitSelection)
 	mux.HandleFunc("/api/v1/client/exit-candidates", api.handleExitCandidates)
+	mux.HandleFunc("/api/v1/client/circuit-pool", api.handleCircuitPoolConfig)
 	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
 		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
@@ -484,6 +492,60 @@ func (a *LocalAPI) handleExitCandidates(w http.ResponseWriter, r *http.Request) 
 		out = append(out, c)
 	}
 	writeJSON(w, map[string]any{"candidates": out, "count": len(out)})
+}
+
+func (a *LocalAPI) handleCircuitPoolConfig(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.CircuitPoolConfig == nil {
+		http.Error(w, "circuit pool config not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg := a.opts.CircuitPoolConfig.GetPoolConfig()
+		if cfg == nil {
+			http.Error(w, "circuit pool config not available", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, cfg)
+		return
+	case http.MethodPost:
+		var body struct {
+			MinTotal int `json:"min_total"`
+			MaxTotal int `json:"max_total"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if body.MinTotal <= 0 || body.MaxTotal <= 0 {
+			http.Error(w, "min_total and max_total must be positive", http.StatusBadRequest)
+			return
+		}
+		if body.MaxTotal < body.MinTotal {
+			http.Error(w, "max_total must be >= min_total", http.StatusBadRequest)
+			return
+		}
+		if !a.opts.CircuitPoolConfig.SetPoolTotalLimits(body.MinTotal, body.MaxTotal) {
+			http.Error(w, "circuit pool config not available", http.StatusNotFound)
+			return
+		}
+		cfg := a.opts.CircuitPoolConfig.GetPoolConfig()
+		if cfg == nil {
+			http.Error(w, "circuit pool config not available", http.StatusNotFound)
+			return
+		}
+		if a.opts.ConfigPath != "" {
+			if err := config.SaveCircuitPoolConfig(a.opts.ConfigPath, *cfg); err != nil {
+				http.Error(w, "save circuit pool config failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, cfg)
+		return
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 }
 
 // ExitStatusResponse 出口運行狀態（drain、連接數、最近拒絕）。

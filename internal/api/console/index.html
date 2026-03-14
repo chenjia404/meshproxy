@@ -152,6 +152,7 @@
       <a href="#relays" data-page="relays"><span class="nav-label">Relay / Exit</span></a>
       <a href="#circuits" data-page="circuits"><span class="nav-label">Circuit 列表</span></a>
       <a href="#streams" data-page="streams"><span class="nav-label">Stream 列表</span></a>
+      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label">电路池</span></a>
       <a href="#traffic" data-page="traffic"><span class="nav-label">实时流量</span></a>
       <a href="#routing" data-page="routing"><span class="nav-label">路由规则</span></a>
       <a href="#exit-policy" data-page="exit-policy"><span class="nav-label">出口选择</span></a>
@@ -166,6 +167,12 @@
     const API = '';
     function api(path) { return (API || '') + path; }
     function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
+    function post(path, body) {
+      return fetch(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || r.statusText); });
+        return r.json();
+      });
+    }
 
     function renderStatus(data) {
       const pool = data.circuit_pool || {};
@@ -215,6 +222,43 @@
         '<dt>最近错误数</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' + pool + '</dl></div>';
     }
     function renderRouting() { return '<h1>路由规则</h1><div class="card"><p class="empty">路由规则界面尚未开放，请通过配置文件或 API 设置。</p></div>'; }
+    function renderCircuitPoolConfig() {
+      return get('/api/v1/client/circuit-pool').then(function(cfg) {
+        cfg = cfg || {};
+        var html = '<h1>电路池</h1><div id="pool-msg"></div><div class="card"><h3>总量控制</h3>';
+        html += '<div class="form-row"><label>最小总数 `min_total`</label><input type="text" id="pool-min-total" value="' + escapeHtml(String(cfg.min_total == null ? 1 : cfg.min_total)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><label>最大总数 `max_total`</label><input type="text" id="pool-max-total" value="' + escapeHtml(String(cfg.max_total == null ? 1 : cfg.max_total)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><div class="hint">默认只维持 1 条 circuit。保存后会立即更新运行中的池子，并写回配置文件。</div></div>';
+        html += '<div class="form-row"><label>每池最小 / 最大（只读）</label><div class="hint">min_per_pool=' + escapeHtml(String(cfg.min_per_pool == null ? '-' : cfg.min_per_pool)) + '，max_per_pool=' + escapeHtml(String(cfg.max_per_pool == null ? '-' : cfg.max_per_pool)) + '</div></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="pool-save">保存设置</button></div></div>';
+        setTimeout(function bindPool() {
+          var saveBtn = document.getElementById('pool-save');
+          if (!saveBtn) return;
+          saveBtn.addEventListener('click', function() {
+            var minTotal = Number((document.getElementById('pool-min-total').value || '').trim());
+            var maxTotal = Number((document.getElementById('pool-max-total').value || '').trim());
+            if (!Number.isInteger(minTotal) || !Number.isInteger(maxTotal) || minTotal <= 0 || maxTotal <= 0) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">请输入正整数。</div>';
+              return;
+            }
+            if (maxTotal < minTotal) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">`max_total` 不能小于 `min_total`。</div>';
+              return;
+            }
+            saveBtn.disabled = true;
+            post('/api/v1/client/circuit-pool', { min_total: minTotal, max_total: maxTotal }).then(function() {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg ok">已保存电路池设置。</div>';
+              setTimeout(function(){ show('circuit-pool'); }, 600);
+            }).catch(function(err) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+            }).finally(function() {
+              if (document.getElementById('pool-save')) document.getElementById('pool-save').disabled = false;
+            });
+          });
+        }, 0);
+        return html;
+      }).catch(function(err){ return '<h1>电路池</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
+    }
 
     function renderExitPolicy() {
       return Promise.all([
@@ -574,6 +618,7 @@
       relays: function(){ return Promise.all([get('/api/v1/relays').catch(function(){ return []; }), get('/api/v1/exits').catch(function(){ return []; })]).then(function(r){ return renderRelaysExits(r[0], r[1]); }); },
       circuits: function(){ return get('/api/v1/circuits').then(renderCircuits); },
       streams: function(){ return get('/api/v1/streams').then(renderStreams); },
+      'circuit-pool': function(){ return renderCircuitPoolConfig(); },
       traffic: function(){ return get('/api/v1/metrics/summary').then(renderTraffic); },
       routing: function(){ return Promise.resolve(renderRouting()); },
       'exit-policy': function(){ return renderExitPolicy(); },

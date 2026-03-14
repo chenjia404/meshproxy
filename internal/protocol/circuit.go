@@ -44,6 +44,7 @@ type CircuitInfo struct {
 	LastPongAt          time.Time    `json:"last_pong_at"`
 	Alive               bool         `json:"alive"`
 	ConsecutiveFailures int          `json:"consecutive_failures"`
+	HeartbeatSuccesses  int          `json:"heartbeat_successes"`
 	SmoothedRTTMillis   float64      `json:"smoothed_rtt_ms"`
 	BytesSent           uint64       `json:"bytes_sent"`
 	BytesReceived       uint64       `json:"bytes_received"`

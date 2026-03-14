@@ -152,6 +152,7 @@
       <a href="#relays" data-page="relays"><span class="nav-label">Relay / Exit</span></a>
       <a href="#circuits" data-page="circuits"><span class="nav-label">Circuit 列表</span></a>
       <a href="#streams" data-page="streams"><span class="nav-label">Stream 列表</span></a>
+      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label">電路池</span></a>
       <a href="#traffic" data-page="traffic"><span class="nav-label">即時流量</span></a>
       <a href="#routing" data-page="routing"><span class="nav-label">路由規則</span></a>
       <a href="#exit-policy" data-page="exit-policy"><span class="nav-label">出口选择</span></a>
@@ -165,6 +166,13 @@
     const API = ''; // same origin
     function api(path) { return (API || '') + path; }
     function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
+    function post(path, body) {
+      return fetch(api(path), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      }).then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(new Error(d.error || r.statusText))));
+    }
 
     function renderStatus(data) {
       const pool = data.circuit_pool || {};
@@ -227,6 +235,44 @@
     }
     function renderRouting() {
       return '<h1>路由規則</h1><div class="card"><p class="empty">路由規則介面尚未開放，請透過設定檔或 API 設定。</p></div>';
+    }
+    function renderCircuitPoolConfig() {
+      return get('/api/v1/client/circuit-pool').then(cfg => {
+        cfg = cfg || {};
+        let html = '<h1>電路池</h1><div id="pool-msg"></div><div class="card"><h3>總量控制</h3>';
+        html += '<div class="form-row"><label>最小總數 `min_total`</label><input type="text" id="pool-min-total" value="' + escapeHtml(String(cfg.min_total ?? 1)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><label>最大總數 `max_total`</label><input type="text" id="pool-max-total" value="' + escapeHtml(String(cfg.max_total ?? 1)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><div class="hint">預設只維持 1 條 circuit。儲存後會立即更新運行中的池子，並寫回配置文件。</div></div>';
+        html += '<div class="form-row"><label>每池最小 / 最大（唯讀）</label><div class="hint">min_per_pool=' + escapeHtml(String(cfg.min_per_pool ?? '-')) + '，max_per_pool=' + escapeHtml(String(cfg.max_per_pool ?? '-')) + '</div></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="pool-save">儲存設定</button></div></div>';
+        setTimeout(() => {
+          const saveBtn = document.getElementById('pool-save');
+          if (!saveBtn) return;
+          saveBtn.onclick = () => {
+            const minTotal = Number((document.getElementById('pool-min-total')?.value || '').trim());
+            const maxTotal = Number((document.getElementById('pool-max-total')?.value || '').trim());
+            if (!Number.isInteger(minTotal) || !Number.isInteger(maxTotal) || minTotal <= 0 || maxTotal <= 0) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">請輸入正整數。</div>';
+              return;
+            }
+            if (maxTotal < minTotal) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">`max_total` 不能小於 `min_total`。</div>';
+              return;
+            }
+            saveBtn.disabled = true;
+            post('/api/v1/client/circuit-pool', { min_total: minTotal, max_total: maxTotal })
+              .then(() => {
+                document.getElementById('pool-msg').innerHTML = '<div class="msg ok">已儲存電路池設定。</div>';
+                setTimeout(() => show('circuit-pool'), 600);
+              })
+              .catch(err => {
+                document.getElementById('pool-msg').innerHTML = '<div class="msg err">儲存失敗: ' + escapeHtml(err.message) + '</div>';
+              })
+              .finally(() => { if (document.getElementById('pool-save')) document.getElementById('pool-save').disabled = false; });
+          };
+        }, 0);
+        return html;
+      }).catch(err => '<h1>電路池</h1><div class="card"><p class="empty">載入失敗: ' + escapeHtml(err.message) + '</p></div>');
     }
     function renderExitPolicy() {
       return Promise.all([
@@ -307,8 +353,7 @@
               allow_direct_exit: document.getElementById('exit-allow-direct').checked,
             };
             saveBtn.disabled = true;
-            fetch(api('/api/v1/client/exit-selection'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-              .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || r.statusText); return d; }))
+            post('/api/v1/client/exit-selection', payload)
               .then(() => {
                 document.getElementById('exit-msg').innerHTML = '<div class="msg ok">已儲存出口選擇設定。</div>';
                 setTimeout(() => show('exit-policy'), 600);
@@ -383,6 +428,7 @@
       relays: () => Promise.all([get('/api/v1/relays').catch(() => []), get('/api/v1/exits').catch(() => [])]).then(([r,e]) => renderRelaysExits(r, e)),
       circuits: () => get('/api/v1/circuits').then(renderCircuits),
       streams: () => get('/api/v1/streams').then(renderStreams),
+      'circuit-pool': () => renderCircuitPoolConfig(),
       traffic: () => get('/api/v1/metrics/summary').then(renderTraffic),
       routing: () => Promise.resolve(renderRouting()),
       'exit-policy': () => renderExitPolicy(),

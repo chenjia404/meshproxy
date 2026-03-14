@@ -17,10 +17,12 @@ socks5:
 api:
   listen: "127.0.0.1:19080"
 
-# 電路池：預建 1～3 條電路，按用途分池（低延遲 / 匿名 / 指定國家），空閒超時銷毀、失敗自動補建
+# 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
 circuit_pool:
   min_per_pool: 1
-  max_per_pool: 3
+  max_per_pool: 2
+  min_total: 1
+  max_total: 1
   idle_timeout_seconds: 300
   replenish_interval_seconds: 30
 
@@ -29,11 +31,12 @@ circuit_pool:
 client:
   build_retries: 1      # 建鏈失敗重試次數 (0/1/2)
   begin_tcp_retries: 1  # exit 連線失敗換出口重試次數 (0/1/2)
+  begin_connect_timeout_seconds: 20
   heartbeat_enabled: true
-  heartbeat_interval_seconds: 25
-  heartbeat_timeout_seconds: 5
-  heartbeat_failure_threshold: 3
-  skip_heartbeat_when_active_seconds: 15
+  heartbeat_interval_seconds: 30
+  heartbeat_timeout_seconds: 8
+  heartbeat_failure_threshold: 5
+  skip_heartbeat_when_active_seconds: 30
   exit_selection:
     mode: auto                    # auto | country_only | country_preferred | fixed_peer
     allowed_countries: []         # country_only 時僅允許這些國家 (e.g. ["SG","JP"])

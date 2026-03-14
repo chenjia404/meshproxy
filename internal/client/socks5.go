@@ -109,6 +109,14 @@ func (c *poolReturnConn) Close() error {
 	return err
 }
 
+func (s *Socks5Server) releaseCircuitAfterBeginError(circuitID string, err error) {
+	if s.circuitMgr.CanReuseCircuitAfterBeginError(circuitID, err) {
+		s.circuitMgr.ReturnToPool(circuitID)
+		return
+	}
+	s.circuitMgr.MarkCircuitFailed(circuitID)
+}
+
 // handleConn implements the SOCKS5 state machine and uses the circuit pool when available.
 func (s *Socks5Server) handleConn(conn net.Conn) {
 	log.Printf("[socks5] new connection from %s to %s", conn.RemoteAddr().String(), conn.LocalAddr().String())
@@ -155,7 +163,7 @@ func (s *Socks5Server) handleConn(conn net.Conn) {
 	var lastBeginErr error
 	if err := s.circuitMgr.BeginTCP(circuitID, stream.ID, host, int(port)); err != nil {
 		lastBeginErr = err
-		s.circuitMgr.MarkCircuitFailed(circuitID)
+		s.releaseCircuitAfterBeginError(circuitID, err)
 		s.streamManager.Unregister(stream.ID) // keep conn open for retry
 
 		excludeExitIDs := []string{}
@@ -171,12 +179,13 @@ func (s *Socks5Server) handleConn(conn net.Conn) {
 				log.Printf("[socks5] create circuit (failover) failed: %v", err)
 				break
 			}
+			s.circuitMgr.RegisterCircuitInUse(kind, circuitID)
 			wrapped = &poolReturnConn{Conn: conn, circuitID: circuitID, mgr: s.circuitMgr}
 			stream = s.streamManager.RegisterStream(circuitID, wrapped)
 			if err := s.circuitMgr.BeginTCP(circuitID, stream.ID, host, int(port)); err != nil {
 				lastBeginErr = err
 				log.Printf("[socks5] begin_tcp (failover) failed: %v", err)
-				s.circuitMgr.MarkCircuitFailed(circuitID)
+				s.releaseCircuitAfterBeginError(circuitID, err)
 				s.streamManager.Unregister(stream.ID)
 				if plan, ok := s.circuitMgr.GetPlan(circuitID); ok {
 					excludeExitIDs = append(excludeExitIDs, plan.Hops[plan.ExitHopIndex].PeerID)
@@ -407,7 +416,7 @@ func (s *Socks5Server) handleUDPAssociate(tcpConn net.Conn) {
 			stream, replyCh := s.streamManager.RegisterStreamUDP(circuitID)
 			if err := s.circuitMgr.BeginUDP(circuitID, stream.ID, dstHost, dstPort); err != nil {
 				s.streamManager.Remove(stream.ID)
-				s.circuitMgr.ReturnToPool(circuitID)
+				s.releaseCircuitAfterBeginError(circuitID, err)
 				streamsMu.Unlock()
 				continue
 			}
@@ -500,4 +509,3 @@ func buildSocks5UDPReply(dstHost string, dstPort int, payload []byte) []byte {
 	}
 	return append(header, payload...)
 }
-

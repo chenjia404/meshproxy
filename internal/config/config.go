@@ -90,6 +90,8 @@ type ClientConfig struct {
 	BuildRetries int `yaml:"build_retries"`
 	// BeginTCPRetries is the number of retries when exit connect (BEGIN_TCP) fails, using another circuit/exit.
 	BeginTCPRetries int `yaml:"begin_tcp_retries"`
+	// BeginConnectTimeoutSeconds is how long to wait for CONNECTED after BEGIN before counting a timeout.
+	BeginConnectTimeoutSeconds int `yaml:"begin_connect_timeout_seconds"`
 	// HeartbeatEnabled controls whether idle circuits are periodically probed.
 	HeartbeatEnabled bool `yaml:"heartbeat_enabled"`
 	// HeartbeatIntervalSeconds is how often the client sends ping on reusable circuits.
@@ -143,13 +145,17 @@ type ExitSelectionConfig struct {
 // CircuitPoolConfig configures the circuit pool for pre-built circuits.
 type CircuitPoolConfig struct {
 	// MinPerPool is the minimum number of idle circuits to keep per pool kind.
-	MinPerPool int `yaml:"min_per_pool"`
+	MinPerPool int `yaml:"min_per_pool" json:"min_per_pool"`
 	// MaxPerPool is the maximum number of circuits (idle + in use) per pool kind.
-	MaxPerPool int `yaml:"max_per_pool"`
+	MaxPerPool int `yaml:"max_per_pool" json:"max_per_pool"`
+	// MinTotal is the minimum total number of circuits to keep across all pool kinds.
+	MinTotal int `yaml:"min_total" json:"min_total"`
+	// MaxTotal is the maximum total number of circuits to keep across all pool kinds.
+	MaxTotal int `yaml:"max_total" json:"max_total"`
 	// IdleTimeoutSeconds is the max seconds an idle circuit stays in pool before being closed.
-	IdleTimeoutSeconds int `yaml:"idle_timeout_seconds"`
+	IdleTimeoutSeconds int `yaml:"idle_timeout_seconds" json:"idle_timeout_seconds"`
 	// ReplenishIntervalSeconds is how often the pool maintenance runs.
-	ReplenishIntervalSeconds int `yaml:"replenish_interval_seconds"`
+	ReplenishIntervalSeconds int `yaml:"replenish_interval_seconds" json:"replenish_interval_seconds"`
 }
 
 // P2PConfig groups libp2p related configuration.
@@ -208,18 +214,21 @@ func Default() Config {
 		},
 		CircuitPool: CircuitPoolConfig{
 			MinPerPool:               1,
-			MaxPerPool:               3,
+			MaxPerPool:               1,
+			MinTotal:                 1,
+			MaxTotal:                 1,
 			IdleTimeoutSeconds:       300,
 			ReplenishIntervalSeconds: 30,
 		},
 		Client: ClientConfig{
 			BuildRetries:                   1,
 			BeginTCPRetries:                1,
+			BeginConnectTimeoutSeconds:     20,
 			HeartbeatEnabled:               true,
-			HeartbeatIntervalSeconds:       25,
-			HeartbeatTimeoutSeconds:        5,
-			HeartbeatFailureThreshold:      3,
-			SkipHeartbeatWhenActiveSeconds: 15,
+			HeartbeatIntervalSeconds:       30,
+			HeartbeatTimeoutSeconds:        8,
+			HeartbeatFailureThreshold:      5,
+			SkipHeartbeatWhenActiveSeconds: 30,
 			ExitSelection: ExitSelectionConfig{
 				Mode:              ExitSelectionAuto,
 				RequireTCPSupport: true,
@@ -281,10 +290,19 @@ func (c *Config) postProcess() error {
 		c.CircuitPool.MinPerPool = 1
 	}
 	if c.CircuitPool.MaxPerPool <= 0 {
-		c.CircuitPool.MaxPerPool = 3
+		c.CircuitPool.MaxPerPool = 2
 	}
 	if c.CircuitPool.MaxPerPool < c.CircuitPool.MinPerPool {
 		c.CircuitPool.MaxPerPool = c.CircuitPool.MinPerPool
+	}
+	if c.CircuitPool.MinTotal <= 0 {
+		c.CircuitPool.MinTotal = 1
+	}
+	if c.CircuitPool.MaxTotal <= 0 {
+		c.CircuitPool.MaxTotal = 1
+	}
+	if c.CircuitPool.MaxTotal < c.CircuitPool.MinTotal {
+		c.CircuitPool.MaxTotal = c.CircuitPool.MinTotal
 	}
 	if c.CircuitPool.IdleTimeoutSeconds <= 0 {
 		c.CircuitPool.IdleTimeoutSeconds = 300
@@ -304,17 +322,22 @@ func (c *Config) postProcess() error {
 	if c.Client.BeginTCPRetries > 2 {
 		c.Client.BeginTCPRetries = 2
 	}
+	if c.Client.BeginConnectTimeoutSeconds <= 0 {
+		c.Client.BeginConnectTimeoutSeconds = 20
+	}
 	if c.Client.HeartbeatIntervalSeconds <= 0 {
-		c.Client.HeartbeatIntervalSeconds = 25
+		c.Client.HeartbeatIntervalSeconds = 30
 	}
 	if c.Client.HeartbeatTimeoutSeconds <= 0 {
-		c.Client.HeartbeatTimeoutSeconds = 5
+		c.Client.HeartbeatTimeoutSeconds = 8
 	}
 	if c.Client.HeartbeatFailureThreshold <= 0 {
-		c.Client.HeartbeatFailureThreshold = 3
+		c.Client.HeartbeatFailureThreshold = 5
 	}
 	if c.Client.SkipHeartbeatWhenActiveSeconds < 0 {
 		c.Client.SkipHeartbeatWhenActiveSeconds = 0
+	} else if c.Client.SkipHeartbeatWhenActiveSeconds == 0 {
+		c.Client.SkipHeartbeatWhenActiveSeconds = 30
 	}
 	if c.Client.ExitSelection.Mode == "" {
 		c.Client.ExitSelection.Mode = ExitSelectionAuto
@@ -408,5 +431,18 @@ func SaveExitConfig(path string, exit ExitConfig) error {
 		return fmt.Errorf("load config for save: %w", err)
 	}
 	c.Exit = &exit
+	return Write(path, &c)
+}
+
+// SaveCircuitPoolConfig 從 path 讀取配置，僅更新 circuit_pool 後寫回，使控制台/API 的修改持久化。
+func SaveCircuitPoolConfig(path string, cp CircuitPoolConfig) error {
+	if path == "" {
+		return nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.CircuitPool = cp
 	return Write(path, &c)
 }

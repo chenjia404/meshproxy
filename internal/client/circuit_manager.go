@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -15,11 +17,33 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/store"
 )
 
 const heartbeatStreamID = "__heartbeat__"
+
+type BeginErrorKind string
+
+const (
+	BeginErrorCircuit BeginErrorKind = "circuit"
+	BeginErrorRemote  BeginErrorKind = "remote"
+	BeginErrorTimeout BeginErrorKind = "timeout"
+)
+
+// BeginError classifies failures while opening a remote stream over an existing circuit.
+type BeginError struct {
+	Kind    BeginErrorKind
+	Message string
+}
+
+func (e *BeginError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
 
 // HeartbeatConfig controls client-side circuit ping/pong probing.
 type HeartbeatConfig struct {
@@ -28,6 +52,9 @@ type HeartbeatConfig struct {
 	Timeout           time.Duration
 	FailureThreshold  int
 	SkipWhenActiveFor time.Duration
+	IdleMin           time.Duration
+	IdleMax           time.Duration
+	PollInterval      time.Duration
 }
 
 // CircuitManager manages circuit lifecycle and delegates storage to CircuitStore.
@@ -50,6 +77,9 @@ type CircuitManager struct {
 	// pendingPongs stores waiting channels for heartbeat pong messages, keyed by pingID.
 	pendingPongs map[string]chan protocol.Pong
 	heartbeat    HeartbeatConfig
+	beginTimeout time.Duration
+	heartbeatDue map[string]time.Time
+	rng          *rand.Rand
 }
 
 // NewCircuitManager creates a new CircuitManager.
@@ -64,6 +94,9 @@ func NewCircuitManager(ctx context.Context, h host.Host, store *store.CircuitSto
 		hopSessions:      make(map[string][]*protocol.HopSession),
 		pendingConnected: make(map[string]chan protocol.Connected),
 		pendingPongs:     make(map[string]chan protocol.Pong),
+		beginTimeout:     20 * time.Second,
+		heartbeatDue:     make(map[string]time.Time),
+		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -112,21 +145,45 @@ func (m *CircuitManager) BeginTCPRetries() int {
 	return m.beginTCPRetries
 }
 
+// SetBeginConnectTimeout updates the timeout used while waiting for CONNECTED after BEGIN.
+func (m *CircuitManager) SetBeginConnectTimeout(timeout time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	m.beginTimeout = timeout
+}
+
 // SetHeartbeatConfig updates circuit heartbeat settings.
 func (m *CircuitManager) SetHeartbeatConfig(cfg HeartbeatConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cfg.Interval <= 0 {
-		cfg.Interval = 25 * time.Second
+		cfg.Interval = 30 * time.Second
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 5 * time.Second
+		cfg.Timeout = 8 * time.Second
 	}
 	if cfg.FailureThreshold <= 0 {
-		cfg.FailureThreshold = 3
+		cfg.FailureThreshold = 5
+	}
+	if cfg.IdleMin <= 0 {
+		cfg.IdleMin = 1500 * time.Millisecond
+	}
+	if cfg.IdleMax <= 0 {
+		cfg.IdleMax = 9500 * time.Millisecond
+	}
+	if cfg.IdleMax < cfg.IdleMin {
+		cfg.IdleMax = cfg.IdleMin
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = time.Second
 	}
 	if cfg.SkipWhenActiveFor < 0 {
 		cfg.SkipWhenActiveFor = 0
+	} else if cfg.SkipWhenActiveFor == 0 {
+		cfg.SkipWhenActiveFor = 30 * time.Second
 	}
 	m.heartbeat = cfg
 }
@@ -161,6 +218,30 @@ func (m *CircuitManager) GetPoolStatus() *PoolStatus {
 	}
 	s := pool.Status()
 	return &s
+}
+
+// GetPoolConfig returns the current circuit pool configuration.
+func (m *CircuitManager) GetPoolConfig() *config.CircuitPoolConfig {
+	m.mu.Lock()
+	pool := m.pool
+	m.mu.Unlock()
+	if pool == nil {
+		return nil
+	}
+	cfg := pool.GetConfig()
+	return &cfg
+}
+
+// SetPoolTotalLimits updates the runtime total circuit pool bounds.
+func (m *CircuitManager) SetPoolTotalLimits(minTotal, maxTotal int) bool {
+	m.mu.Lock()
+	pool := m.pool
+	m.mu.Unlock()
+	if pool == nil {
+		return false
+	}
+	pool.SetTotalLimits(minTotal, maxTotal)
+	return true
 }
 
 // getHopSessions 返回該 circuit 的逐跳會話（順序 [relay, exit]），調用方不得修改；無會話時返回 nil。
@@ -235,6 +316,7 @@ func (m *CircuitManager) CloseCircuit(circuitID string) {
 	s, ok := m.activeStreams[circuitID]
 	delete(m.activeStreams, circuitID)
 	delete(m.hopSessions, circuitID)
+	delete(m.heartbeatDue, circuitID)
 	m.mu.Unlock()
 	if m.store != nil {
 		m.store.Delete(circuitID)
@@ -255,10 +337,29 @@ func (m *CircuitManager) IsCircuitOpen(circuitID string) bool {
 	return ok && rec != nil && rec.State == protocol.CircuitOpen && rec.Alive
 }
 
+// CircuitReuseScore returns the reuse preference score for a circuit.
+func (m *CircuitManager) CircuitReuseScore(circuitID string) int {
+	if m.store == nil {
+		return 0
+	}
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return 0
+	}
+	return rec.HeartbeatSuccesses
+}
+
 // ReturnToPool returns a circuit to the pool for reuse (call when SOCKS5 connection ends cleanly).
 func (m *CircuitManager) ReturnToPool(circuitID string) {
 	if m.pool != nil {
 		m.pool.ReturnToPool(circuitID)
+	}
+}
+
+// RegisterCircuitInUse registers a circuit created outside EnsureCircuitFromPool so it can be returned to the pool later.
+func (m *CircuitManager) RegisterCircuitInUse(kind PoolKind, circuitID string) {
+	if m.pool != nil {
+		m.pool.RegisterCircuitInUse(kind, circuitID)
 	}
 }
 
@@ -442,6 +543,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	rec.UpdatedAt = time.Now()
 	rec.Alive = true
 	m.store.Upsert(rec)
+	m.heartbeatDue[id] = time.Now().Add(m.nextHeartbeatDelayLocked())
 	go m.readLoop(id, stream)
 	m.mu.Unlock()
 	return id, nil
@@ -452,6 +554,7 @@ func (m *CircuitManager) closeCircuitLocked(id string) {
 	defer m.mu.Unlock()
 	delete(m.activeStreams, id)
 	delete(m.hopSessions, id)
+	delete(m.heartbeatDue, id)
 	if m.store != nil {
 		m.store.Delete(id)
 	}
@@ -464,6 +567,7 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 		m.mu.Lock()
 		delete(m.activeStreams, circuitID)
 		delete(m.hopSessions, circuitID)
+		delete(m.heartbeatDue, circuitID)
 		m.mu.Unlock()
 		if m.store != nil {
 			m.store.Delete(circuitID)
@@ -560,10 +664,11 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 	s, ok := m.activeStreams[circuitID]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("no active stream for circuit %s", circuitID)
+		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no active stream for circuit %s", circuitID)}
 	}
 	ch := make(chan protocol.Connected, 1)
 	m.pendingConnected[streamID] = ch
+	beginTimeout := m.beginTimeout
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -573,7 +678,7 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
-		return fmt.Errorf("no hop sessions for circuit %s", circuitID)
+		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no hop sessions for circuit %s", circuitID)}
 	}
 	payload := protocol.OnionPayload{
 		Kind:  "begin",
@@ -593,25 +698,25 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 		return err
 	}
 	if err := protocol.WriteFrame(s, frame); err != nil {
-		return err
+		return &BeginError{Kind: BeginErrorCircuit, Message: err.Error()}
 	}
 
 	// Wait for CONNECTED with timeout.
-	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(m.ctx, beginTimeout)
 	defer cancel()
 	select {
 	case resp := <-ch:
 		if !resp.OK {
 			if resp.Error != "" {
-				return fmt.Errorf("remote connect failed: %s", resp.Error)
+				return &BeginError{Kind: BeginErrorRemote, Message: fmt.Sprintf("remote connect failed: %s", resp.Error)}
 			}
-			return fmt.Errorf("remote connect failed")
+			return &BeginError{Kind: BeginErrorRemote, Message: "remote connect failed"}
 		}
 		m.touchCircuitActivity(circuitID)
 		return nil
 	case <-ctx.Done():
 		m.markCircuitTimeout(circuitID)
-		return fmt.Errorf("wait for CONNECTED timed out")
+		return &BeginError{Kind: BeginErrorTimeout, Message: "wait for CONNECTED timed out"}
 	}
 }
 
@@ -622,10 +727,11 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 	s, ok := m.activeStreams[circuitID]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("no active stream for circuit %s", circuitID)
+		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no active stream for circuit %s", circuitID)}
 	}
 	ch := make(chan protocol.Connected, 1)
 	m.pendingConnected[streamID] = ch
+	beginTimeout := m.beginTimeout
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -635,7 +741,7 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
-		return fmt.Errorf("no hop sessions for circuit %s", circuitID)
+		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no hop sessions for circuit %s", circuitID)}
 	}
 	payload := protocol.OnionPayload{
 		Kind:     "begin_udp",
@@ -655,24 +761,24 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 		return err
 	}
 	if err := protocol.WriteFrame(s, frame); err != nil {
-		return err
+		return &BeginError{Kind: BeginErrorCircuit, Message: err.Error()}
 	}
 
-	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(m.ctx, beginTimeout)
 	defer cancel()
 	select {
 	case resp := <-ch:
 		if !resp.OK {
 			if resp.Error != "" {
-				return fmt.Errorf("remote udp connect failed: %s", resp.Error)
+				return &BeginError{Kind: BeginErrorRemote, Message: fmt.Sprintf("remote udp connect failed: %s", resp.Error)}
 			}
-			return fmt.Errorf("remote udp connect failed")
+			return &BeginError{Kind: BeginErrorRemote, Message: "remote udp connect failed"}
 		}
 		m.touchCircuitActivity(circuitID)
 		return nil
 	case <-ctx.Done():
 		m.markCircuitTimeout(circuitID)
-		return fmt.Errorf("wait for CONNECTED (udp) timed out")
+		return &BeginError{Kind: BeginErrorTimeout, Message: "wait for CONNECTED (udp) timed out"}
 	}
 }
 
@@ -769,6 +875,7 @@ func (m *CircuitManager) addCircuitBytes(circuitID string, sent, recv uint64) {
 		return
 	}
 	m.store.AddStats(circuitID, sent, recv)
+	m.scheduleHeartbeat(circuitID)
 }
 
 func (m *CircuitManager) touchCircuitActivity(circuitID string) {
@@ -782,14 +889,28 @@ func (m *CircuitManager) touchCircuitActivity(circuitID string) {
 	rec.LastTrafficAt = time.Now()
 	rec.UpdatedAt = time.Now()
 	rec.Alive = true
+	rec.ConsecutiveFailures = 0
 	m.store.Upsert(rec)
+	m.scheduleHeartbeat(circuitID)
+}
+
+// CanReuseCircuitAfterBeginError reports whether a circuit should be kept after a BEGIN failure.
+func (m *CircuitManager) CanReuseCircuitAfterBeginError(circuitID string, err error) bool {
+	if !m.IsCircuitOpen(circuitID) {
+		return false
+	}
+	var beginErr *BeginError
+	if !errors.As(err, &beginErr) {
+		return false
+	}
+	return beginErr.Kind == BeginErrorRemote || beginErr.Kind == BeginErrorTimeout
 }
 
 func (m *CircuitManager) runHeartbeatLoop(ctx context.Context) {
 	m.mu.Lock()
 	cfg := m.heartbeat
 	m.mu.Unlock()
-	ticker := time.NewTicker(cfg.Interval)
+	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -797,20 +918,22 @@ func (m *CircuitManager) runHeartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, circuitID := range m.heartbeatCandidates() {
+			for _, circuitID := range m.heartbeatCandidates(time.Now()) {
 				m.probeCircuit(circuitID)
 			}
 		}
 	}
 }
 
-func (m *CircuitManager) heartbeatCandidates() []string {
+func (m *CircuitManager) heartbeatCandidates(now time.Time) []string {
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.activeStreams))
 	for circuitID := range m.activeStreams {
-		ids = append(ids, circuitID)
+		due, ok := m.heartbeatDue[circuitID]
+		if ok && !now.Before(due) {
+			ids = append(ids, circuitID)
+		}
 	}
-	cfg := m.heartbeat
 	m.mu.Unlock()
 
 	out := make([]string, 0, len(ids))
@@ -819,15 +942,18 @@ func (m *CircuitManager) heartbeatCandidates() []string {
 		if !ok || rec == nil || rec.State != protocol.CircuitOpen {
 			continue
 		}
-		if cfg.SkipWhenActiveFor > 0 && !rec.LastTrafficAt.IsZero() && time.Since(rec.LastTrafficAt) < cfg.SkipWhenActiveFor {
-			continue
-		}
 		out = append(out, circuitID)
 	}
 	return out
 }
 
 func (m *CircuitManager) probeCircuit(circuitID string) {
+	m.mu.Lock()
+	due, ok := m.heartbeatDue[circuitID]
+	m.mu.Unlock()
+	if !ok || time.Now().Before(due) {
+		return
+	}
 	lastPing := time.Now()
 	pong, err := m.sendHeartbeat(circuitID, lastPing)
 	if err != nil {
@@ -914,7 +1040,8 @@ func (m *CircuitManager) handleHeartbeatSuccess(circuitID string, lastPing time.
 		smoothed = time.Duration(float64(rec.SmoothedRTT)*0.8 + float64(rtt)*0.2)
 	}
 	recovered := !rec.Alive
-	m.store.SetHealth(circuitID, true, lastPing, lastPong, 0, smoothed)
+	m.store.SetHealth(circuitID, true, lastPing, lastPong, 0, rec.HeartbeatSuccesses+1, smoothed)
+	m.scheduleHeartbeat(circuitID)
 	log.Printf("[heartbeat] heartbeat_pong_received circuit=%s ping=%s rtt_ms=%.1f", circuitID, pong.PingID, float64(rtt.Nanoseconds())/1e6)
 	if recovered {
 		log.Printf("[heartbeat] heartbeat_circuit_recovered circuit=%s", circuitID)
@@ -936,9 +1063,10 @@ func (m *CircuitManager) handleHeartbeatFailure(circuitID string, lastPing time.
 	if failures >= cfg.FailureThreshold {
 		alive = false
 	}
-	m.store.SetHealth(circuitID, alive, lastPing, rec.LastPongAt, failures, rec.SmoothedRTT)
+	m.store.SetHealth(circuitID, alive, lastPing, rec.LastPongAt, failures, rec.HeartbeatSuccesses, rec.SmoothedRTT)
 	log.Printf("[heartbeat] heartbeat_timeout circuit=%s failures=%d", circuitID, failures)
 	if alive {
+		m.scheduleHeartbeat(circuitID)
 		return
 	}
 	log.Printf("[heartbeat] heartbeat_circuit_unhealthy circuit=%s", circuitID)
@@ -956,8 +1084,38 @@ func (m *CircuitManager) markCircuitTimeout(circuitID string) {
 	if !ok || rec == nil {
 		return
 	}
-	rec.Alive = false
+	m.mu.Lock()
+	threshold := m.heartbeat.FailureThreshold
+	m.mu.Unlock()
+	if threshold <= 0 {
+		threshold = 5
+	}
 	rec.ConsecutiveFailures++
+	rec.Alive = rec.ConsecutiveFailures < threshold
 	rec.UpdatedAt = time.Now()
 	m.store.Upsert(rec)
+}
+
+func (m *CircuitManager) scheduleHeartbeat(circuitID string) {
+	if circuitID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heartbeatDue[circuitID] = time.Now().Add(m.nextHeartbeatDelayLocked())
+}
+
+func (m *CircuitManager) nextHeartbeatDelayLocked() time.Duration {
+	cfg := m.heartbeat
+	if cfg.IdleMin <= 0 {
+		cfg.IdleMin = 1500 * time.Millisecond
+	}
+	if cfg.IdleMax <= 0 {
+		cfg.IdleMax = 9500 * time.Millisecond
+	}
+	if cfg.IdleMax <= cfg.IdleMin {
+		return cfg.IdleMin
+	}
+	delta := cfg.IdleMax - cfg.IdleMin
+	return cfg.IdleMin + time.Duration(m.rng.Int63n(int64(delta)))
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	host "github.com/libp2p/go-libp2p/core/host"
@@ -55,14 +56,17 @@ type App struct {
 	recentErrors   *api.RecentErrorsStore
 	relayCache     *relaycache.Cache
 	selfDesc       *discovery.NodeDescriptor
+
+	peerExchangeOnce sync.Map
 }
 
 const (
-	peerExchangeInterval    = time.Minute
-	peerExchangeTTL         = 2 * time.Minute
-	peerExchangeMaxEntries  = 16
-	peerExchangeMaxAddrs    = 4
-	peerExchangeDialTimeout = 8 * time.Second
+	peerExchangeInterval      = time.Minute
+	peerExchangeTTL           = 2 * time.Minute
+	peerExchangeMaxEntries    = 16
+	peerExchangeMaxAddrs      = 4
+	peerExchangeDialTimeout   = 8 * time.Second
+	peerExchangeStreamTimeout = 10 * time.Second
 )
 
 // New creates and initializes a new App instance.
@@ -133,6 +137,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
+	a.installDirectPeerExchange()
 	if a.relayCache != nil {
 		cfg.P2P.BootstrapPeers = appendUniquePeers(cfg.P2P.BootstrapPeers, a.cachedBootstrapAddrs())
 		a.cfg.P2P.BootstrapPeers = cfg.P2P.BootstrapPeers
@@ -192,6 +197,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a.circuitManager = cm
 	cm.SetBuildRetries(cfg.Client.BuildRetries)
 	cm.SetBeginTCPRetries(cfg.Client.BeginTCPRetries)
+	cm.SetBeginConnectTimeout(time.Duration(cfg.Client.BeginConnectTimeoutSeconds) * time.Second)
 	cm.SetHeartbeatConfig(client.HeartbeatConfig{
 		Enabled:           cfg.Client.HeartbeatEnabled,
 		Interval:          time.Duration(cfg.Client.HeartbeatIntervalSeconds) * time.Second,
@@ -230,6 +236,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Exits:               discoveryStore,
 		Streams:             &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
 		Pool:                &poolStatusAPIAdapter{cm: cm},
+		CircuitPoolConfig:   &poolConfigAPIAdapter{cm: cm},
 		Scores:              &scoresPlaceholder{},
 		Errors:              a.recentErrors,
 		Metrics:             &metricsSummaryAdapter{app: a},
@@ -391,6 +398,18 @@ func (p *poolStatusAPIAdapter) GetPoolStatus() *api.PoolStatusResponse {
 		}
 	}
 	return r
+}
+
+type poolConfigAPIAdapter struct {
+	cm *client.CircuitManager
+}
+
+func (p *poolConfigAPIAdapter) GetPoolConfig() *config.CircuitPoolConfig {
+	return p.cm.GetPoolConfig()
+}
+
+func (p *poolConfigAPIAdapter) SetPoolTotalLimits(minTotal, maxTotal int) bool {
+	return p.cm.SetPoolTotalLimits(minTotal, maxTotal)
 }
 
 // errorRecorderAdapter adapts api.RecentErrorsStore to client.ErrorRecorder.
@@ -600,7 +619,7 @@ func (a *App) runPeerExchangeSubscriber(ctx context.Context) {
 }
 
 func (a *App) publishPeerExchange() {
-	msg, err := a.buildPeerExchangeMessage()
+	msg, err := a.buildPeerExchangeMessage(false)
 	if err != nil || msg == nil || len(msg.Entries) == 0 {
 		return
 	}
@@ -613,7 +632,7 @@ func (a *App) publishPeerExchange() {
 	}
 }
 
-func (a *App) buildPeerExchangeMessage() (*discovery.PeerExchangeMessage, error) {
+func (a *App) buildPeerExchangeMessage(allowEmpty bool) (*discovery.PeerExchangeMessage, error) {
 	if a.discovery == nil || a.selfDesc == nil || a.idMgr == nil {
 		return nil, nil
 	}
@@ -642,7 +661,7 @@ func (a *App) buildPeerExchangeMessage() (*discovery.PeerExchangeMessage, error)
 			break
 		}
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && !allowEmpty {
 		return nil, nil
 	}
 	senderCopy := *a.selfDesc
@@ -658,6 +677,95 @@ func (a *App) buildPeerExchangeMessage() (*discovery.PeerExchangeMessage, error)
 		return nil, err
 	}
 	return msg, nil
+}
+
+func (a *App) installDirectPeerExchange() {
+	if a.host == nil {
+		return
+	}
+	a.Host().SetStreamHandler(p2p.ProtocolPeerX, a.handlePeerExchangeStream)
+	a.Host().Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(_ network.Network, conn network.Conn) {
+			a.onPeerConnected(conn.RemotePeer())
+		},
+	})
+}
+
+func (a *App) onPeerConnected(pid peer.ID) {
+	if a == nil || a.host == nil || pid == "" || pid == a.Host().ID() {
+		return
+	}
+	if _, loaded := a.peerExchangeOnce.LoadOrStore(pid.String(), struct{}{}); loaded {
+		return
+	}
+	go a.exchangePeerSnapshot(pid)
+}
+
+func (a *App) exchangePeerSnapshot(pid peer.ID) {
+	if a.host == nil || pid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, peerExchangeDialTimeout)
+	defer cancel()
+	stream, err := a.Host().NewStream(ctx, pid, p2p.ProtocolPeerX)
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(peerExchangeStreamTimeout))
+
+	req, err := a.buildPeerExchangeMessage(true)
+	if err != nil || req == nil {
+		return
+	}
+	if err := json.NewEncoder(stream).Encode(req); err != nil {
+		_ = stream.Reset()
+		return
+	}
+
+	var resp discovery.PeerExchangeMessage
+	if err := json.NewDecoder(stream).Decode(&resp); err != nil {
+		_ = stream.Reset()
+		return
+	}
+	if resp.Sender != nil && resp.Sender.PeerID == a.PeerID() {
+		return
+	}
+	if resp.ExpiresAt > 0 && time.Now().Unix() > resp.ExpiresAt {
+		return
+	}
+	ok, err := discovery.VerifyPeerExchange(&resp)
+	if err != nil || !ok {
+		return
+	}
+	a.applyPeerExchange(&resp)
+}
+
+func (a *App) handlePeerExchangeStream(stream network.Stream) {
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(peerExchangeStreamTimeout))
+
+	var req discovery.PeerExchangeMessage
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		_ = stream.Reset()
+		return
+	}
+	if req.Sender != nil && req.Sender.PeerID != a.PeerID() {
+		if req.ExpiresAt <= 0 || time.Now().Unix() <= req.ExpiresAt {
+			if ok, err := discovery.VerifyPeerExchange(&req); err == nil && ok {
+				a.applyPeerExchange(&req)
+			}
+		}
+	}
+
+	resp, err := a.buildPeerExchangeMessage(true)
+	if err != nil || resp == nil {
+		return
+	}
+	if err := json.NewEncoder(stream).Encode(resp); err != nil {
+		_ = stream.Reset()
+		return
+	}
 }
 
 func (a *App) applyPeerExchange(msg *discovery.PeerExchangeMessage) {
