@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "configs/config.yaml", "path to config file")
+	cfgPath := flag.String("config", "config.yaml", "path to config file (default: config.yaml in current directory)")
 	modeFlag := flag.String("mode", "", "override node mode (relay or relay+exit)")
 	socksAddrFlag := flag.String("socks5", "", "override local SOCKS5 listen address, e.g. 127.0.0.1:1080")
 	apiAddrFlag := flag.String("api", "", "override local API listen address, e.g. 127.0.0.1:19080")
@@ -28,6 +28,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
+	cfg.ConfigFilePath = *cfgPath
 
 	// command-line overrides (for quick testing)
 	if *modeFlag != "" {

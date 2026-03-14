@@ -45,6 +45,25 @@
     .empty { color: var(--muted); font-style: italic; }
     .refresh { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
     .path-hop { display: inline-block; margin-right: 0.25rem; padding: 0.1rem 0.4rem; background: var(--border); border-radius: 4px; font-size: 0.8rem; }
+    .form-row { margin-bottom: 0.75rem; }
+    .form-row label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.25rem; }
+    .form-row select, .form-row input[type=text] { width: 100%; max-width: 280px; padding: 0.4rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
+    .form-row .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+    .tag-input { display: flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; padding: 0.4rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; min-height: 38px; }
+    .tag-input input { flex: 1; min-width: 60px; background: none; border: none; color: var(--text); padding: 0.2rem; font-size: 0.9rem; }
+    .tag-input input:focus { outline: none; }
+    .tag { display: inline-flex; align-items: center; padding: 0.15rem 0.4rem; background: var(--border); border-radius: 4px; font-size: 0.8rem; }
+    .tag .rm { cursor: pointer; margin-left: 0.35rem; color: var(--muted); }
+    .tag .rm:hover { color: var(--err); }
+    .btn { padding: 0.4rem 0.8rem; border-radius: 4px; border: none; cursor: pointer; font-size: 0.875rem; }
+    .btn-primary { background: var(--accent); color: var(--bg); }
+    .btn-primary:hover { background: #79b8ff; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .exit-candidates { margin-top: 1rem; }
+    .exit-candidates table { font-size: 0.8rem; }
+    .msg { padding: 0.5rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.875rem; }
+    .msg.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
+    .msg.err { background: rgba(248,81,73,0.15); color: var(--err); }
   </style>
 </head>
 <body>
@@ -131,7 +150,98 @@
       return '<h1>路由規則</h1><div class="card"><p class="empty">路由規則介面尚未開放，請透過設定檔或 API 設定。</p></div>';
     }
     function renderExitPolicy() {
-      return '<h1>出口策略</h1><div class="card"><p class="empty">出口策略介面尚未開放，請透過設定檔或 API 設定。</p></div>';
+      return Promise.all([
+        get('/api/v1/client/exit-selection').catch(() => ({})),
+        get('/api/v1/client/exit-candidates').catch(() => ({ candidates: [] })),
+      ]).then(([cfg, cand]) => {
+        cfg = cfg || {};
+        const candidates = Array.isArray(cand?.candidates) ? cand.candidates : [];
+        const allowed = (cfg.allowed_countries || []).slice();
+        const preferred = (cfg.preferred_countries || []).slice();
+        const excluded = (cfg.exclude_countries || []).slice();
+        const mode = cfg.mode || 'auto';
+        const fallback = cfg.fallback_to_any !== false;
+        const allowDirect = cfg.allow_direct_exit !== false;
+        const requireDNS = !!cfg.require_remote_dns;
+        const requireTCP = cfg.require_tcp_support !== false;
+        const tagsHtml = (id, list, placeholder) => {
+          const tags = list.map(c => '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>').join('');
+          return '<div class="tag-input" data-list="' + id + '">' + tags + '<input type="text" placeholder="' + (placeholder || '輸入國家代碼如 SG 按 Enter 新增') + '" maxlength="8" data-add="' + id + '"></div>';
+        };
+        let html = '<h1>出口節點管理</h1><div id="exit-msg"></div><div class="card"><h3>出口選擇策略</h3>';
+        html += '<div class="form-row"><label>模式</label><select id="exit-mode">';
+        html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自動選擇</option>';
+        html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>僅使用指定國家/地區</option>';
+        html += '<option value="country_preferred"' + (mode === 'country_preferred' ? ' selected' : '') + '>優先使用指定國家/地區</option>';
+        html += '<option value="fixed_peer"' + (mode === 'fixed_peer' ? ' selected' : '') + '>固定指定出口節點</option></select>';
+        html += '<div class="hint">控制每條電路最後一跳出口的篩選方式。</div></div>';
+        html += '<div class="form-row"><label>固定出口 Peer ID（fixed_peer 時必填）</label><input type="text" id="exit-fixed-peer" value="' + escapeHtml(cfg.fixed_exit_peer_id || '') + '" placeholder="12D3KooW..."></div>';
+        html += '<div class="form-row"><label>僅允許的國家/地區（country_only 時生效）</label>' + tagsHtml('allowed_countries', allowed, '如 SG、JP、TH') + '</div>';
+        html += '<div class="form-row"><label>優先國家/地區順序（country_preferred 時生效）</label>' + tagsHtml('preferred_countries', preferred, '如 TH、SG、MY') + '</div>';
+        html += '<div class="form-row"><label>排除指定國家/地區</label>' + tagsHtml('exclude_countries', excluded, '如 CN、US，Enter 新增') + '<div class="hint">任意模式生效：這些國家的出口將不會被選。</div></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-fallback"' + (fallback ? ' checked' : '') + '> 找不到符合條件時允許退回任意出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-allow-direct"' + (allowDirect ? ' checked' : '') + '> 允許直連出口（Local → Exit）</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-dns"' + (requireDNS ? ' checked' : '') + '> 僅選支援 Remote DNS 的出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-tcp"' + (requireTCP ? ' checked' : '') + '> 僅選支援 TCP 的出口</label></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">儲存設定</button></div></div>';
+        html += '<div class="card exit-candidates"><h3>目前可選出口（' + candidates.length + '）</h3>';
+        if (!candidates.length) html += '<p class="empty">暫無符合目前規則的出口節點，或尚未發現任何 Exit。</p>';
+        else html += '<table><thead><tr><th>Peer ID</th><th>國家/地區</th></tr></thead><tbody>' +
+          candidates.map(c => '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.country || '-') + '</td></tr>').join('') + '</tbody></table>';
+        html += '</div>';
+        setTimeout(() => {
+          const store = { allowed_countries: allowed, preferred_countries: preferred, exclude_countries: excluded };
+          document.querySelectorAll('.tag-input').forEach(div => {
+            const listId = div.dataset.list;
+            const input = div.querySelector('input[data-add]');
+            if (!input) return;
+            input.addEventListener('keydown', e => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              const v = (input.value || '').trim().toUpperCase();
+              if (!v || store[listId].indexOf(v) >= 0) { input.value = ''; return; }
+              store[listId].push(v);
+              const tag = document.createElement('span');
+              tag.className = 'tag';
+              tag.setAttribute('data-id', listId);
+              tag.innerHTML = escapeHtml(v) + '<span class="rm" data-remove="' + escapeHtml(v) + '">&times;</span>';
+              tag.querySelector('.rm').onclick = () => { store[listId] = store[listId].filter(x => x !== v); tag.remove(); };
+              div.insertBefore(tag, input);
+              input.value = '';
+            });
+            div.querySelectorAll('.rm').forEach(rm => {
+              rm.onclick = () => { const v = rm.dataset.remove; store[listId] = store[listId].filter(x => x !== v); rm.closest('.tag').remove(); };
+            });
+          });
+          const saveBtn = document.getElementById('exit-save');
+          if (saveBtn) saveBtn.onclick = () => {
+            const payload = {
+              mode: document.getElementById('exit-mode').value,
+              allowed_countries: store.allowed_countries,
+              preferred_countries: store.preferred_countries,
+              exclude_countries: store.exclude_countries,
+              exclude_peer_ids: cfg.exclude_peer_ids || [],
+              fixed_exit_peer_id: (document.getElementById('exit-fixed-peer')?.value || '').trim(),
+              require_remote_dns: document.getElementById('exit-require-dns').checked,
+              require_tcp_support: document.getElementById('exit-require-tcp').checked,
+              fallback_to_any: document.getElementById('exit-fallback').checked,
+              allow_direct_exit: document.getElementById('exit-allow-direct').checked,
+            };
+            saveBtn.disabled = true;
+            fetch(api('/api/v1/client/exit-selection'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+              .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || r.statusText); return d; }))
+              .then(() => {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg ok">已儲存出口選擇設定。</div>';
+                setTimeout(() => show('exit-policy'), 600);
+              })
+              .catch(err => {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg err">儲存失敗: ' + escapeHtml(err.message) + '</div>';
+              })
+              .finally(() => { if (document.getElementById('exit-save')) document.getElementById('exit-save').disabled = false; });
+          };
+        }, 0);
+        return html;
+      }).catch(err => '<h1>出口節點管理</h1><div class="card"><p class="empty">載入失敗: ' + escapeHtml(err.message) + '</p></div>');
     }
     function renderLogs(data) {
       const list = Array.isArray(data) ? data : [];
@@ -158,7 +268,7 @@
       streams: () => get('/api/v1/streams').then(renderStreams),
       traffic: () => get('/api/v1/metrics/summary').then(renderTraffic),
       routing: () => Promise.resolve(renderRouting()),
-      'exit-policy': () => Promise.resolve(renderExitPolicy()),
+      'exit-policy': () => renderExitPolicy(),
       logs: () => get('/api/v1/errors/recent').then(renderLogs),
     };
     function show(page) {

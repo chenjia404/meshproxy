@@ -124,6 +124,8 @@ type LocalAPIOpts struct {
 	Metrics         MetricsSummaryProvider
 	ExitSelection   ExitSelectionProvider
 	ExitCandidates  ExitCandidatesProvider
+	// ConfigPath 若非空，保存出口策略時會寫回該配置文件，使重啟後仍生效。
+	ConfigPath string
 }
 
 // PoolStatusProvider returns current circuit pool status.
@@ -386,6 +388,12 @@ func (a *LocalAPI) handleExitSelection(w http.ResponseWriter, r *http.Request) {
 			cfg.Mode = config.ExitSelectionAuto
 		}
 		a.opts.ExitSelection.SetExitSelection(&cfg)
+		if a.opts.ConfigPath != "" {
+			if err := config.SaveExitSelection(a.opts.ConfigPath, cfg); err != nil {
+				http.Error(w, "save to config file failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		writeJSON(w, a.opts.ExitSelection.GetExitSelection())
 		return
 	default:

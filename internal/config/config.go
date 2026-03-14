@@ -17,6 +17,8 @@ const ModeRelayExit = "relay+exit"
 
 // Config is the root configuration for meshproxy.
 type Config struct {
+	// ConfigFilePath is set by the loader/caller (e.g. main) for persisting runtime changes (e.g. exit_selection). Not from YAML.
+	ConfigFilePath string `yaml:"-"`
 	// Mode controls whether this node only relays traffic or also acts as an exit.
 	// Allowed values: "relay", "relay+exit".
 	Mode string `yaml:"mode"`
@@ -262,4 +264,23 @@ func (c *Config) Validate() error {
 		return errors.New("client.exit_selection.fixed_exit_peer_id required when mode is fixed_peer")
 	}
 	return nil
+}
+
+// Write 將配置寫入 YAML 文件（用於持久化出口策略等運行時修改）。
+func Write(path string, c *Config) error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// SaveExitSelection 從 path 讀取配置，僅更新 client.exit_selection 後寫回，使控制台/API 的修改持久化。
+func SaveExitSelection(path string, ec ExitSelectionConfig) error {
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.Client.ExitSelection = ec
+	return Write(path, &c)
 }

@@ -150,6 +150,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Metrics:        &metricsSummaryAdapter{app: a},
 		ExitSelection:  selector,
 		ExitCandidates: selector,
+		ConfigPath:     cfg.ConfigFilePath,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()

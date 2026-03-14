@@ -45,6 +45,25 @@
     .empty { color: var(--muted); font-style: italic; }
     .refresh { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
     .path-hop { display: inline-block; margin-right: 0.25rem; padding: 0.1rem 0.4rem; background: var(--border); border-radius: 4px; font-size: 0.8rem; }
+    .form-row { margin-bottom: 0.75rem; }
+    .form-row label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.25rem; }
+    .form-row select, .form-row input[type=text] { width: 100%; max-width: 280px; padding: 0.4rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
+    .form-row .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+    .tag-input { display: flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; padding: 0.4rem; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; min-height: 38px; }
+    .tag-input input { flex: 1; min-width: 60px; background: none; border: none; color: var(--text); padding: 0.2rem; font-size: 0.9rem; }
+    .tag-input input:focus { outline: none; }
+    .tag { display: inline-flex; align-items: center; padding: 0.15rem 0.4rem; background: var(--border); border-radius: 4px; font-size: 0.8rem; }
+    .tag .rm { cursor: pointer; margin-left: 0.35rem; color: var(--muted); }
+    .tag .rm:hover { color: var(--err); }
+    .btn { padding: 0.4rem 0.8rem; border-radius: 4px; border: none; cursor: pointer; font-size: 0.875rem; }
+    .btn-primary { background: var(--accent); color: var(--bg); }
+    .btn-primary:hover { background: #79b8ff; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .exit-candidates { margin-top: 1rem; }
+    .exit-candidates table { font-size: 0.8rem; }
+    .msg { padding: 0.5rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.875rem; }
+    .msg.ok { background: rgba(63,185,80,0.15); color: var(--ok); }
+    .msg.err { background: rgba(248,81,73,0.15); color: var(--err); }
   </style>
 </head>
 <body>
@@ -116,7 +135,112 @@
         '<dt>最近错误数</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' + pool + '</dl></div>';
     }
     function renderRouting() { return '<h1>路由规则</h1><div class="card"><p class="empty">路由规则界面尚未开放，请通过配置文件或 API 设置。</p></div>'; }
-    function renderExitPolicy() { return '<h1>出口策略</h1><div class="card"><p class="empty">出口策略界面尚未开放，请通过配置文件或 API 设置。</p></div>'; }
+
+    function renderExitPolicy() {
+      return Promise.all([
+        get('/api/v1/client/exit-selection').catch(function(){ return {}; }),
+        get('/api/v1/client/exit-candidates').catch(function(){ return { candidates: [] }; })
+      ]).then(function(res) {
+        var cfg = res[0] || {};
+        var cand = res[1];
+        var candidates = (cand && Array.isArray(cand.candidates)) ? cand.candidates : [];
+        var allowed = (cfg.allowed_countries || []).slice();
+        var preferred = (cfg.preferred_countries || []).slice();
+        var excluded = (cfg.exclude_countries || []).slice();
+        var mode = cfg.mode || 'auto';
+        var fallback = cfg.fallback_to_any !== false;
+        var allowDirect = cfg.allow_direct_exit !== false;
+        var requireDNS = !!cfg.require_remote_dns;
+        var requireTCP = cfg.require_tcp_support !== false;
+
+        var tagsHtml = function(id, list, placeholder) {
+          var tags = list.map(function(c){ return '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>'; }).join('');
+          return '<div class="tag-input" data-list="' + id + '" data-store="' + escapeHtml(JSON.stringify(list)) + '">' + tags + '<input type="text" placeholder="' + (placeholder || '输入国家代码如 SG 回车添加') + '" maxlength="8" data-add="' + id + '"> </div>';
+        };
+
+        var html = '<h1>出口节点管理</h1>';
+        html += '<div id="exit-msg"></div>';
+        html += '<div class="card"><h3>出口选择策略</h3>';
+        html += '<div class="form-row"><label>模式</label><select id="exit-mode">';
+        html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自动选择</option>';
+        html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>仅使用指定国家/地区</option>';
+        html += '<option value="country_preferred"' + (mode === 'country_preferred' ? ' selected' : '') + '>优先使用指定国家/地区</option>';
+        html += '<option value="fixed_peer"' + (mode === 'fixed_peer' ? ' selected' : '') + '>固定指定出口节点</option>';
+        html += '</select><div class="hint">控制每条电路最后一跳出口的筛选方式。</div></div>';
+
+        html += '<div class="form-row" id="row-fixed"><label>固定出口 Peer ID（fixed_peer 时必填）</label><input type="text" id="exit-fixed-peer" value="' + escapeHtml(cfg.fixed_exit_peer_id || '') + '" placeholder="12D3KooW..."><div class="hint">指定每条电路最后一跳必须使用的出口节点。</div></div>';
+        html += '<div class="form-row" id="row-allowed"><label>仅允许的国家/地区（country_only 时生效）</label>' + tagsHtml('allowed_countries', allowed, '如 SG、JP、TH') + '<div class="hint">仅从这些国家的出口中选择，多个用回车添加。</div></div>';
+        html += '<div class="form-row" id="row-preferred"><label>优先国家/地区顺序（country_preferred 时生效）</label>' + tagsHtml('preferred_countries', preferred, '如 TH、SG、MY') + '<div class="hint">按顺序优先选择，前面的优先。</div></div>';
+        html += '<div class="form-row"><label>排除指定国家/地区</label>' + tagsHtml('exclude_countries', excluded, '如 CN、US，回车添加') + '<div class="hint">任意模式生效：这些国家的出口将不会被选。</div></div>';
+
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-fallback"' + (fallback ? ' checked' : '') + '> 找不到符合条件时允许退回任意出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-allow-direct"' + (allowDirect ? ' checked' : '') + '> 允许直连出口（Local → Exit）</label><div class="hint">关闭则必须经至少一个 Relay。</div></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-dns"' + (requireDNS ? ' checked' : '') + '> 仅选支持 Remote DNS 的出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-tcp"' + (requireTCP ? ' checked' : '') + '> 仅选支持 TCP 的出口</label></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">保存设置</button></div>';
+        html += '</div>';
+
+        html += '<div class="card exit-candidates"><h3>当前可选出口（' + candidates.length + '）</h3>';
+        if (!candidates.length) html += '<p class="empty">暂无符合当前规则的出口节点，或尚未发现任何 Exit。</p>';
+        else html += '<table><thead><tr><th>Peer ID</th><th>国家/地区</th></tr></thead><tbody>' +
+          candidates.map(function(c){ return '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.country || '-') + '</td></tr>'; }).join('') + '</tbody></table>';
+        html += '</div>';
+
+        setTimeout(function bindExitPolicy() {
+          var store = { allowed_countries: allowed, preferred_countries: preferred, exclude_countries: excluded };
+          document.querySelectorAll('.tag-input').forEach(function(div) {
+            var listId = div.dataset.list;
+            var input = div.querySelector('input[data-add]');
+            if (!input) return;
+            input.addEventListener('keydown', function(e) {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              var v = (input.value || '').trim().toUpperCase();
+              if (!v || store[listId].indexOf(v) >= 0) { input.value = ''; return; }
+              store[listId].push(v);
+              var tag = document.createElement('span');
+              tag.className = 'tag';
+              tag.setAttribute('data-id', listId);
+              tag.innerHTML = escapeHtml(v) + '<span class="rm" data-remove="' + escapeHtml(v) + '">&times;</span>';
+              tag.querySelector('.rm').addEventListener('click', function(){ store[listId] = store[listId].filter(function(x){ return x !== v; }); tag.remove(); });
+              div.insertBefore(tag, input);
+              input.value = '';
+            });
+            div.querySelectorAll('.rm').forEach(function(rm) {
+              rm.addEventListener('click', function(){ var v = rm.dataset.remove; store[listId] = store[listId].filter(function(x){ return x !== v; }); rm.closest('.tag').remove(); });
+            });
+          });
+          document.getElementById('exit-save').addEventListener('click', function() {
+            var payload = {
+              mode: document.getElementById('exit-mode').value,
+              allowed_countries: store.allowed_countries,
+              preferred_countries: store.preferred_countries,
+              exclude_countries: store.exclude_countries,
+              exclude_peer_ids: cfg.exclude_peer_ids || [],
+              fixed_exit_peer_id: (document.getElementById('exit-fixed-peer') && document.getElementById('exit-fixed-peer').value) ? document.getElementById('exit-fixed-peer').value.trim() : '',
+              require_remote_dns: document.getElementById('exit-require-dns').checked,
+              require_tcp_support: document.getElementById('exit-require-tcp').checked,
+              fallback_to_any: document.getElementById('exit-fallback').checked,
+              allow_direct_exit: document.getElementById('exit-allow-direct').checked
+            };
+            var btn = document.getElementById('exit-save');
+            btn.disabled = true;
+            fetch(api('/api/v1/client/exit-selection'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+              .then(function(r){ return r.json().then(function(d){ if (!r.ok) throw new Error(d.error || r.statusText); return d; }); })
+              .then(function() {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg ok">已保存出口选择设置。</div>';
+                setTimeout(function(){ show('exit-policy'); }, 600);
+              })
+              .catch(function(err) {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+                btn.disabled = false;
+              })
+              .then(function(){ if (document.getElementById('exit-save')) document.getElementById('exit-save').disabled = false; });
+          });
+        }, 0);
+        return html;
+      }).catch(function(err){ return '<h1>出口节点管理</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
+    }
     function renderLogs(data) {
       var list = Array.isArray(data) ? data : [];
       if (!list.length) return '<h1>日志面板</h1><div class="card"><p class="empty">尚无最近错误记录</p></div>';
@@ -133,7 +257,7 @@
       streams: function(){ return get('/api/v1/streams').then(renderStreams); },
       traffic: function(){ return get('/api/v1/metrics/summary').then(renderTraffic); },
       routing: function(){ return Promise.resolve(renderRouting()); },
-      'exit-policy': function(){ return Promise.resolve(renderExitPolicy()); },
+      'exit-policy': function(){ return renderExitPolicy(); },
       logs: function(){ return get('/api/v1/errors/recent').then(renderLogs); }
     };
     function show(page) {
