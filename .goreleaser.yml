@@ -1,0 +1,72 @@
+# This is an example .goreleaser.yml file with some sane defaults.
+# Make sure to check the documentation at http://goreleaser.com
+version: 2
+project_name: meshproxy
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+    # you may remove this if you don't need go generate
+    - go generate ./...
+builds:
+  - env:
+      - CGO_ENABLED=0
+    main: ./cmd/node
+    hooks:
+      pre:
+        - cp -f configs/config.example.yaml "{{dir  .Path }}/config.yaml"
+    
+    ldflags:
+      - -s -w -X main.gitRev="{{.ShortCommit}}" -X main.buildTime="{{.CommitDate}}"
+    asmflags:
+      - all=-trimpath={{.Env.GOPATH}}
+      - ./dontoptimizeme=-N
+    gcflags:
+      - all=-trimpath={{.Env.GOPATH}}
+
+archives:
+  -
+    id: meshproxy
+    formats: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      mode: 0777
+    format_overrides:
+      - goos: windows
+        formats: zip
+    files:
+    - src: configs/config.example.yaml
+      dst: config.yaml
+
+  
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha512
+
+signs:
+  - artifacts: all
+    signature: "${artifact}.asc"
+    cmd: C:\soft\GnuPG\bin\gpg.exe
+    args: ["--armor","-u","189BE79683369DA3","--detach-sign", "${artifact}"]
+
+snapshot:
+  version_template: "{{ .Tag }}"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+dockers_v2:
+  - images:
+      - "chenjia404/{{.ProjectName}}"
+    tags:
+      - "dev"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: "goreleaser.dockefile"
+    extra_files:
+      - configs/config.example.yaml

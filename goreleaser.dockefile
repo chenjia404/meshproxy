@@ -1,0 +1,28 @@
+FROM alpine:3
+
+
+ARG TARGETPLATFORM
+ARG VERSION
+ENV VERSION=$VERSION
+
+WORKDIR /app/
+RUN apk update --no-cache && apk upgrade && apk add --no-cache ca-certificates
+
+
+RUN addgroup -S mesh && adduser -S mesh -G mesh
+
+COPY $TARGETPLATFORM/meshproxy /usr/local/bin/meshproxy
+# extra_files 會把 configs/config.example.yaml 放進 build context 根目錄的對應路徑
+COPY configs/config.example.yaml /app/config.yaml
+
+
+# 為非 root 用戶預先建立並授權數據目錄
+
+RUN mkdir -p /app/data && chown -R mesh:mesh /app
+
+USER mesh
+
+EXPOSE 1080 4001 19080
+
+ENTRYPOINT ["/usr/local/bin/meshproxy"]
+CMD ["-config", "/app/config.yaml"]
