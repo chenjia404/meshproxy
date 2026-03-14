@@ -6,6 +6,7 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	peer "github.com/libp2p/go-libp2p/core/peer"
 	routing "github.com/libp2p/go-libp2p/core/routing"
 	routing2 "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 )
@@ -13,16 +14,16 @@ import (
 // StartDiscovery 預留 DHT 節點發現的擴展點。
 // 目前版本僅依賴顯式 bootstrap_peers + gossip descriptor，
 // 沒有引入額外 discovery 模組，以避免 go-libp2p 版本衝突。
-func StartDiscovery(ctx context.Context, h host.Host, _ routing.Routing, rendezvous string) {
+func StartDiscovery(ctx context.Context, h host.Host, _ routing.Routing, rendezvous string, onPeerFound func(peer.AddrInfo)) {
 	// log.Printf("[discovery] rendezvous discovery not enabled (tag=%s)", rendezvous)
 	// _ = time.Second
-	nodeDiscovery(ctx, h, rendezvous)
+	nodeDiscovery(ctx, h, rendezvous, onPeerFound)
 
 }
 
 var d *dht.IpfsDHT
 
-func nodeDiscovery(ctx context.Context, h host.Host, Protocol string) (error, host.Host, error) {
+func nodeDiscovery(ctx context.Context, h host.Host, Protocol string, onPeerFound func(peer.AddrInfo)) (error, host.Host, error) {
 	err := d.Bootstrap(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -55,6 +56,9 @@ func nodeDiscovery(ctx context.Context, h host.Host, Protocol string) (error, ho
 				if peer.ID == h.ID() {
 					//log.Println("过滤自己")
 					continue
+				}
+				if onPeerFound != nil {
+					onPeerFound(peer)
 				}
 
 				if h.Network().Connectedness(peer.ID) != network.Connected {

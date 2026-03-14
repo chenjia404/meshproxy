@@ -55,6 +55,7 @@ type App struct {
 	streamMgr      *client.StreamManager
 	recentErrors   *api.RecentErrorsStore
 	relayCache     *relaycache.Cache
+	bootstrapCache *relaycache.Cache
 	selfDesc       *discovery.NodeDescriptor
 
 	peerExchangeOnce sync.Map
@@ -67,6 +68,7 @@ const (
 	peerExchangeMaxAddrs      = 4
 	peerExchangeDialTimeout   = 8 * time.Second
 	peerExchangeStreamTimeout = 10 * time.Second
+	bootstrapCacheMaxEntries  = 200
 )
 
 // New creates and initializes a new App instance.
@@ -82,14 +84,26 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init relay cache: %w", err)
 	}
+	if err := relayCache.Clear(); err != nil {
+		return nil, fmt.Errorf("reset relay cache: %w", err)
+	}
+	bootstrapPath := filepath.Join(cfg.DataDir, "bootstrap.json")
+	bootstrapCache, err := relaycache.New(bootstrapPath)
+	if err != nil {
+		return nil, fmt.Errorf("init bootstrap cache: %w", err)
+	}
+	if err := bootstrapCache.Clear(); err != nil {
+		return nil, fmt.Errorf("reset bootstrap cache: %w", err)
+	}
 
 	a := &App{
-		ctx:          ctx,
-		cfg:          cfg,
-		startTime:    time.Now(),
-		store:        store.NewMemoryStore(),
-		circuitStore: store.NewCircuitStore(),
-		relayCache:   relayCache,
+		ctx:            ctx,
+		cfg:            cfg,
+		startTime:      time.Now(),
+		store:          store.NewMemoryStore(),
+		circuitStore:   store.NewCircuitStore(),
+		relayCache:     relayCache,
+		bootstrapCache: bootstrapCache,
 	}
 
 	// Identity
@@ -115,7 +129,18 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	// DHT-based peer discovery: all nodes sharing the same discovery tag
 	// will try to find and connect to each other automatically.
-	p2p.StartDiscovery(ctx, h.Host, dhtComp.Routing(), cfg.P2P.DiscoveryTag)
+	p2p.StartDiscovery(ctx, h.Host, dhtComp.Routing(), cfg.P2P.DiscoveryTag, func(info peer.AddrInfo) {
+		if a.relayCache == nil || info.ID == "" {
+			return
+		}
+		addrs := filterMultiaddrStrings(info.Addrs)
+		if len(addrs) == 0 {
+			return
+		}
+		if err := a.relayCache.Add(info.ID.String(), addrs); err != nil {
+			log.Printf("[relaycache] persist discovered peer %s: %v", info.ID.String(), err)
+		}
+	})
 
 	// Gossip
 	gossipComp, err := p2p.NewGossip(ctx, h.Host)
@@ -138,11 +163,6 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
 	a.installDirectPeerExchange()
-	if a.relayCache != nil {
-		cfg.P2P.BootstrapPeers = appendUniquePeers(cfg.P2P.BootstrapPeers, a.cachedBootstrapAddrs())
-		a.cfg.P2P.BootstrapPeers = cfg.P2P.BootstrapPeers
-	}
-	go a.runRelayCache(ctx)
 	go a.runPeerExchange(ctx)
 
 	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
@@ -470,52 +490,6 @@ func (m *metricsSummaryAdapter) GetSummary() map[string]any {
 	}
 }
 
-func appendUniquePeers(base, extra []string) []string {
-	if len(extra) == 0 {
-		return base
-	}
-	seen := make(map[string]struct{}, len(base))
-	for _, addr := range base {
-		seen[addr] = struct{}{}
-	}
-	for _, addr := range extra {
-		if addr == "" {
-			continue
-		}
-		if _, ok := seen[addr]; ok {
-			continue
-		}
-		base = append(base, addr)
-		seen[addr] = struct{}{}
-	}
-	return base
-}
-
-func (a *App) cachedBootstrapAddrs() []string {
-	if a.relayCache == nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	out := make([]string, 0)
-	for _, rec := range a.relayCache.Records() {
-		if rec == nil {
-			continue
-		}
-		for _, addr := range rec.Addrs {
-			norm := ensurePeerMultiaddr(addr, rec.PeerID)
-			if norm == "" {
-				continue
-			}
-			if _, ok := seen[norm]; ok {
-				continue
-			}
-			seen[norm] = struct{}{}
-			out = append(out, norm)
-		}
-	}
-	return out
-}
-
 func ensurePeerMultiaddr(addr, peerID string) string {
 	if addr == "" || peerID == "" {
 		return ""
@@ -536,38 +510,6 @@ func ensurePeerMultiaddr(addr, peerID string) string {
 		return ""
 	}
 	return m.Encapsulate(p2pSeg).String()
-}
-
-func (a *App) runRelayCache(ctx context.Context) {
-	if a.relayCache == nil || a.discovery == nil {
-		return
-	}
-	a.syncRelayCache()
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			a.syncRelayCache()
-		}
-	}
-}
-
-func (a *App) syncRelayCache() {
-	if a.relayCache == nil || a.discovery == nil {
-		return
-	}
-	for _, desc := range a.discovery.Store().ListRelays() {
-		addrs := a.relayAddrs(desc)
-		if len(addrs) == 0 {
-			continue
-		}
-		if err := a.relayCache.Add(desc.PeerID, addrs); err != nil {
-			log.Printf("[relaycache] persist relay %s: %v", desc.PeerID, err)
-		}
-	}
 }
 
 func (a *App) runPeerExchange(ctx context.Context) {
@@ -686,6 +628,7 @@ func (a *App) installDirectPeerExchange() {
 	a.Host().SetStreamHandler(p2p.ProtocolPeerX, a.handlePeerExchangeStream)
 	a.Host().Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(_ network.Network, conn network.Conn) {
+			a.recordConnectedRelay(conn.RemotePeer(), conn.RemoteMultiaddr())
 			a.onPeerConnected(conn.RemotePeer())
 		},
 	})
@@ -699,6 +642,44 @@ func (a *App) onPeerConnected(pid peer.ID) {
 		return
 	}
 	go a.exchangePeerSnapshot(pid)
+}
+
+func (a *App) recordConnectedRelay(pid peer.ID, remote multiaddr.Multiaddr) {
+	if a == nil || pid == "" {
+		return
+	}
+	addrs := make([]string, 0, 8)
+	if remote != nil {
+		addrs = append(addrs, remote.String())
+	}
+	if a.host != nil {
+		addrs = append(addrs, filterMultiaddrStrings(a.Host().Peerstore().Addrs(pid))...)
+	}
+	addrs = filterAddrStrings(addrs)
+	if len(addrs) == 0 {
+		return
+	}
+	go a.persistConnectedPeerByProtocol(pid, addrs)
+}
+
+func (a *App) persistConnectedPeerByProtocol(pid peer.ID, addrs []string) {
+	if a == nil || a.host == nil || pid == "" || len(addrs) == 0 {
+		return
+	}
+	supported, err := a.Host().Peerstore().SupportsProtocols(pid, protocol.CircuitProtocolID)
+	if err == nil && len(supported) > 0 {
+		if a.relayCache != nil {
+			if err := a.relayCache.Add(pid.String(), addrs); err != nil {
+				log.Printf("[relaycache] persist connected peer %s: %v", pid.String(), err)
+			}
+		}
+		return
+	}
+	if a.bootstrapCache != nil {
+		if err := a.bootstrapCache.AddWithLimit(pid.String(), addrs, bootstrapCacheMaxEntries); err != nil {
+			log.Printf("[bootstrapcache] persist connected peer %s: %v", pid.String(), err)
+		}
+	}
 }
 
 func (a *App) exchangePeerSnapshot(pid peer.ID) {
@@ -889,12 +870,12 @@ func hasRealIP(m multiaddr.Multiaddr) bool {
 		return false
 	}
 	if v, err := m.ValueForProtocol(multiaddr.P_IP4); err == nil {
-		if v != "" && v != "0.0.0.0" {
+		if v != "" && v != "0.0.0.0" && v != "127.0.0.1" {
 			return true
 		}
 	}
 	if v, err := m.ValueForProtocol(multiaddr.P_IP6); err == nil {
-		if v != "" && v != "::" {
+		if v != "" && v != "::" && v != "::1" {
 			return true
 		}
 	}
