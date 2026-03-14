@@ -194,8 +194,8 @@
     function renderCircuits(data) {
       var list = Array.isArray(data) ? data : [];
       if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前无电路</p></div>';
-      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>状态</th><th>心跳</th><th>路径</th><th>建立时间</th></tr></thead><tbody>' +
-        list.map(function(c){ var path = (c.plan && c.plan.hops) ? c.plan.hops.map(function(h){ return '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>'; }).join(' → ') : '-'; return '<tr><td><code>' + escapeHtml((c.id||'').slice(0,8)) + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + formatHealth(c.alive, c.smoothed_rtt_ms, c.consecutive_failures, c.last_ping_at, c.last_pong_at) + '</td><td>' + path + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>状态</th><th>心跳</th><th>路径</th><th>发送</th><th>接收</th><th>建立时间</th></tr></thead><tbody>' +
+        list.map(function(c){ var path = (c.plan && c.plan.hops) ? c.plan.hops.map(function(h){ return '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>'; }).join(' → ') : '-'; return '<tr><td><code>' + escapeHtml((c.id||'').slice(0,8)) + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + formatHealth(c.alive, c.smoothed_rtt_ms, c.consecutive_failures, c.last_ping_at, c.last_pong_at) + '</td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
 
     function renderStreams(data) {

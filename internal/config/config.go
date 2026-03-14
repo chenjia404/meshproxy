@@ -90,6 +90,16 @@ type ClientConfig struct {
 	BuildRetries int `yaml:"build_retries"`
 	// BeginTCPRetries is the number of retries when exit connect (BEGIN_TCP) fails, using another circuit/exit.
 	BeginTCPRetries int `yaml:"begin_tcp_retries"`
+	// HeartbeatEnabled controls whether idle circuits are periodically probed.
+	HeartbeatEnabled bool `yaml:"heartbeat_enabled"`
+	// HeartbeatIntervalSeconds is how often the client sends ping on reusable circuits.
+	HeartbeatIntervalSeconds int `yaml:"heartbeat_interval_seconds"`
+	// HeartbeatTimeoutSeconds is how long to wait for pong before counting one failure.
+	HeartbeatTimeoutSeconds int `yaml:"heartbeat_timeout_seconds"`
+	// HeartbeatFailureThreshold is the number of consecutive heartbeat failures before a circuit is declared dead.
+	HeartbeatFailureThreshold int `yaml:"heartbeat_failure_threshold"`
+	// SkipHeartbeatWhenActiveSeconds skips heartbeat if the circuit recently carried traffic.
+	SkipHeartbeatWhenActiveSeconds int `yaml:"skip_heartbeat_when_active_seconds"`
 	// ExitSelection configures how the last hop (exit) is chosen for each circuit.
 	ExitSelection ExitSelectionConfig `yaml:"exit_selection"`
 	// GeoIP configures how to resolve exit node country from IP (when descriptor has no ExitInfo.Country).
@@ -203,8 +213,13 @@ func Default() Config {
 			ReplenishIntervalSeconds: 30,
 		},
 		Client: ClientConfig{
-			BuildRetries:    1,
-			BeginTCPRetries: 1,
+			BuildRetries:                   1,
+			BeginTCPRetries:                1,
+			HeartbeatEnabled:               true,
+			HeartbeatIntervalSeconds:       25,
+			HeartbeatTimeoutSeconds:        5,
+			HeartbeatFailureThreshold:      3,
+			SkipHeartbeatWhenActiveSeconds: 15,
 			ExitSelection: ExitSelectionConfig{
 				Mode:              ExitSelectionAuto,
 				RequireTCPSupport: true,
@@ -288,6 +303,18 @@ func (c *Config) postProcess() error {
 	}
 	if c.Client.BeginTCPRetries > 2 {
 		c.Client.BeginTCPRetries = 2
+	}
+	if c.Client.HeartbeatIntervalSeconds <= 0 {
+		c.Client.HeartbeatIntervalSeconds = 25
+	}
+	if c.Client.HeartbeatTimeoutSeconds <= 0 {
+		c.Client.HeartbeatTimeoutSeconds = 5
+	}
+	if c.Client.HeartbeatFailureThreshold <= 0 {
+		c.Client.HeartbeatFailureThreshold = 3
+	}
+	if c.Client.SkipHeartbeatWhenActiveSeconds < 0 {
+		c.Client.SkipHeartbeatWhenActiveSeconds = 0
 	}
 	if c.Client.ExitSelection.Mode == "" {
 		c.Client.ExitSelection.Mode = ExitSelectionAuto

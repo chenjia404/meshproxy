@@ -19,6 +19,7 @@ type CircuitRecord struct {
 	UpdatedAt           time.Time
 	BytesSent           uint64
 	BytesReceived       uint64
+	LastTrafficAt       time.Time
 	LastPingAt          time.Time
 	LastPongAt          time.Time
 	ConsecutiveFailures int
@@ -52,6 +53,16 @@ func (s *CircuitStore) Get(id string) (*CircuitRecord, bool) {
 	defer s.mu.RUnlock()
 	rec, ok := s.circuits[id]
 	return rec, ok
+}
+
+// Delete removes a circuit record by ID.
+func (s *CircuitStore) Delete(id string) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.circuits, id)
 }
 
 // GetAll returns a snapshot of all circuits as CircuitInfo.
@@ -89,6 +100,7 @@ func (s *CircuitStore) AddStats(id string, sent, recv uint64) {
 	if rec, ok := s.circuits[id]; ok && rec != nil {
 		rec.BytesSent += sent
 		rec.BytesReceived += recv
+		rec.LastTrafficAt = time.Now()
 		rec.UpdatedAt = time.Now()
 	}
 }
@@ -108,4 +120,11 @@ func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.
 		rec.SmoothedRTT = smoothedRTT
 		rec.UpdatedAt = time.Now()
 	}
+}
+
+// Count returns the number of circuit records currently stored.
+func (s *CircuitStore) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.circuits)
 }

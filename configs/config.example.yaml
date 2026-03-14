@@ -29,6 +29,11 @@ circuit_pool:
 client:
   build_retries: 1      # 建鏈失敗重試次數 (0/1/2)
   begin_tcp_retries: 1  # exit 連線失敗換出口重試次數 (0/1/2)
+  heartbeat_enabled: true
+  heartbeat_interval_seconds: 25
+  heartbeat_timeout_seconds: 5
+  heartbeat_failure_threshold: 3
+  skip_heartbeat_when_active_seconds: 15
   exit_selection:
     mode: auto                    # auto | country_only | country_preferred | fixed_peer
     allowed_countries: []         # country_only 時僅允許這些國家 (e.g. ["SG","JP"])

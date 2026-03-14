@@ -177,6 +177,14 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a.circuitManager = cm
 	cm.SetBuildRetries(cfg.Client.BuildRetries)
 	cm.SetBeginTCPRetries(cfg.Client.BeginTCPRetries)
+	cm.SetHeartbeatConfig(client.HeartbeatConfig{
+		Enabled:           cfg.Client.HeartbeatEnabled,
+		Interval:          time.Duration(cfg.Client.HeartbeatIntervalSeconds) * time.Second,
+		Timeout:           time.Duration(cfg.Client.HeartbeatTimeoutSeconds) * time.Second,
+		FailureThreshold:  cfg.Client.HeartbeatFailureThreshold,
+		SkipWhenActiveFor: time.Duration(cfg.Client.SkipHeartbeatWhenActiveSeconds) * time.Second,
+	})
+	cm.StartHeartbeatLoop(ctx)
 
 	// Circuit pool: pre-build circuits, replenish on failure, idle timeout
 	pool := client.NewCircuitPool(cfg.CircuitPool, cm)
@@ -395,7 +403,6 @@ type metricsSummaryAdapter struct {
 
 func (m *metricsSummaryAdapter) GetSummary() map[string]any {
 	a := m.app
-	circuits := a.circuitStore.GetAll()
 	streams := a.streamMgr.ListStreams()
 	relays := a.discovery.Store().ListRelays()
 	exits := a.discovery.Store().ListExits()
@@ -420,7 +427,7 @@ func (m *metricsSummaryAdapter) GetSummary() map[string]any {
 		"mode":                a.Mode(),
 		"peer_id":             a.PeerID(),
 		"uptime_seconds":      int64(time.Since(a.StartTime()).Seconds()),
-		"circuits_total":      len(circuits),
+		"circuits_total":      a.circuitStore.Count(),
 		"streams_active":      len(streams),
 		"relays_known":        len(relays),
 		"exits_known":         len(exits),

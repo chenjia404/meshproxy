@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -17,6 +18,17 @@ import (
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/store"
 )
+
+const heartbeatStreamID = "__heartbeat__"
+
+// HeartbeatConfig controls client-side circuit ping/pong probing.
+type HeartbeatConfig struct {
+	Enabled           bool
+	Interval          time.Duration
+	Timeout           time.Duration
+	FailureThreshold  int
+	SkipWhenActiveFor time.Duration
+}
 
 // CircuitManager manages circuit lifecycle and delegates storage to CircuitStore.
 type CircuitManager struct {
@@ -35,6 +47,9 @@ type CircuitManager struct {
 	hopSessions map[string][]*protocol.HopSession
 	// pendingConnected stores waiting channels for CONNECTED messages, keyed by streamID.
 	pendingConnected map[string]chan protocol.Connected
+	// pendingPongs stores waiting channels for heartbeat pong messages, keyed by pingID.
+	pendingPongs map[string]chan protocol.Pong
+	heartbeat    HeartbeatConfig
 }
 
 // NewCircuitManager creates a new CircuitManager.
@@ -48,6 +63,7 @@ func NewCircuitManager(ctx context.Context, h host.Host, store *store.CircuitSto
 		activeStreams:    make(map[string]network.Stream),
 		hopSessions:      make(map[string][]*protocol.HopSession),
 		pendingConnected: make(map[string]chan protocol.Connected),
+		pendingPongs:     make(map[string]chan protocol.Pong),
 	}
 }
 
@@ -94,6 +110,36 @@ func (m *CircuitManager) BeginTCPRetries() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.beginTCPRetries
+}
+
+// SetHeartbeatConfig updates circuit heartbeat settings.
+func (m *CircuitManager) SetHeartbeatConfig(cfg HeartbeatConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cfg.Interval <= 0 {
+		cfg.Interval = 25 * time.Second
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 5 * time.Second
+	}
+	if cfg.FailureThreshold <= 0 {
+		cfg.FailureThreshold = 3
+	}
+	if cfg.SkipWhenActiveFor < 0 {
+		cfg.SkipWhenActiveFor = 0
+	}
+	m.heartbeat = cfg
+}
+
+// StartHeartbeatLoop starts periodic circuit ping/pong health checks.
+func (m *CircuitManager) StartHeartbeatLoop(ctx context.Context) {
+	m.mu.Lock()
+	cfg := m.heartbeat
+	m.mu.Unlock()
+	if !cfg.Enabled {
+		return
+	}
+	go m.runHeartbeatLoop(ctx)
 }
 
 // GetPlan returns the path plan for a circuit (for failover: get exit peer to exclude).
@@ -188,14 +234,11 @@ func (m *CircuitManager) CloseCircuit(circuitID string) {
 	m.mu.Lock()
 	s, ok := m.activeStreams[circuitID]
 	delete(m.activeStreams, circuitID)
-	rec, _ := m.store.Get(circuitID)
-	if rec != nil {
-		rec.State = protocol.CircuitClosed
-		rec.UpdatedAt = time.Now()
-		rec.Alive = false
-		m.store.Upsert(rec)
-	}
+	delete(m.hopSessions, circuitID)
 	m.mu.Unlock()
+	if m.store != nil {
+		m.store.Delete(circuitID)
+	}
 	if ok && s != nil {
 		_ = s.Close()
 	}
@@ -248,12 +291,13 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	id := uuid.NewString()
 	now := time.Now()
 	rec := &store.CircuitRecord{
-		ID:        id,
-		State:     protocol.CircuitNew,
-		Plan:      plan,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Alive:     true,
+		ID:            id,
+		State:         protocol.CircuitNew,
+		Plan:          plan,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastTrafficAt: now,
+		Alive:         true,
 	}
 	m.store.Upsert(rec)
 	rec.State = protocol.CircuitCreating
@@ -265,20 +309,16 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	targetPeerID := plan.Hops[0].PeerID
 	peerID, err := peer.Decode(targetPeerID)
 	if err != nil {
-		rec.State = protocol.CircuitClosed
-		rec.UpdatedAt = time.Now()
-		m.store.Upsert(rec)
 		m.mu.Unlock()
+		m.store.Delete(id)
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 	stream, err := m.host.NewStream(ctx, peerID, protocol.CircuitProtocolID)
 	cancel()
 	if err != nil {
-		rec.State = protocol.CircuitClosed
-		rec.UpdatedAt = time.Now()
-		m.store.Upsert(rec)
 		m.mu.Unlock()
+		m.store.Delete(id)
 		return "", err
 	}
 	m.activeStreams[id] = stream
@@ -290,9 +330,8 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 		stream.Close()
 		m.mu.Lock()
 		delete(m.activeStreams, id)
-		rec.State = protocol.CircuitClosed
-		m.store.Upsert(rec)
 		m.mu.Unlock()
+		m.store.Delete(id)
 		return "", err
 	}
 	initFrame, _ := protocol.NewKeyExchangeInitFrame(id, pub0)
@@ -411,14 +450,11 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 func (m *CircuitManager) closeCircuitLocked(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if rec, ok := m.store.Get(id); ok && rec != nil {
-		rec.State = protocol.CircuitClosed
-		rec.UpdatedAt = time.Now()
-		rec.Alive = false
-		m.store.Upsert(rec)
-	}
 	delete(m.activeStreams, id)
 	delete(m.hopSessions, id)
+	if m.store != nil {
+		m.store.Delete(id)
+	}
 }
 
 func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
@@ -428,13 +464,10 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 		m.mu.Lock()
 		delete(m.activeStreams, circuitID)
 		delete(m.hopSessions, circuitID)
-		if rec, ok := m.store.Get(circuitID); ok && rec != nil {
-			rec.State = protocol.CircuitClosed
-			rec.UpdatedAt = time.Now()
-			rec.Alive = false
-			m.store.Upsert(rec)
-		}
 		m.mu.Unlock()
+		if m.store != nil {
+			m.store.Delete(circuitID)
+		}
 		// Notify streams with clear error so app sees "circuit stream closed" instead of generic reset
 		if streamErr != nil && streamErr != io.EOF {
 			m.streams.NotifyCircuitClosed(circuitID, fmt.Errorf("circuit broken: %w", streamErr))
@@ -478,14 +511,21 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 			if json.Unmarshal(data, &payload) != nil {
 				continue
 			}
-			if payload.Kind == "connected" && payload.Connected != nil {
+			if payload.Kind == protocol.OnionPayloadKindConnected && payload.Connected != nil {
 				m.mu.Lock()
 				if ch, ok := m.pendingConnected[frame.StreamID]; ok {
 					delete(m.pendingConnected, frame.StreamID)
 					ch <- *payload.Connected
 				}
 				m.mu.Unlock()
-			} else if payload.Kind == "data" && payload.Data != nil {
+			} else if payload.Kind == protocol.OnionPayloadKindPong && payload.Pong != nil {
+				m.mu.Lock()
+				if ch, ok := m.pendingPongs[payload.Pong.PingID]; ok {
+					delete(m.pendingPongs, payload.Pong.PingID)
+					ch <- *payload.Pong
+				}
+				m.mu.Unlock()
+			} else if payload.Kind == protocol.OnionPayloadKindData && payload.Data != nil {
 				if stream, ok := m.streams.Get(frame.StreamID); ok && stream.Conn != nil {
 					n, _ := stream.Conn.Write(payload.Data.Payload)
 					if n > 0 {
@@ -525,6 +565,11 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 	ch := make(chan protocol.Connected, 1)
 	m.pendingConnected[streamID] = ch
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.pendingConnected, streamID)
+		m.mu.Unlock()
+	}()
 
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
@@ -562,6 +607,7 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 			}
 			return fmt.Errorf("remote connect failed")
 		}
+		m.touchCircuitActivity(circuitID)
 		return nil
 	case <-ctx.Done():
 		m.markCircuitTimeout(circuitID)
@@ -581,6 +627,11 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 	ch := make(chan protocol.Connected, 1)
 	m.pendingConnected[streamID] = ch
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.pendingConnected, streamID)
+		m.mu.Unlock()
+	}()
 
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
@@ -617,6 +668,7 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 			}
 			return fmt.Errorf("remote udp connect failed")
 		}
+		m.touchCircuitActivity(circuitID)
 		return nil
 	case <-ctx.Done():
 		m.markCircuitTimeout(circuitID)
@@ -717,6 +769,183 @@ func (m *CircuitManager) addCircuitBytes(circuitID string, sent, recv uint64) {
 		return
 	}
 	m.store.AddStats(circuitID, sent, recv)
+}
+
+func (m *CircuitManager) touchCircuitActivity(circuitID string) {
+	if m.store == nil {
+		return
+	}
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return
+	}
+	rec.LastTrafficAt = time.Now()
+	rec.UpdatedAt = time.Now()
+	rec.Alive = true
+	m.store.Upsert(rec)
+}
+
+func (m *CircuitManager) runHeartbeatLoop(ctx context.Context) {
+	m.mu.Lock()
+	cfg := m.heartbeat
+	m.mu.Unlock()
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, circuitID := range m.heartbeatCandidates() {
+				m.probeCircuit(circuitID)
+			}
+		}
+	}
+}
+
+func (m *CircuitManager) heartbeatCandidates() []string {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.activeStreams))
+	for circuitID := range m.activeStreams {
+		ids = append(ids, circuitID)
+	}
+	cfg := m.heartbeat
+	m.mu.Unlock()
+
+	out := make([]string, 0, len(ids))
+	for _, circuitID := range ids {
+		rec, ok := m.store.Get(circuitID)
+		if !ok || rec == nil || rec.State != protocol.CircuitOpen {
+			continue
+		}
+		if cfg.SkipWhenActiveFor > 0 && !rec.LastTrafficAt.IsZero() && time.Since(rec.LastTrafficAt) < cfg.SkipWhenActiveFor {
+			continue
+		}
+		out = append(out, circuitID)
+	}
+	return out
+}
+
+func (m *CircuitManager) probeCircuit(circuitID string) {
+	lastPing := time.Now()
+	pong, err := m.sendHeartbeat(circuitID, lastPing)
+	if err != nil {
+		m.handleHeartbeatFailure(circuitID, lastPing)
+		return
+	}
+	m.handleHeartbeatSuccess(circuitID, lastPing, pong)
+}
+
+func (m *CircuitManager) sendHeartbeat(circuitID string, sentAt time.Time) (protocol.Pong, error) {
+	m.mu.Lock()
+	s, ok := m.activeStreams[circuitID]
+	cfg := m.heartbeat
+	m.mu.Unlock()
+	if !ok {
+		return protocol.Pong{}, fmt.Errorf("no active stream for circuit %s", circuitID)
+	}
+	hops := m.getHopSessions(circuitID)
+	if len(hops) == 0 {
+		return protocol.Pong{}, fmt.Errorf("no hop sessions for circuit %s", circuitID)
+	}
+
+	pingID := uuid.NewString()
+	ch := make(chan protocol.Pong, 1)
+	m.mu.Lock()
+	m.pendingPongs[pingID] = ch
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.pendingPongs, pingID)
+		m.mu.Unlock()
+	}()
+
+	payload := protocol.OnionPayload{
+		Kind: protocol.OnionPayloadKindPing,
+		Ping: &protocol.Ping{
+			CircuitID:  circuitID,
+			PingID:     pingID,
+			SentAtUnix: sentAt.UnixMilli(),
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return protocol.Pong{}, err
+	}
+	ciphertext, err := protocol.WrapForward(hops, circuitID, heartbeatStreamID, payloadJSON)
+	if err != nil {
+		return protocol.Pong{}, err
+	}
+	cell := protocol.OnionCell{Ciphertext: ciphertext}
+	frame, err := protocol.NewOnionDataFrame(circuitID, heartbeatStreamID, cell)
+	if err != nil {
+		return protocol.Pong{}, err
+	}
+	if err := protocol.WriteFrame(s, frame); err != nil {
+		return protocol.Pong{}, err
+	}
+	log.Printf("[heartbeat] heartbeat_ping_sent circuit=%s ping=%s", circuitID, pingID)
+
+	timer := time.NewTimer(cfg.Timeout)
+	defer timer.Stop()
+	select {
+	case pong := <-ch:
+		return pong, nil
+	case <-timer.C:
+		return protocol.Pong{}, fmt.Errorf("heartbeat timeout")
+	case <-m.ctx.Done():
+		return protocol.Pong{}, m.ctx.Err()
+	}
+}
+
+func (m *CircuitManager) handleHeartbeatSuccess(circuitID string, lastPing time.Time, pong protocol.Pong) {
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return
+	}
+	lastPong := time.Now()
+	if pong.EchoAtUnix > 0 {
+		lastPong = time.UnixMilli(pong.EchoAtUnix)
+	}
+	rtt := time.Since(lastPing)
+	smoothed := rtt
+	if rec.SmoothedRTT > 0 {
+		smoothed = time.Duration(float64(rec.SmoothedRTT)*0.8 + float64(rtt)*0.2)
+	}
+	recovered := !rec.Alive
+	m.store.SetHealth(circuitID, true, lastPing, lastPong, 0, smoothed)
+	log.Printf("[heartbeat] heartbeat_pong_received circuit=%s ping=%s rtt_ms=%.1f", circuitID, pong.PingID, float64(rtt.Nanoseconds())/1e6)
+	if recovered {
+		log.Printf("[heartbeat] heartbeat_circuit_recovered circuit=%s", circuitID)
+	}
+}
+
+func (m *CircuitManager) handleHeartbeatFailure(circuitID string, lastPing time.Time) {
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return
+	}
+	m.mu.Lock()
+	cfg := m.heartbeat
+	pool := m.pool
+	m.mu.Unlock()
+
+	failures := rec.ConsecutiveFailures + 1
+	alive := true
+	if failures >= cfg.FailureThreshold {
+		alive = false
+	}
+	m.store.SetHealth(circuitID, alive, lastPing, rec.LastPongAt, failures, rec.SmoothedRTT)
+	log.Printf("[heartbeat] heartbeat_timeout circuit=%s failures=%d", circuitID, failures)
+	if alive {
+		return
+	}
+	log.Printf("[heartbeat] heartbeat_circuit_unhealthy circuit=%s", circuitID)
+	if pool != nil {
+		pool.MarkCircuitFailed(circuitID)
+	}
+	m.CloseCircuit(circuitID)
 }
 
 func (m *CircuitManager) markCircuitTimeout(circuitID string) {
