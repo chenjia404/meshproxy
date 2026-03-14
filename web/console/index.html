@@ -76,7 +76,7 @@
       <a href="#streams" data-page="streams">Stream 列表</a>
       <a href="#traffic" data-page="traffic">即時流量</a>
       <a href="#routing" data-page="routing">路由規則</a>
-      <a href="#exit-policy" data-page="exit-policy">出口策略</a>
+      <a href="#exit-policy" data-page="exit-policy">出口选择</a>
       <a href="#logs" data-page="logs">日誌面板</a>
     </nav>
     <main class="main">
@@ -168,7 +168,7 @@
           const tags = list.map(c => '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>').join('');
           return '<div class="tag-input" data-list="' + id + '">' + tags + '<input type="text" placeholder="' + (placeholder || '輸入國家代碼如 SG 按 Enter 新增') + '" maxlength="8" data-add="' + id + '"></div>';
         };
-        let html = '<h1>出口節點管理</h1><div id="exit-msg"></div><div class="card"><h3>出口選擇策略</h3>';
+        let html = '<h1>出口節點管理</h1><div id="exit-msg"></div><div class="card"><h3>出口選擇</h3>';
         html += '<div class="form-row"><label>模式</label><select id="exit-mode">';
         html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自動選擇</option>';
         html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>僅使用指定國家/地區</option>';

@@ -128,9 +128,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeRelayExit {
 		_ = relay.NewService(a.Host())
 	}
-	// Exit service when this node is relay+exit.
+	// Exit service when this node is relay+exit（帶出口策略檢查）。始終創建 Policy 以便出口政策 API 可註冊。
+	var exitSvc *exit.Service
 	if cfg.Mode == config.ModeRelayExit {
-		_ = exit.NewService(a.Host())
+		policy := exit.NewPolicyChecker(cfg.Exit) // cfg.Exit 為 nil 時使用預設策略
+		exitSvc = exit.NewService(a.Host(), policy)
 	}
 
 	socks := client.NewSocks5Server(cfg.Socks5.Listen, cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
@@ -151,6 +153,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		ExitSelection:  selector,
 		ExitCandidates: selector,
 		ConfigPath:     cfg.ConfigFilePath,
+		ExitService:    exitSvc,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()

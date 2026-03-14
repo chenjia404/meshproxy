@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
@@ -124,8 +125,10 @@ type LocalAPIOpts struct {
 	Metrics         MetricsSummaryProvider
 	ExitSelection   ExitSelectionProvider
 	ExitCandidates  ExitCandidatesProvider
-	// ConfigPath 若非空，保存出口策略時會寫回該配置文件，使重啟後仍生效。
+	// ConfigPath 若非空，保存出口選擇時會寫回該配置文件，使重啟後仍生效。
 	ConfigPath string
+	// ExitService 僅在 mode=relay+exit 時非空，用於出口策略/狀態 API。
+	ExitService *exit.Service
 }
 
 // PoolStatusProvider returns current circuit pool status.
@@ -163,6 +166,12 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/metrics/summary", api.handleMetricsSummary)
 	mux.HandleFunc("/api/v1/client/exit-selection", api.handleExitSelection)
 	mux.HandleFunc("/api/v1/client/exit-candidates", api.handleExitCandidates)
+	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
+		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
+		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
+		mux.HandleFunc("/api/v1/exit/drain", api.handleExitDrain)
+		mux.HandleFunc("/api/v1/exit/resume", api.handleExitResume)
+	}
 
 	// Console: serve index.html directly from embed (no FileServer, no redirect)
 	var consoleHTML []byte
@@ -429,6 +438,120 @@ func (a *LocalAPI) handleExitCandidates(w http.ResponseWriter, r *http.Request) 
 		out = append(out, c)
 	}
 	writeJSON(w, map[string]any{"candidates": out, "count": len(out)})
+}
+
+// ExitStatusResponse 出口運行狀態（drain、連接數、最近拒絕）。
+type ExitStatusResponse struct {
+	DrainMode        bool            `json:"drain_mode"`
+	AcceptNewStreams bool            `json:"accept_new_streams"`
+	OpenConnections  int             `json:"open_connections"`
+	RecentRejects    []exit.RejectEntry `json:"recent_rejects"`
+}
+
+func (a *LocalAPI) handleExitPolicy(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ExitService == nil || a.opts.ExitService.Policy == nil {
+		http.Error(w, "exit policy not available", http.StatusNotFound)
+		return
+	}
+	svc := a.opts.ExitService
+	p := svc.Policy
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"policy": p.GetPolicy(), "runtime": p.GetRuntime()})
+		return
+	case http.MethodPost:
+		var body struct {
+			Policy  *config.ExitPolicyConfig  `json:"policy"`
+			Runtime *config.ExitRuntimeConfig `json:"runtime"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Policy != nil {
+			p.SetPolicy(*body.Policy)
+		}
+		if body.Runtime != nil {
+			p.SetRuntime(*body.Runtime)
+		}
+		if a.opts.ConfigPath != "" {
+			exitCfg := config.ExitConfig{
+				Enabled: true,
+				Policy:  p.GetPolicy(),
+				Runtime: p.GetRuntime(),
+			}
+			if err := config.SaveExitConfig(a.opts.ConfigPath, exitCfg); err != nil {
+				http.Error(w, "save exit config failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, map[string]any{"policy": p.GetPolicy(), "runtime": p.GetRuntime()})
+		return
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+}
+
+func (a *LocalAPI) handleExitStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ExitService == nil || a.opts.ExitService.Policy == nil {
+		http.Error(w, "exit status not available", http.StatusNotFound)
+		return
+	}
+	svc := a.opts.ExitService
+	p := svc.Policy
+	writeJSON(w, ExitStatusResponse{
+		DrainMode:        p.DrainMode(),
+		AcceptNewStreams: p.AcceptNewStreams(),
+		OpenConnections:  svc.OpenConnCount(),
+		RecentRejects:    svc.GetRecentRejects(),
+	})
+}
+
+func (a *LocalAPI) handleExitDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ExitService == nil || a.opts.ExitService.Policy == nil {
+		http.Error(w, "exit not available", http.StatusNotFound)
+		return
+	}
+	p := a.opts.ExitService.Policy
+	p.SetRuntime(config.ExitRuntimeConfig{DrainMode: true, AcceptNewStreams: false})
+	if a.opts.ConfigPath != "" {
+		exitCfg := config.ExitConfig{Enabled: true, Policy: p.GetPolicy(), Runtime: p.GetRuntime()}
+		if err := config.SaveExitConfig(a.opts.ConfigPath, exitCfg); err != nil {
+			http.Error(w, "save exit config failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, map[string]string{"status": "drain"})
+}
+
+func (a *LocalAPI) handleExitResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ExitService == nil || a.opts.ExitService.Policy == nil {
+		http.Error(w, "exit not available", http.StatusNotFound)
+		return
+	}
+	p := a.opts.ExitService.Policy
+	p.SetRuntime(config.ExitRuntimeConfig{DrainMode: false, AcceptNewStreams: true})
+	if a.opts.ConfigPath != "" {
+		exitCfg := config.ExitConfig{Enabled: true, Policy: p.GetPolicy(), Runtime: p.GetRuntime()}
+		if err := config.SaveExitConfig(a.opts.ConfigPath, exitCfg); err != nil {
+			http.Error(w, "save exit config failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, map[string]string{"status": "resume"})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

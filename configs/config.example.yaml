@@ -39,3 +39,25 @@ client:
     require_tcp_support: true
     fallback_to_any: true         # 找不到符合條件時是否退回任意出口
     allow_direct_exit: true       # 是否允許 Local -> Exit（否則強制經 relay）
+
+# 出口節點策略（僅在 mode: relay+exit 時生效）：運營者控制允許代理的端口、域名、peer、私網/回環、維護模式等
+# exit:
+#   enabled: true
+#   policy:
+#     allow_tcp: true
+#     allow_udp: false
+#     remote_dns: true
+#     allowed_ports: [80, 443]
+#     denied_ports: [25, 465, 587, 22, 3389]
+#     allowed_domains: []
+#     denied_domains: []
+#     allowed_domain_suffixes: [".google.com", ".cloudflare.com"]
+#     denied_domain_suffixes: []
+#     peer_whitelist: []
+#     peer_blacklist: []
+#     allow_private_ip_targets: false
+#     allow_loopback_targets: false
+#     allow_link_local_targets: false
+#   runtime:
+#     drain_mode: false
+#     accept_new_streams: true

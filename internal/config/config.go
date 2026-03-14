@@ -44,6 +44,44 @@ type Config struct {
 
 	// Client configures client-side retry and failover.
 	Client ClientConfig `yaml:"client"`
+
+	// Exit 僅在 mode=relay+exit 時生效，用於出口節點運營策略（允許/拒絕端口、域名、peer 等）。
+	Exit *ExitConfig `yaml:"exit"`
+}
+
+// ExitConfig 出口節點策略與運行時配置（運營者控制允許代理的目標範圍）。
+type ExitConfig struct {
+	Enabled bool               `yaml:"enabled"`
+	Policy  ExitPolicyConfig   `yaml:"policy"`
+	Runtime ExitRuntimeConfig  `yaml:"runtime"`
+}
+
+// ExitPolicyConfig 出口策略：端口、域名、peer、私網/回環等。
+type ExitPolicyConfig struct {
+	AllowTCP  bool `yaml:"allow_tcp" json:"allow_tcp"`
+	AllowUDP  bool `yaml:"allow_udp" json:"allow_udp"`
+	RemoteDNS bool `yaml:"remote_dns" json:"remote_dns"`
+
+	AllowedPorts []int `yaml:"allowed_ports" json:"allowed_ports"`
+	DeniedPorts  []int `yaml:"denied_ports" json:"denied_ports"`
+
+	AllowedDomains        []string `yaml:"allowed_domains" json:"allowed_domains"`
+	DeniedDomains         []string `yaml:"denied_domains" json:"denied_domains"`
+	AllowedDomainSuffixes []string `yaml:"allowed_domain_suffixes" json:"allowed_domain_suffixes"`
+	DeniedDomainSuffixes  []string `yaml:"denied_domain_suffixes" json:"denied_domain_suffixes"`
+
+	PeerWhitelist []string `yaml:"peer_whitelist" json:"peer_whitelist"`
+	PeerBlacklist []string `yaml:"peer_blacklist" json:"peer_blacklist"`
+
+	AllowPrivateIPTargets bool `yaml:"allow_private_ip_targets" json:"allow_private_ip_targets"`
+	AllowLoopbackTargets  bool `yaml:"allow_loopback_targets" json:"allow_loopback_targets"`
+	AllowLinkLocalTargets bool `yaml:"allow_link_local_targets" json:"allow_link_local_targets"`
+}
+
+// ExitRuntimeConfig 運行時狀態（drain 模式等），可通過 API 更新。
+type ExitRuntimeConfig struct {
+	DrainMode        bool `yaml:"drain_mode" json:"drain_mode"`
+	AcceptNewStreams bool `yaml:"accept_new_streams" json:"accept_new_streams"`
 }
 
 // ClientConfig configures retry and failover for circuit build and exit connect, and exit selection.
@@ -237,6 +275,37 @@ func (c *Config) postProcess() error {
 	if c.Client.ExitSelection.Mode == "" {
 		c.Client.ExitSelection.Mode = ExitSelectionAuto
 	}
+	if c.Mode == ModeRelayExit && c.Exit == nil {
+		c.Exit = &ExitConfig{
+			Enabled: true,
+			Policy:  defaultExitPolicyConfig(),
+			Runtime: ExitRuntimeConfig{DrainMode: false, AcceptNewStreams: true},
+		}
+	}
+	if c.Exit != nil {
+		if err := c.Exit.Policy.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func defaultExitPolicyConfig() ExitPolicyConfig {
+	return ExitPolicyConfig{
+		AllowTCP:                true,
+		AllowUDP:                false,
+		RemoteDNS:               true,
+		AllowedPorts:            []int{80, 443},
+		DeniedPorts:             []int{25, 465, 587, 22, 3389},
+		AllowPrivateIPTargets:   false,
+		AllowLoopbackTargets:    false,
+		AllowLinkLocalTargets:   false,
+	}
+}
+
+// Validate 校驗出口策略配置。
+func (e *ExitPolicyConfig) Validate() error {
+	// denied 優先於 allowed，無需額外校驗
 	return nil
 }
 
@@ -266,7 +335,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Write 將配置寫入 YAML 文件（用於持久化出口策略等運行時修改）。
+// Write 將配置寫入 YAML 文件（用於持久化出口選擇等運行時修改）。
 func Write(path string, c *Config) error {
 	data, err := yaml.Marshal(c)
 	if err != nil {
@@ -282,5 +351,18 @@ func SaveExitSelection(path string, ec ExitSelectionConfig) error {
 		return fmt.Errorf("load config for save: %w", err)
 	}
 	c.Client.ExitSelection = ec
+	return Write(path, &c)
+}
+
+// SaveExitConfig 從 path 讀取配置，僅更新 exit 段（policy + runtime）後寫回，使 API 的出口策略/維護模式修改持久化。
+func SaveExitConfig(path string, exit ExitConfig) error {
+	if path == "" {
+		return nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.Exit = &exit
 	return Write(path, &c)
 }

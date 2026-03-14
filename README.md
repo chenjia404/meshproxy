@@ -43,6 +43,14 @@ go build -o bin/meshproxy ./cmd/node
 - **GET /api/v1/errors/recent**：最近錯誤紀錄。
 - **GET /api/v1/metrics/summary**：彙總指標（circuits_total, streams_active, relays_known, exits_known, errors_recent_count, pool_status 等）。
 
+**出口節點專用 API（僅在 `mode: relay+exit` 時可用）**：
+
+- **GET /api/v1/exit/policy**：當前出口策略與運行時配置。
+- **POST /api/v1/exit/policy**：更新策略或運行時（請求體可含 `policy` / `runtime`，僅更新記憶體，重啟後以配置文件為準）。
+- **GET /api/v1/exit/status**：運行狀態（drain_mode、accept_new_streams、open_connections、recent_rejects）。
+- **POST /api/v1/exit/drain**：進入維護模式（不再接受新 stream）。
+- **POST /api/v1/exit/resume**：結束維護模式。
+
 配置說明
 --------
 
@@ -57,6 +65,8 @@ go build -o bin/meshproxy ./cmd/node
 - **`p2p.bootstrap_peers`**：其他節點的 multiaddr，用於啟動時連線引導。
 - **`socks5.listen`**：本地 SOCKS5 監聽位址，例如 `127.0.0.1:1080`。
 - **`api.listen`**：本地 HTTP API 監聽位址，例如 `127.0.0.1:19080`。
+
+**出口策略（僅在 `mode: relay+exit` 時生效）**：在配置中可加入 `exit` 段，用於控制出口允許的端口、域名、peer、是否允許私網/回環目標、以及維護模式（drain_mode）。預設保守：僅允許 TCP、80/443，禁止私網與回環。詳見 `configs/config.example.yaml` 中註解示例。
 
 雙節點測試（示意）
 --------------

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	host "github.com/libp2p/go-libp2p/core/host"
 	network "github.com/libp2p/go-libp2p/core/network"
@@ -17,20 +18,33 @@ import (
 // relay (which forwards the client's pub), then decrypts the last onion layer
 // with UnwrapForwardFinal and handles OnionPayload (begin/data/end); responses
 // are wrapped with the session's backward key.
+// 若 Policy 非 nil，在處理 begin 時會按出口策略檢查（端口、域名、peer、私網等），拒絕時回傳 Connected{OK: false, Error: reason}。
+const maxRecentRejects = 20
+
+// RejectEntry 單條拒絕記錄，供 API status 使用。
+type RejectEntry struct {
+	Reason string    `json:"reason"`
+	At    time.Time `json:"at"`
+}
+
 type Service struct {
-	host     host.Host
-	mu       sync.Mutex
-	conns    map[string]net.Conn    // key: streamID
-	sessions map[string]*protocol.HopSession // key: stream key (remotePeer+streamID)
+	host         host.Host
+	Policy       *PolicyChecker
+	mu           sync.Mutex
+	conns        map[string]net.Conn
+	sessions     map[string]*protocol.HopSession
+	recentRejects []RejectEntry
 }
 
 // NewService registers the circuit protocol handler on the given host and
-// returns the created Service instance.
-func NewService(h host.Host) *Service {
+// returns the created Service instance. policy 可為 nil，表示不做出口策略檢查。
+func NewService(h host.Host, policy *PolicyChecker) *Service {
 	s := &Service{
-		host:     h,
-		conns:    make(map[string]net.Conn),
-		sessions: make(map[string]*protocol.HopSession),
+		host:          h,
+		Policy:        policy,
+		conns:         make(map[string]net.Conn),
+		sessions:      make(map[string]*protocol.HopSession),
+		recentRejects: make([]RejectEntry, 0, maxRecentRejects),
 	}
 	h.SetStreamHandler(protocol.CircuitProtocolID, s.handleStream)
 	return s
@@ -110,7 +124,15 @@ func (s *Service) serveStream(str network.Stream) {
 				if payload.Begin == nil {
 					return
 				}
-				addr := net.JoinHostPort(payload.Begin.TargetHost, strconv.Itoa(payload.Begin.TargetPort))
+				begin := payload.Begin
+				addr := net.JoinHostPort(begin.TargetHost, strconv.Itoa(begin.TargetPort))
+				// 出口策略檢查（順序見文檔）
+				if rejectReason := s.checkBeginPolicy(str, begin); rejectReason != "" {
+					s.recordReject(rejectReason)
+					resp := protocol.Connected{OK: false, Error: string(rejectReason)}
+					s.sendConnectedAndReturn(streamKey, frame.CircuitID, frame.StreamID, &resp, str, &writeMu)
+					return
+				}
 				remote, err := net.Dial("tcp", addr)
 				resp := protocol.Connected{OK: err == nil}
 				if err != nil {
@@ -229,5 +251,100 @@ func (s *Service) closeConn(streamID string) {
 		}
 		delete(s.conns, streamID)
 	}
+}
+
+// checkBeginPolicy 按文檔順序執行出口策略檢查，拒絕時返回非空原因。
+func (s *Service) checkBeginPolicy(str network.Stream, begin *protocol.BeginTCP) ExitRejectReason {
+	if s.Policy == nil {
+		return ""
+	}
+	p := s.Policy
+	if !p.IsEnabled() {
+		return ExitRejectDisabled
+	}
+	if !p.AcceptNewStreams() || p.DrainMode() {
+		return ExitRejectDraining
+	}
+	peerID := str.Conn().RemotePeer().String()
+	if reason, ok := p.CheckPeerAllowed(peerID); !ok {
+		return reason
+	}
+	if reason, ok := p.CheckProtocolAllowed(true); !ok {
+		return reason
+	}
+	if reason, ok := p.CheckPortAllowed(begin.TargetPort); !ok {
+		return reason
+	}
+	host := begin.TargetHost
+	ip := net.ParseIP(host)
+	if ip != nil {
+		if reason, ok := p.CheckTargetIPAllowed(ip); !ok {
+			return reason
+		}
+		return ""
+	}
+	// 域名
+	if reason, ok := p.CheckDomainAllowed(host); !ok {
+		return reason
+	}
+	if !p.GetPolicy().RemoteDNS {
+		return ""
+	}
+	// remote_dns: 解析後對 IP 再做一次私網/回環/鏈路本地檢查
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return ExitRejectDomainDenied
+	}
+	for _, a := range addrs {
+		if reason, ok := p.CheckTargetIPAllowed(a); !ok {
+			return reason
+		}
+	}
+	return ""
+}
+
+// sendConnectedAndReturn 寫回 Connected 響應後由調用方 return，不啟動數據泵。
+func (s *Service) sendConnectedAndReturn(streamKey, circuitID, streamID string, resp *protocol.Connected, str network.Stream, writeMu *sync.Mutex) {
+	connectedPayload := protocol.OnionPayload{Kind: "connected", Connected: resp}
+	connectedJSON, _ := json.Marshal(connectedPayload)
+	wrapped, err := s.wrapBackward(streamKey, circuitID, streamID, connectedJSON)
+	if err != nil {
+		return
+	}
+	outFrame := protocol.Frame{
+		Type:        protocol.MsgTypeOnionData,
+		CircuitID:   circuitID,
+		StreamID:    streamID,
+		PayloadJSON: wrapped,
+	}
+	writeMu.Lock()
+	_ = protocol.WriteFrame(str, outFrame)
+	writeMu.Unlock()
+}
+
+func (s *Service) recordReject(reason ExitRejectReason) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := RejectEntry{Reason: string(reason), At: time.Now()}
+	s.recentRejects = append(s.recentRejects, e)
+	if len(s.recentRejects) > maxRecentRejects {
+		s.recentRejects = s.recentRejects[len(s.recentRejects)-maxRecentRejects:]
+	}
+}
+
+// OpenConnCount 返回當前出口 TCP 連接數（供 API 狀態使用）。
+func (s *Service) OpenConnCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
+}
+
+// GetRecentRejects 返回最近若干次策略拒絕記錄。
+func (s *Service) GetRecentRejects() []RejectEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]RejectEntry, len(s.recentRejects))
+	copy(out, s.recentRejects)
+	return out
 }
 

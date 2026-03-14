@@ -76,7 +76,8 @@
       <a href="#streams" data-page="streams">Stream 列表</a>
       <a href="#traffic" data-page="traffic">实时流量</a>
       <a href="#routing" data-page="routing">路由规则</a>
-      <a href="#exit-policy" data-page="exit-policy">出口策略</a>
+      <a href="#exit-policy" data-page="exit-policy">出口选择</a>
+      <a href="#exit-operator-policy" data-page="exit-operator-policy">出口政策</a>
       <a href="#logs" data-page="logs">日志面板</a>
     </nav>
     <main class="main">
@@ -160,7 +161,7 @@
 
         var html = '<h1>出口节点管理</h1>';
         html += '<div id="exit-msg"></div>';
-        html += '<div class="card"><h3>出口选择策略</h3>';
+        html += '<div class="card"><h3>出口选择</h3>';
         html += '<div class="form-row"><label>模式</label><select id="exit-mode">';
         html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自动选择</option>';
         html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>仅使用指定国家/地区</option>';
@@ -241,6 +242,181 @@
         return html;
       }).catch(function(err){ return '<h1>出口节点管理</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
     }
+
+    function renderExitOperatorPolicy() {
+      return Promise.all([
+        get('/api/v1/exit/policy').catch(function(e){ return null; }),
+        get('/api/v1/exit/status').catch(function(e){ return null; })
+      ]).then(function(res) {
+        var policyRes = res[0];
+        var statusRes = res[1];
+        if (!policyRes && !statusRes) {
+          return '<h1>出口政策</h1><div class="card"><p class="empty">本节点非 relay+exit 或未启用出口策略，无法使用出口政策配置。仅 relay+exit 节点会显示此页。</p></div>';
+        }
+        var policy = (policyRes && policyRes.policy) ? policyRes.policy : {};
+        var runtime = (policyRes && policyRes.runtime) ? policyRes.runtime : {};
+        var status = statusRes || {};
+        var drainMode = !!status.drain_mode;
+        var acceptNew = status.accept_new_streams !== false;
+        var openConns = status.open_connections != null ? status.open_connections : 0;
+        var recentRejects = Array.isArray(status.recent_rejects) ? status.recent_rejects : [];
+
+        var html = '<h1>出口政策</h1><div id="exit-op-msg"></div>';
+        html += '<div class="card"><h3>运行状态</h3><dl class="kv">';
+        html += '<dt>维护模式 (drain)</dt><dd><span class="badge ' + (drainMode ? 'warn' : 'ok') + '">' + (drainMode ? '是' : '否') + '</span></dd>';
+        html += '<dt>接受新连接</dt><dd>' + (acceptNew ? '是' : '否') + '</dd>';
+        html += '<dt>当前出口连接数</dt><dd>' + openConns + '</dd></dl>';
+        html += '<div class="form-row">';
+        if (drainMode) {
+          html += '<button class="btn btn-primary" id="exit-op-resume">结束维护模式</button>';
+        } else {
+          html += '<button class="btn btn-primary" id="exit-op-drain">进入维护模式</button>';
+        }
+        html += '</div></div>';
+
+        var arr = function(x){ return Array.isArray(x) ? x.slice() : []; };
+        var allowedPorts = arr(policy.allowed_ports);
+        var deniedPorts = arr(policy.denied_ports);
+        var allowedDomains = arr(policy.allowed_domains);
+        var deniedDomains = arr(policy.denied_domains);
+        var allowedSuffixes = arr(policy.allowed_domain_suffixes);
+        var deniedSuffixes = arr(policy.denied_domain_suffixes);
+        var peerWhitelist = arr(policy.peer_whitelist);
+        var peerBlacklist = arr(policy.peer_blacklist);
+
+        function tagList(id, list, placeholder, isNum) {
+          var displayList = list.map(function(v){ return isNum ? Number(v) : v; });
+          var tags = displayList.map(function(v){ return '<span class="tag" data-list="' + id + '">' + escapeHtml(String(v)) + '<span class="rm" data-remove="' + escapeHtml(String(v)) + '">&times;</span></span>'; }).join('');
+          return '<div class="tag-input" data-list="' + id + '" data-num="' + (isNum ? '1' : '0') + '">' + tags + '<input type="text" placeholder="' + (placeholder || '') + '" maxlength="200" data-add="' + id + '"></div>';
+        }
+
+        html += '<div class="card"><h3>策略配置</h3>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-tcp"' + (policy.allow_tcp ? ' checked' : '') + '> 允许 TCP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-udp"' + (policy.allow_udp ? ' checked' : '') + '> 允许 UDP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-remote-dns"' + (policy.remote_dns ? ' checked' : '') + '> 出口端解析 DNS (Remote DNS)</label></div>';
+        html += '<div class="form-row"><label>允许的端口（空则仅受拒绝列表限制）</label>' + tagList('allowed_ports', allowedPorts, '端口号回车添加', true) + '</div>';
+        html += '<div class="form-row"><label>拒绝的端口</label>' + tagList('denied_ports', deniedPorts, '端口号回车添加', true) + '</div>';
+        html += '<div class="form-row"><label>允许的域名（精确）</label>' + tagList('allowed_domains', allowedDomains, '域名回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>允许的域名后缀（如 .google.com）</label>' + tagList('allowed_domain_suffixes', allowedSuffixes, '后缀回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>拒绝的域名（精确）</label>' + tagList('denied_domains', deniedDomains, '域名回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>拒绝的域名后缀</label>' + tagList('denied_domain_suffixes', deniedSuffixes, '后缀回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>Peer 白名单（空则不做白名单限制）</label>' + tagList('peer_whitelist', peerWhitelist, 'Peer ID 回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>Peer 黑名单</label>' + tagList('peer_blacklist', peerBlacklist, 'Peer ID 回车添加', false) + '</div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-private"' + (policy.allow_private_ip_targets ? ' checked' : '') + '> 允许访问私网目标 IP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-loopback"' + (policy.allow_loopback_targets ? ' checked' : '') + '> 允许回环目标</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-linklocal"' + (policy.allow_link_local_targets ? ' checked' : '') + '> 允许链路本地目标</label></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="exit-op-save-policy">保存策略</button></div>';
+        html += '</div>';
+
+        if (recentRejects.length) {
+          html += '<div class="card"><h3>最近拒绝记录</h3><table><thead><tr><th>时间</th><th>原因</th></tr></thead><tbody>';
+          html += recentRejects.slice(-20).reverse().map(function(r) {
+            return '<tr><td>' + (r.at ? new Date(r.at).toLocaleString() : '-') + '</td><td><code>' + escapeHtml(r.reason || '') + '</code></td></tr>';
+          }).join('') + '</tbody></table></div>';
+        }
+
+        setTimeout(function bindExitOp() {
+          var drainBtn = document.getElementById('exit-op-drain');
+          var resumeBtn = document.getElementById('exit-op-resume');
+          var msgEl = document.getElementById('exit-op-msg');
+          var store = {
+            allowed_ports: allowedPorts.slice(),
+            denied_ports: deniedPorts.slice(),
+            allowed_domains: allowedDomains.slice(),
+            denied_domains: deniedDomains.slice(),
+            allowed_domain_suffixes: allowedSuffixes.slice(),
+            denied_domain_suffixes: deniedSuffixes.slice(),
+            peer_whitelist: peerWhitelist.slice(),
+            peer_blacklist: peerBlacklist.slice()
+          };
+          function post(path, body) {
+            return fetch(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(function(r) {
+              if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || r.statusText); });
+              return r.json();
+            });
+          }
+          document.querySelectorAll('.tag-input[data-list]').forEach(function(div) {
+            var listId = div.dataset.list;
+            var isNum = div.dataset.num === '1';
+            var input = div.querySelector('input[data-add]');
+            if (!input) return;
+            input.addEventListener('keydown', function(e) {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              var v = (input.value || '').trim();
+              if (isNum) { var n = parseInt(v, 10); if (isNaN(n) || n < 0 || n > 65535) { input.value = ''; return; } v = n; if (store[listId].indexOf(v) >= 0) { input.value = ''; return; } }
+              else { if (!v || store[listId].indexOf(v) >= 0) { input.value = ''; return; } }
+              store[listId].push(v);
+              var tag = document.createElement('span');
+              tag.className = 'tag';
+              tag.setAttribute('data-list', listId);
+              tag.innerHTML = escapeHtml(String(v)) + '<span class="rm" data-remove="' + escapeHtml(String(v)) + '">&times;</span>';
+              tag.querySelector('.rm').addEventListener('click', function(){ store[listId] = store[listId].filter(function(x){ return String(x) !== String(v); }); tag.remove(); });
+              div.insertBefore(tag, input);
+              input.value = '';
+            });
+            div.querySelectorAll('.rm').forEach(function(rm) {
+              rm.addEventListener('click', function() {
+                var v = rm.dataset.remove;
+                store[listId] = store[listId].filter(function(x){ return String(x) !== v; });
+                rm.closest('.tag').remove();
+              });
+            });
+          });
+          var saveBtn = document.getElementById('exit-op-save-policy');
+          if (saveBtn) saveBtn.addEventListener('click', function() {
+            var payload = {
+              policy: {
+                allow_tcp: document.getElementById('exit-op-allow-tcp').checked,
+                allow_udp: document.getElementById('exit-op-allow-udp').checked,
+                remote_dns: document.getElementById('exit-op-remote-dns').checked,
+                allowed_ports: store.allowed_ports.slice(),
+                denied_ports: store.denied_ports.slice(),
+                allowed_domains: store.allowed_domains.slice(),
+                denied_domains: store.denied_domains.slice(),
+                allowed_domain_suffixes: store.allowed_domain_suffixes.slice(),
+                denied_domain_suffixes: store.denied_domain_suffixes.slice(),
+                peer_whitelist: store.peer_whitelist.slice(),
+                peer_blacklist: store.peer_blacklist.slice(),
+                allow_private_ip_targets: document.getElementById('exit-op-allow-private').checked,
+                allow_loopback_targets: document.getElementById('exit-op-allow-loopback').checked,
+                allow_link_local_targets: document.getElementById('exit-op-allow-linklocal').checked
+              }
+            };
+            saveBtn.disabled = true;
+            post('/api/v1/exit/policy', payload).then(function() {
+              msgEl.innerHTML = '<div class="msg ok">策略已保存并已写回配置文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+              saveBtn.disabled = false;
+            });
+          });
+          if (drainBtn) drainBtn.addEventListener('click', function() {
+            drainBtn.disabled = true;
+            post('/api/v1/exit/drain').then(function() {
+              msgEl.innerHTML = '<div class="msg ok">已进入维护模式，配置已写回文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">操作失败: ' + escapeHtml(err.message) + '</div>';
+              drainBtn.disabled = false;
+            });
+          });
+          if (resumeBtn) resumeBtn.addEventListener('click', function() {
+            resumeBtn.disabled = true;
+            post('/api/v1/exit/resume').then(function() {
+              msgEl.innerHTML = '<div class="msg ok">已结束维护模式，配置已写回文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">操作失败: ' + escapeHtml(err.message) + '</div>';
+              resumeBtn.disabled = false;
+            });
+          });
+        }, 0);
+        return html;
+      }).catch(function(err){ return '<h1>出口政策</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
+    }
+
     function renderLogs(data) {
       var list = Array.isArray(data) ? data : [];
       if (!list.length) return '<h1>日志面板</h1><div class="card"><p class="empty">尚无最近错误记录</p></div>';
@@ -258,6 +434,7 @@
       traffic: function(){ return get('/api/v1/metrics/summary').then(renderTraffic); },
       routing: function(){ return Promise.resolve(renderRouting()); },
       'exit-policy': function(){ return renderExitPolicy(); },
+      'exit-operator-policy': function(){ return renderExitOperatorPolicy(); },
       logs: function(){ return get('/api/v1/errors/recent').then(renderLogs); }
     };
     function show(page) {
