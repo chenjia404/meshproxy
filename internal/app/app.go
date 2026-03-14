@@ -2,14 +2,18 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	host "github.com/libp2p/go-libp2p/core/host"
+	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	peerstore "github.com/libp2p/go-libp2p/core/peerstore"
 	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"github.com/chenjia404/meshproxy/internal/api"
@@ -50,7 +54,16 @@ type App struct {
 	streamMgr      *client.StreamManager
 	recentErrors   *api.RecentErrorsStore
 	relayCache     *relaycache.Cache
+	selfDesc       *discovery.NodeDescriptor
 }
+
+const (
+	peerExchangeInterval    = time.Minute
+	peerExchangeTTL         = 2 * time.Minute
+	peerExchangeMaxEntries  = 16
+	peerExchangeMaxAddrs    = 4
+	peerExchangeDialTimeout = 8 * time.Second
+)
 
 // New creates and initializes a new App instance.
 func New(ctx context.Context, cfg config.Config) (*App, error) {
@@ -115,6 +128,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err := discovery.SignDescriptor(idMgr.PrivateKey(), selfDesc); err != nil {
 		return nil, fmt.Errorf("sign self descriptor: %w", err)
 	}
+	a.selfDesc = selfDesc
 	discoveryStore := discovery.NewStore()
 	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
 	discoveryMgr.Start()
@@ -124,6 +138,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		a.cfg.P2P.BootstrapPeers = cfg.P2P.BootstrapPeers
 	}
 	go a.runRelayCache(ctx)
+	go a.runPeerExchange(ctx)
 
 	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
 	go runPeerAddrLearner(ctx, h.Host, dhtComp.Routing(), discoveryStore, 25*time.Second)
@@ -533,6 +548,183 @@ func (a *App) syncRelayCache() {
 		if err := a.relayCache.Add(desc.PeerID, addrs); err != nil {
 			log.Printf("[relaycache] persist relay %s: %v", desc.PeerID, err)
 		}
+	}
+}
+
+func (a *App) runPeerExchange(ctx context.Context) {
+	if a.gossip == nil || a.discovery == nil || a.idMgr == nil || a.selfDesc == nil {
+		return
+	}
+	go a.runPeerExchangeSubscriber(ctx)
+	a.publishPeerExchange()
+
+	ticker := time.NewTicker(peerExchangeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.publishPeerExchange()
+		}
+	}
+}
+
+func (a *App) runPeerExchangeSubscriber(ctx context.Context) {
+	sub, err := a.gossip.PubSub().Subscribe(discovery.TopicPeerExchange)
+	if err != nil {
+		log.Printf("[peerx] subscribe failed: %v", err)
+		return
+	}
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			return
+		}
+		var px discovery.PeerExchangeMessage
+		if err := json.Unmarshal(msg.Data, &px); err != nil {
+			continue
+		}
+		ok, err := discovery.VerifyPeerExchange(&px)
+		if err != nil || !ok {
+			continue
+		}
+		if px.Sender != nil && px.Sender.PeerID == a.PeerID() {
+			continue
+		}
+		if px.ExpiresAt > 0 && time.Now().Unix() > px.ExpiresAt {
+			continue
+		}
+		a.applyPeerExchange(&px)
+	}
+}
+
+func (a *App) publishPeerExchange() {
+	msg, err := a.buildPeerExchangeMessage()
+	if err != nil || msg == nil || len(msg.Entries) == 0 {
+		return
+	}
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	if err := a.gossip.PubSub().Publish(discovery.TopicPeerExchange, payload); err != nil {
+		log.Printf("[peerx] publish failed: %v", err)
+	}
+}
+
+func (a *App) buildPeerExchangeMessage() (*discovery.PeerExchangeMessage, error) {
+	if a.discovery == nil || a.selfDesc == nil || a.idMgr == nil {
+		return nil, nil
+	}
+	descs := a.discovery.Store().ListRelays()
+	sort.Slice(descs, func(i, j int) bool {
+		return descs[i].PeerID < descs[j].PeerID
+	})
+	entries := make([]discovery.PeerExchangeEntry, 0, minInt(len(descs), peerExchangeMaxEntries))
+	for _, desc := range descs {
+		if desc == nil || !desc.Relay {
+			continue
+		}
+		addrs := a.relayAddrs(desc)
+		if len(addrs) == 0 {
+			continue
+		}
+		if len(addrs) > peerExchangeMaxAddrs {
+			addrs = addrs[:peerExchangeMaxAddrs]
+		}
+		descCopy := *desc
+		entries = append(entries, discovery.PeerExchangeEntry{
+			Descriptor:    &descCopy,
+			ObservedAddrs: append([]string(nil), addrs...),
+		})
+		if len(entries) >= peerExchangeMaxEntries {
+			break
+		}
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	senderCopy := *a.selfDesc
+	now := time.Now()
+	msg := &discovery.PeerExchangeMessage{
+		Version:   "v1",
+		Sender:    &senderCopy,
+		Entries:   entries,
+		SentAt:    now.Unix(),
+		ExpiresAt: now.Add(peerExchangeTTL).Unix(),
+	}
+	if err := discovery.SignPeerExchange(a.idMgr.PrivateKey(), msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (a *App) applyPeerExchange(msg *discovery.PeerExchangeMessage) {
+	if msg == nil || a.discovery == nil {
+		return
+	}
+	for _, entry := range msg.Entries {
+		desc := entry.Descriptor
+		if desc == nil || !desc.Relay {
+			continue
+		}
+		ok, err := discovery.VerifyDescriptor(desc)
+		if err != nil || !ok {
+			continue
+		}
+		if desc.PeerID == a.PeerID() {
+			continue
+		}
+		if _, ok := a.discovery.Store().Get(desc.PeerID); ok {
+			continue
+		}
+
+		addrs := filterAddrStrings(entry.ObservedAddrs)
+		if len(addrs) == 0 {
+			addrs = filterAddrStrings(desc.ListenAddrs)
+		}
+		if len(addrs) == 0 {
+			continue
+		}
+		a.tryConnectPeerExchangeRelay(desc.PeerID, addrs)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (a *App) tryConnectPeerExchangeRelay(peerID string, addrs []string) {
+	if a.host == nil || peerID == "" || len(addrs) == 0 {
+		return
+	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return
+	}
+	if a.Host().Network().Connectedness(pid) == network.Connected {
+		return
+	}
+	maddrs := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, addr := range addrs {
+		maddr, err := multiaddr.NewMultiaddr(addr)
+		if err != nil {
+			continue
+		}
+		maddrs = append(maddrs, maddr)
+	}
+	if len(maddrs) == 0 {
+		return
+	}
+	a.Host().Peerstore().AddAddrs(pid, maddrs, peerstore.TempAddrTTL)
+	ctx, cancel := context.WithTimeout(a.ctx, peerExchangeDialTimeout)
+	defer cancel()
+	if err := a.Host().Connect(ctx, peer.AddrInfo{ID: pid, Addrs: maddrs}); err != nil {
+		log.Printf("[peerx] connect relay %s failed: %v", peerID, err)
 	}
 }
 

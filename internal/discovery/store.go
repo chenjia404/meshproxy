@@ -22,6 +22,14 @@ func (s *Store) Upsert(d *NodeDescriptor) {
 	s.nodes[d.PeerID] = d
 }
 
+// Get returns a descriptor by peer ID.
+func (s *Store) Get(peerID string) (*NodeDescriptor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.nodes[peerID]
+	return d, ok
+}
+
 // GetAll returns all known descriptors.
 func (s *Store) GetAll() []*NodeDescriptor {
 	s.mu.RLock()
@@ -58,4 +66,3 @@ func (s *Store) ListExits() []*NodeDescriptor {
 	}
 	return out
 }
-
