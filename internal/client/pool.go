@@ -60,6 +60,10 @@ type CircuitPool struct {
 	inUseStreamCount map[string]int
 	// outCount[kind] = number of circuits of this kind that have at least one stream (lent)
 	outCount map[PoolKind]int
+	// pendingByKind tracks circuits currently being created but not yet registered.
+	pendingByKind map[PoolKind]int
+	// pendingTotal tracks all in-flight circuit creations.
+	pendingTotal int
 }
 
 // NewCircuitPool creates a circuit pool with the given config and factory.
@@ -76,6 +80,7 @@ func NewCircuitPool(cfg config.CircuitPoolConfig, factory CircuitPoolFactory) *C
 		circuitToKind:    make(map[string]PoolKind),
 		inUseStreamCount: make(map[string]int),
 		outCount:         make(map[PoolKind]int),
+		pendingByKind:    make(map[PoolKind]int),
 	}
 }
 
@@ -231,6 +236,10 @@ func (p *CircuitPool) MarkCircuitFailed(circuitID string) {
 func (p *CircuitPool) registerPoolCircuit(kind PoolKind, circuitID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.pendingByKind[kind] > 0 {
+		p.pendingByKind[kind]--
+		p.pendingTotal--
+	}
 	p.idle[kind] = append(p.idle[kind], poolEntry{circuitID: circuitID, idleSince: time.Now()})
 	p.circuitToKind[circuitID] = kind
 }
@@ -240,9 +249,40 @@ func (p *CircuitPool) registerPoolCircuit(kind PoolKind, circuitID string) {
 func (p *CircuitPool) RegisterCircuitInUse(kind PoolKind, circuitID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.pendingByKind[kind] > 0 {
+		p.pendingByKind[kind]--
+		p.pendingTotal--
+	}
 	p.circuitToKind[circuitID] = kind
 	p.inUseStreamCount[circuitID] = 1
 	p.outCount[kind]++
+}
+
+// TryReserveBuild reserves capacity for one new circuit creation.
+func (p *CircuitPool) TryReserveBuild(kind PoolKind) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.effectiveTotalCountAllLocked() >= p.maxTotal {
+		return false
+	}
+	if p.maxPerPool > 0 && p.effectiveCountLocked(kind) >= p.maxPerPool {
+		return false
+	}
+	p.pendingByKind[kind]++
+	p.pendingTotal++
+	return true
+}
+
+// CancelReservedBuild releases a previous build reservation.
+func (p *CircuitPool) CancelReservedBuild(kind PoolKind) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingByKind[kind] > 0 {
+		p.pendingByKind[kind]--
+	}
+	if p.pendingTotal > 0 {
+		p.pendingTotal--
+	}
 }
 
 // totalCount returns idle count + lent circuit count for a kind.
@@ -256,6 +296,14 @@ func (p *CircuitPool) totalCountAll() int {
 		total += p.totalCount(kind)
 	}
 	return total
+}
+
+func (p *CircuitPool) effectiveCountLocked(kind PoolKind) int {
+	return p.totalCount(kind) + p.pendingByKind[kind]
+}
+
+func (p *CircuitPool) effectiveTotalCountAllLocked() int {
+	return p.totalCountAll() + p.pendingTotal
 }
 
 // runMaintenance creates missing circuits, evicts idle circuits that exceeded timeout.
@@ -363,7 +411,7 @@ func (p *CircuitPool) trimExcessIdle() {
 func (p *CircuitPool) replenishToMinimum() {
 	for {
 		p.mu.Lock()
-		total := p.totalCountAll()
+		total := p.effectiveTotalCountAllLocked()
 		if total >= p.minTotal || total >= p.maxTotal {
 			p.mu.Unlock()
 			return
@@ -373,7 +421,7 @@ func (p *CircuitPool) replenishToMinimum() {
 		found := false
 		minKindTotal := 0
 		for _, kind := range AllPoolKinds() {
-			kindTotal := p.totalCount(kind)
+			kindTotal := p.effectiveCountLocked(kind)
 			if kindTotal >= p.maxPerPool {
 				continue
 			}
@@ -383,6 +431,10 @@ func (p *CircuitPool) replenishToMinimum() {
 				found = true
 			}
 		}
+		if found {
+			p.pendingByKind[targetKind]++
+			p.pendingTotal++
+		}
 		p.mu.Unlock()
 
 		if !found {
@@ -390,6 +442,7 @@ func (p *CircuitPool) replenishToMinimum() {
 		}
 		circuitID, err := p.factory.CreateForPool(targetKind)
 		if err != nil || circuitID == "" {
+			p.CancelReservedBuild(targetKind)
 			return
 		}
 		p.registerPoolCircuit(targetKind, circuitID)

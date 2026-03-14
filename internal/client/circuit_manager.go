@@ -22,7 +22,12 @@ import (
 	"github.com/chenjia404/meshproxy/internal/store"
 )
 
-const heartbeatStreamID = "__heartbeat__"
+const (
+	heartbeatStreamID        = "__heartbeat__"
+	poolAcquireRetryInterval = 100 * time.Millisecond
+	poolAcquireRetryAttempts = 50
+	circuitCreateTimeout     = 30 * time.Second
+)
 
 type BeginErrorKind string
 
@@ -262,19 +267,38 @@ func (m *CircuitManager) EnsureCircuitFromPool(kind PoolKind) (string, error) {
 	m.mu.Lock()
 	pool := m.pool
 	m.mu.Unlock()
-	if pool != nil {
+	return m.ensureCircuitFromPoolExcluding(pool, kind, nil)
+}
+
+// EnsureCircuitFromPoolExcluding gets a circuit from the pool or creates one on demand,
+// while excluding the provided peer IDs during any new path selection.
+func (m *CircuitManager) EnsureCircuitFromPoolExcluding(kind PoolKind, excludePeerIDs []string) (string, error) {
+	m.mu.Lock()
+	pool := m.pool
+	m.mu.Unlock()
+	return m.ensureCircuitFromPoolExcluding(pool, kind, excludePeerIDs)
+}
+
+func (m *CircuitManager) ensureCircuitFromPoolExcluding(pool *CircuitPool, kind PoolKind, excludePeerIDs []string) (string, error) {
+	if pool == nil {
+		return m.CreateForPoolExcluding(kind, excludePeerIDs)
+	}
+	for attempt := 0; attempt < poolAcquireRetryAttempts; attempt++ {
 		if id, ok := pool.GetFromPool(kind); ok {
 			return id, nil
 		}
+		if pool.TryReserveBuild(kind) {
+			id, err := m.CreateForPoolExcluding(kind, excludePeerIDs)
+			if err != nil {
+				pool.CancelReservedBuild(kind)
+				return "", err
+			}
+			pool.RegisterCircuitInUse(kind, id)
+			return id, nil
+		}
+		time.Sleep(poolAcquireRetryInterval)
 	}
-	id, err := m.CreateForPool(kind)
-	if err != nil {
-		return "", err
-	}
-	if pool != nil {
-		pool.RegisterCircuitInUse(kind, id)
-	}
-	return id, nil
+	return "", fmt.Errorf("circuit pool is at capacity")
 }
 
 // CreateForPool creates a new circuit for the given pool kind (implements CircuitPoolFactory).
@@ -391,6 +415,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	m.mu.Lock()
 	id := uuid.NewString()
 	now := time.Now()
+	createDeadline := now.Add(circuitCreateTimeout)
 	rec := &store.CircuitRecord{
 		ID:            id,
 		State:         protocol.CircuitNew,
@@ -414,7 +439,13 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 		m.store.Delete(id)
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	newStreamTimeout := time.Until(createDeadline)
+	if newStreamTimeout <= 0 {
+		m.mu.Unlock()
+		m.store.Delete(id)
+		return "", fmt.Errorf("circuit create timeout")
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, newStreamTimeout)
 	stream, err := m.host.NewStream(ctx, peerID, protocol.CircuitProtocolID)
 	cancel()
 	if err != nil {
@@ -422,6 +453,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 		m.store.Delete(id)
 		return "", err
 	}
+	_ = stream.SetDeadline(createDeadline)
 	m.activeStreams[id] = stream
 	m.mu.Unlock()
 
@@ -546,6 +578,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	m.heartbeatDue[id] = time.Now().Add(m.nextHeartbeatDelayLocked())
 	go m.readLoop(id, stream)
 	m.mu.Unlock()
+	_ = stream.SetDeadline(time.Time{})
 	return id, nil
 }
 

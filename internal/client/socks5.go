@@ -173,13 +173,12 @@ func (s *Socks5Server) handleConn(conn net.Conn) {
 
 		maxRetries := s.circuitMgr.BeginTCPRetries()
 		for attempt := 0; attempt < maxRetries; attempt++ {
-			circuitID, err = s.circuitMgr.CreateForPoolExcluding(kind, excludeExitIDs)
+			circuitID, err = s.circuitMgr.EnsureCircuitFromPoolExcluding(kind, excludeExitIDs)
 			if err != nil {
 				lastBeginErr = err
 				log.Printf("[socks5] create circuit (failover) failed: %v", err)
 				break
 			}
-			s.circuitMgr.RegisterCircuitInUse(kind, circuitID)
 			wrapped = &poolReturnConn{Conn: conn, circuitID: circuitID, mgr: s.circuitMgr}
 			stream = s.streamManager.RegisterStream(circuitID, wrapped)
 			if err := s.circuitMgr.BeginTCP(circuitID, stream.ID, host, int(port)); err != nil {
