@@ -1,26 +1,26 @@
 meshproxy
 =========
 
-meshproxy 是一個使用 Go 編寫的「去中心化匿名代理網路 + 本地 SOCKS5 Agent」原型實現，目前處於早期 MVP 階段。
+meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地 SOCKS5 Agent”原型实现，目前处于早期 MVP 阶段。
 
-架構與模組
+架构与模块
 --------
 
-- **`cmd/node/main.go`**：節點主程序入口，負責讀取配置、初始化 `App` 並處理信號退出。
-- **`internal/app`**：聚合配置、身份、P2P、發現、Circuit、SOCKS5、本地 API 等組件的主應用層。
-- **`internal/config`**：YAML 配置載入、預設值與校驗，支援 `relay` / `relay+exit` 兩種模式。
-- **`internal/identity`**：Ed25519 私鑰生成與持久化，供 libp2p host 使用。
-- **`internal/p2p`**：libp2p host、DHT、Gossip、bootstrap 以及協議 ID 定義。
-- **`internal/discovery`**：節點 descriptor 定義、簽名驗簽、gossip 廣播與快取管理。
-- **`internal/protocol`**：電路協議常量、結構與統一 frame 編碼（CREATE/EXTEND/BEGIN_TCP/DATA/END 等），以及多跳分層加密（X25519 + AEAD 洋蔥封裝）。
-- **`internal/client`**：本地 SOCKS5、路徑選擇器（PathSelector）、CircuitManager、StreamManager。
-- **`internal/relay` / `internal/exit`**：relay / exit 服務實作，relay 僅解一層洋蔥並轉發，exit 解最後一層並連線目標 TCP。
-- **`internal/api`**：本地管理 HTTP API 與內嵌 Web 控制台（`/console/`），提供節點狀態、已知節點、電路、stream、錯誤與指標等資訊。
-- **`internal/store`**：記憶體 KV store 與 circuit store。
-- **`proto/meshproxy.proto`**：後續用於生成 Protobuf 型別。
+- **`cmd/node/main.go`**：节点主程序入口，负责读取配置、初始化 `App` 并处理信号退出。
+- **`internal/app`**：聚合配置、身份、P2P、发现、Circuit、SOCKS5、本地 API 等组件的主应用层。
+- **`internal/config`**：YAML 配置加载、默认值与校验，支持 `relay` / `relay+exit` 两种模式。
+- **`internal/identity`**：Ed25519 私钥生成与持久化，供 libp2p host 使用。
+- **`internal/p2p`**：libp2p host、DHT、Gossip、bootstrap 以及协议 ID 定义。
+- **`internal/discovery`**：节点 descriptor 定义、签名验签、gossip 广播与缓存管理。
+- **`internal/protocol`**：电路协议常量、结构与统一 frame 编码（CREATE/EXTEND/BEGIN_TCP/DATA/END 等），以及多跳分层加密（X25519 + AEAD 洋葱封装）。
+- **`internal/client`**：本地 SOCKS5、路径选择器（PathSelector）、CircuitManager、StreamManager。
+- **`internal/relay` / `internal/exit`**：relay / exit 服务实现，relay 仅解一层洋葱并转发，exit 解最后一层并连接目标 TCP。
+- **`internal/api`**：本地管理 HTTP API 与内嵌 Web 控制台（`/console/`），提供节点状态、已知节点、电路、stream、错误与指标等信息。
+- **`internal/store`**：内存 KV store 与 circuit store。
+- **`proto/meshproxy.proto`**：后续用于生成 Protobuf 类型。
 - **`configs/config.example.yaml`**：示例配置。
 
-編譯與執行
+编译与运行
 --------
 
 ```bash
@@ -29,91 +29,91 @@ go build -o bin/meshproxy ./cmd/node
 ./bin/meshproxy -config configs/config.example.yaml
 ```
 
-啟動後可透過 **Web 控制台** 或 **本地 API** 管理與查詢狀態（API 預設 `http://127.0.0.1:19080`）：
+启动后可通过 **Web 控制台** 或 **本地 API** 管理与查询状态（API 默认 `http://127.0.0.1:19080`）：
 
-- **Web 控制台**：在瀏覽器開啟 `http://127.0.0.1:19080/console/`，可查看節點狀態、已知 Relay/Exit、Circuit/Stream 列表、即時流量彙總、日誌面板等，無需直接查看 JSON API。
+- **Web 控制台**：在浏览器打开 `http://127.0.0.1:19080/console/`，可查看节点状态、已知 Relay/Exit、Circuit/Stream 列表、实时流量汇总、日志面板等，无需直接查看 JSON API。
 
-- **GET /api/v1/status**：節點狀態（`peer_id`, `mode`, `socks5_listen`, `p2p_listen_addrs`, `uptime_seconds`, `relays_known`, `exits_known`, `circuit_pool`）。
-- **GET /api/v1/nodes**：已知節點 descriptor 快取。
-- **GET /api/v1/relays**：已知 relay 節點列表。
-- **GET /api/v1/exits**：已知 exit 節點列表。
-- **GET /api/v1/circuits**：當前電路列表（含每條電路路徑 `plan`、`relay_peer_id`、`exit_peer_id`、`hop_count`、`stream_count`、`created_at`、`updated_at`）。
-- **GET /api/v1/streams**：當前 stream 列表（含目標與狀態，以及對應電路的 `relay_peer_id`、`exit_peer_id`、`hop_count`）。
-- **GET /api/v1/scores**：peer 評分（預留，目前回傳空）。
-- **GET /api/v1/errors/recent**：最近錯誤紀錄。
-- **GET /api/v1/metrics/summary**：彙總指標（circuits_total, streams_active, relays_known, exits_known, errors_recent_count, pool_status 等）。
+- **GET /api/v1/status**：节点状态（`peer_id`, `mode`, `socks5_listen`, `p2p_listen_addrs`, `uptime_seconds`, `relays_known`, `exits_known`, `circuit_pool`）。
+- **GET /api/v1/nodes**：已知节点 descriptor 缓存。
+- **GET /api/v1/relays**：已知 relay 节点列表。
+- **GET /api/v1/exits**：已知 exit 节点列表。
+- **GET /api/v1/circuits**：当前电路列表（含每条电路路径 `plan`、`relay_peer_id`、`exit_peer_id`、`hop_count`、`stream_count`、`created_at`、`updated_at`）。
+- **GET /api/v1/streams**：当前 stream 列表（含目标与状态，以及对应电路的 `relay_peer_id`、`exit_peer_id`、`hop_count`）。
+- **GET /api/v1/scores**：peer 评分（预留，目前返回空）。
+- **GET /api/v1/errors/recent**：最近错误记录。
+- **GET /api/v1/metrics/summary**：汇总指标（circuits_total, streams_active, relays_known, exits_known, errors_recent_count, pool_status 等）。
 
-**出口節點專用 API（僅在 `mode: relay+exit` 時可用）**：
+**出口节点专用 API（仅在 `mode: relay+exit` 时可用）**：
 
-- **GET /api/v1/exit/policy**：當前出口策略與運行時配置。
-- **POST /api/v1/exit/policy**：更新策略或運行時（請求體可含 `policy` / `runtime`，僅更新記憶體，重啟後以配置文件為準）。
-- **GET /api/v1/exit/status**：運行狀態（drain_mode、accept_new_streams、open_connections、recent_rejects）。
-- **POST /api/v1/exit/drain**：進入維護模式（不再接受新 stream）。
-- **POST /api/v1/exit/resume**：結束維護模式。
+- **GET /api/v1/exit/policy**：当前出口策略与运行时配置。
+- **POST /api/v1/exit/policy**：更新策略或运行时（请求体可含 `policy` / `runtime`，仅更新内存，重启后以配置文件为准）。
+- **GET /api/v1/exit/status**：运行状态（drain_mode、accept_new_streams、open_connections、recent_rejects）。
+- **POST /api/v1/exit/drain**：进入维护模式（不再接受新 stream）。
+- **POST /api/v1/exit/resume**：结束维护模式。
 
-配置說明
+配置说明
 --------
 
-示例配置位於 `configs/config.example.yaml`，主要字段：
+示例配置位于 `configs/config.example.yaml`，主要字段：
 
 - **`mode`**：`relay` 或 `relay+exit`。  
-  - `relay`：僅作為中繼節點，不直接作為出口。  
-  - `relay+exit`：同時具備 relay 與 exit 能力。
-- **`data_dir`**：用於存放身份密鑰等持久化資料。
-- **`identity_key_path`**：如為空，預設為 `${data_dir}/identity.key`。
-- **`p2p.listen_addrs`**：libp2p 監聽 multiaddr 列表，例如 `"/ip4/0.0.0.0/tcp/0"`。
-- **`p2p.bootstrap_peers`**：其他節點的 multiaddr，用於啟動時連線引導。
-- **`socks5.listen`**：本地 SOCKS5 監聽位址，例如 `127.0.0.1:1080`。
-- **`api.listen`**：本地 HTTP API 監聽位址，例如 `127.0.0.1:19080`。
+  - `relay`：仅作为中继节点，不直接作为出口。  
+  - `relay+exit`：同时具备 relay 与 exit 能力。
+- **`data_dir`**：用于存放身份密钥等持久化数据。
+- **`identity_key_path`**：如为空，默认值为 `${data_dir}/identity.key`。
+- **`p2p.listen_addrs`**：libp2p 监听 multiaddr 列表，例如 `"/ip4/0.0.0.0/tcp/0"`。
+- **`p2p.bootstrap_peers`**：其他节点的 multiaddr，用于启动时连接引导。
+- **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。
+- **`api.listen`**：本地 HTTP API 监听地址，例如 `127.0.0.1:19080`。
 
-**出口策略（僅在 `mode: relay+exit` 時生效）**：在配置中可加入 `exit` 段，用於控制出口允許的端口、域名、peer、是否允許私網/回環目標、以及維護模式（drain_mode）。預設保守：僅允許 TCP、80/443，禁止私網與回環。詳見 `configs/config.example.yaml` 中註解示例。
+**出口策略（仅在 `mode: relay+exit` 时生效）**：在配置中可加入 `exit` 段，用于控制出口允许的端口、域名、peer、是否允许私网/回环目标，以及维护模式（drain_mode）。默认配置较为保守：仅允许 TCP、80/443，禁止私网与回环。详见 `configs/config.example.yaml` 中的注释示例。
 
-雙節點測試（示意）
+双节点测试（示意）
 --------------
 
-假設有兩個節點：
+假设有两个节点：
 
-- **節點 A**：`mode: relay+exit`，同時作為 relay 與出口。  
-- **節點 B**：`mode: relay`，僅作為中繼，瀏覽器連到 B 的本地 SOCKS5。
+- **节点 A**：`mode: relay+exit`，同时作为 relay 与出口。  
+- **节点 B**：`mode: relay`，仅作为中继，浏览器连接到 B 的本地 SOCKS5。
 
-基本步驟：
+基本步骤：
 
-1. 在節點 A 上啟動 meshproxy，記錄其 `PeerId` 與實際 `p2p_listen_addrs`。  
-2. 在節點 B 的 `configs/config.example.yaml` 中，將 A 的 multiaddr 寫入 `p2p.bootstrap_peers`。  
-3. 在節點 B 上啟動 meshproxy。  
-4. 使用瀏覽器將 HTTP/HTTPS 代理設定為 B 的 SOCKS5 位址（預設 `127.0.0.1:1080`）。  
-5. 嘗試訪問網站，並通過兩端日誌及未來的 `circuits` / `streams` 查詢電路路徑。
+1. 在节点 A 上启动 meshproxy，记录其 `PeerId` 与实际 `p2p_listen_addrs`。  
+2. 在节点 B 的 `configs/config.example.yaml` 中，将 A 的 multiaddr 写入 `p2p.bootstrap_peers`。  
+3. 在节点 B 上启动 meshproxy。  
+4. 使用浏览器将 HTTP/HTTPS 代理设置为 B 的 SOCKS5 地址（默认 `127.0.0.1:1080`）。  
+5. 尝试访问网站，并通过两端日志及后续的 `circuits` / `streams` 查询电路路径。
 
-瀏覽器 SOCKS5 配置提示
+浏览器 SOCKS5 配置提示
 ------------------
 
-- 瀏覽器需設定為 **SOCKS5** 代理，指向本地節點的 `socks5.listen`。  
-- 建議關閉瀏覽器自帶 DNS 快取或啟用「透過 SOCKS 解析 DNS」選項，確保域名解析委託給 exit 節點（remote DNS）。
+- 浏览器需设置为 **SOCKS5** 代理，指向本地节点的 `socks5.listen`。  
+- 建议关闭浏览器自带 DNS 缓存或启用“通过 SOCKS 解析 DNS”选项，确保域名解析委托给 exit 节点（remote DNS）。
 
 本地 API 示例
 -----------
 
-- **節點狀態（含 relay/exit 數量與電路池）**：`curl http://127.0.0.1:19080/api/v1/status | jq .`
-- **已知節點**：`curl http://127.0.0.1:19080/api/v1/nodes | jq .`
+- **节点状态（含 relay/exit 数量与电路池）**：`curl http://127.0.0.1:19080/api/v1/status | jq .`
+- **已知节点**：`curl http://127.0.0.1:19080/api/v1/nodes | jq .`
 - **已知 relay / exit**：`curl http://127.0.0.1:19080/api/v1/relays | jq .`、`curl http://127.0.0.1:19080/api/v1/exits | jq .`
-- **電路列表（含路徑）**：`curl http://127.0.0.1:19080/api/v1/circuits | jq .`
-- **Stream 列表（目標與狀態）**：`curl http://127.0.0.1:19080/api/v1/streams | jq .`
-- **最近錯誤**：`curl http://127.0.0.1:19080/api/v1/errors/recent | jq .`
-- **彙總指標**：`curl http://127.0.0.1:19080/api/v1/metrics/summary | jq .`
+- **电路列表（含路径）**：`curl http://127.0.0.1:19080/api/v1/circuits | jq .`
+- **Stream 列表（目标与状态）**：`curl http://127.0.0.1:19080/api/v1/streams | jq .`
+- **最近错误**：`curl http://127.0.0.1:19080/api/v1/errors/recent | jq .`
+- **汇总指标**：`curl http://127.0.0.1:19080/api/v1/metrics/summary | jq .`
 
-後續演進方向
+后续演进方向
 --------
 
-- 補全 SOCKS5 協議狀態機與流量轉發。
-- 基於 libp2p stream 建立 relay / relay+exit 數據通道。
-- 利用 DHT/Gossip 做節點發現、路由公告與健康檢查。
-- 擴展本地 API，支持連線狀態、路由表與 debug 訊息查詢。
+- 补全 SOCKS5 协议状态机与流量转发。
+- 基于 libp2p stream 建立 relay / relay+exit 数据通道。
+- 利用 DHT/Gossip 做节点发现、路由公告与健康检查。
+- 扩展本地 API，支持连接状态、路由表与 debug 信息查询。
 
 已知限制
 ------
 
-- 目前僅支援 TCP 流量的多跳分層加密，且主要針對 `Local -> Relay -> Exit` 單 relay 拓撲做 MVP 驗證。
-- 尚未支援 UDP、DNS over circuit 等進階功能。
-- DHT / Gossip 僅用於最小節點 descriptor 發現與快取，尚未設計完整路由/信譽機制。
-- Circuit / Stream 管理仍為記憶體內部狀態，尚未考慮持久化與全網健康度評估。
+- 目前仅支持 TCP 流量的多跳分层加密，且主要针对 `Local -> Relay -> Exit` 单 relay 拓扑做 MVP 验证。
+- 尚未支持 UDP、DNS over circuit 等进阶功能。
+- DHT / Gossip 仅用于最小节点 descriptor 发现与缓存，尚未设计完整路由/信誉机制。
+- Circuit / Stream 管理仍为内存内部状态，尚未考虑持久化与全网健康度评估。
 
