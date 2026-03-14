@@ -35,10 +35,11 @@ type PathPlan struct {
 
 // CircuitInfo is a readonly view of a circuit for external consumers (e.g. API).
 type CircuitInfo struct {
-	ID        string       `json:"id"`
-	State     CircuitState `json:"state"`
-	Plan      PathPlan     `json:"plan"`
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID            string       `json:"id"`
+	State         CircuitState `json:"state"`
+	Plan          PathPlan     `json:"plan"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+	BytesSent     uint64       `json:"bytes_sent"`
+	BytesReceived uint64       `json:"bytes_received"`
 }
-

@@ -27,12 +27,22 @@ type RejectEntry struct {
 	At    time.Time `json:"at"`
 }
 
+// udpSession 表示一個 UDP 會話：出口端用一個 UDPConn 與目標 host:port 收發報文。
+type udpSession struct {
+	conn       *net.UDPConn
+	targetAddr *net.UDPAddr
+	streamKey  string
+	circuitID  string
+	streamID   string
+}
+
 type Service struct {
-	host         host.Host
-	Policy       *PolicyChecker
-	mu           sync.Mutex
-	conns        map[string]net.Conn
-	sessions     map[string]*protocol.HopSession
+	host          host.Host
+	Policy        *PolicyChecker
+	mu            sync.Mutex
+	conns         map[string]net.Conn
+	udpSessions   map[string]*udpSession
+	sessions      map[string]*protocol.HopSession
 	recentRejects []RejectEntry
 }
 
@@ -43,6 +53,7 @@ func NewService(h host.Host, policy *PolicyChecker) *Service {
 		host:          h,
 		Policy:        policy,
 		conns:         make(map[string]net.Conn),
+		udpSessions:   make(map[string]*udpSession),
 		sessions:      make(map[string]*protocol.HopSession),
 		recentRejects: make([]RejectEntry, 0, maxRecentRejects),
 	}
@@ -160,6 +171,63 @@ func (s *Service) serveStream(str network.Stream) {
 				}
 				s.storeConn(frame.StreamID, remote)
 				go s.pumpRemoteToCircuit(frame.CircuitID, frame.StreamID, remote, str, &writeMu, streamKey)
+			case "begin_udp":
+				if payload.BeginUDP == nil {
+					return
+				}
+				beginUDP := payload.BeginUDP
+				addr := net.JoinHostPort(beginUDP.TargetHost, strconv.Itoa(beginUDP.TargetPort))
+				if rejectReason := s.checkBeginUDPPolicy(str, beginUDP); rejectReason != "" {
+					s.recordReject(rejectReason)
+					resp := protocol.Connected{OK: false, Error: string(rejectReason)}
+					s.sendConnectedAndReturn(streamKey, frame.CircuitID, frame.StreamID, &resp, str, &writeMu)
+					return
+				}
+				targetAddr, err := net.ResolveUDPAddr("udp", addr)
+				if err != nil {
+					resp := protocol.Connected{OK: false, Error: fmt.Sprintf("resolve udp %s: %v", addr, err)}
+					s.sendConnectedAndReturn(streamKey, frame.CircuitID, frame.StreamID, &resp, str, &writeMu)
+					return
+				}
+				udpConn, err := net.ListenPacket("udp", ":0")
+				if err != nil {
+					resp := protocol.Connected{OK: false, Error: fmt.Sprintf("listen udp: %v", err)}
+					s.sendConnectedAndReturn(streamKey, frame.CircuitID, frame.StreamID, &resp, str, &writeMu)
+					return
+				}
+				conn, ok := udpConn.(*net.UDPConn)
+				if !ok {
+					udpConn.Close()
+					resp := protocol.Connected{OK: false, Error: "udp listen not *net.UDPConn"}
+					s.sendConnectedAndReturn(streamKey, frame.CircuitID, frame.StreamID, &resp, str, &writeMu)
+					return
+				}
+				sess := &udpSession{
+					conn:       conn,
+					targetAddr: targetAddr,
+					streamKey:  streamKey,
+					circuitID:  frame.CircuitID,
+					streamID:   frame.StreamID,
+				}
+				s.storeUDPSession(frame.StreamID, sess)
+				resp := protocol.Connected{OK: true}
+				connectedPayload := protocol.OnionPayload{Kind: "connected", Connected: &resp}
+				connectedJSON, _ := json.Marshal(connectedPayload)
+				wrapped, err := s.wrapBackward(streamKey, frame.CircuitID, frame.StreamID, connectedJSON)
+				if err != nil {
+					s.closeUDPSession(frame.StreamID)
+					return
+				}
+				outFrame := protocol.Frame{
+					Type:        protocol.MsgTypeOnionData,
+					CircuitID:   frame.CircuitID,
+					StreamID:    frame.StreamID,
+					PayloadJSON: wrapped,
+				}
+				writeMu.Lock()
+				_ = protocol.WriteFrame(str, outFrame)
+				writeMu.Unlock()
+				go s.pumpUDPToCircuit(sess, str, &writeMu)
 			case "data":
 				if payload.Data == nil {
 					continue
@@ -168,12 +236,17 @@ func (s *Service) serveStream(str network.Stream) {
 					if _, err := conn.Write(payload.Data.Payload); err != nil {
 						s.closeConn(frame.StreamID)
 					}
+				} else if udpSess := s.getUDPSession(frame.StreamID); udpSess != nil {
+					if _, err := udpSess.conn.WriteTo(payload.Data.Payload, udpSess.targetAddr); err != nil {
+						s.closeUDPSession(frame.StreamID)
+					}
 				}
 			default:
 				// ignore
 			}
 		case protocol.MsgTypeEnd:
 			s.closeConn(frame.StreamID)
+			s.closeUDPSession(frame.StreamID)
 			return
 		default:
 			return
@@ -199,6 +272,9 @@ func (s *Service) wrapBackward(streamKey, circuitID, streamID string, plaintext 
 }
 
 func (s *Service) pumpRemoteToCircuit(circuitID, streamID string, remote net.Conn, str network.Stream, writeMu *sync.Mutex, streamKey string) {
+	if remote == nil {
+		return
+	}
 	defer s.closeConn(streamID)
 	defer remote.Close()
 	buf := make([]byte, 16*1024)
@@ -251,6 +327,108 @@ func (s *Service) closeConn(streamID string) {
 		}
 		delete(s.conns, streamID)
 	}
+}
+
+func (s *Service) storeUDPSession(streamID string, sess *udpSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.udpSessions[streamID] = sess
+}
+
+func (s *Service) getUDPSession(streamID string) *udpSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.udpSessions[streamID]
+}
+
+func (s *Service) closeUDPSession(streamID string) {
+	s.mu.Lock()
+	sess, ok := s.udpSessions[streamID]
+	delete(s.udpSessions, streamID)
+	s.mu.Unlock()
+	if ok && sess != nil && sess.conn != nil {
+		_ = sess.conn.Close()
+	}
+}
+
+// pumpUDPToCircuit 從 UDP 連接讀取回包並寫回 circuit。
+func (s *Service) pumpUDPToCircuit(sess *udpSession, str network.Stream, writeMu *sync.Mutex) {
+	defer s.closeUDPSession(sess.streamID)
+	buf := make([]byte, 16*1024)
+	for {
+		n, _, err := sess.conn.ReadFromUDP(buf)
+		if n > 0 {
+			payload := protocol.OnionPayload{Kind: "data", Data: &protocol.DataCell{Payload: buf[:n]}}
+			payloadJSON, _ := json.Marshal(payload)
+			wrapped, err := s.wrapBackward(sess.streamKey, sess.circuitID, sess.streamID, payloadJSON)
+			if err != nil {
+				return
+			}
+			frame := protocol.Frame{
+				Type:        protocol.MsgTypeOnionData,
+				CircuitID:   sess.circuitID,
+				StreamID:    sess.streamID,
+				PayloadJSON: wrapped,
+			}
+			writeMu.Lock()
+			err = protocol.WriteFrame(str, frame)
+			writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// checkBeginUDPPolicy 對 begin_udp 做出口策略檢查（UDP 協議）。
+func (s *Service) checkBeginUDPPolicy(str network.Stream, begin *protocol.BeginUDP) ExitRejectReason {
+	if s.Policy == nil {
+		return ""
+	}
+	p := s.Policy
+	if !p.IsEnabled() {
+		return ExitRejectDisabled
+	}
+	if !p.AcceptNewStreams() || p.DrainMode() {
+		return ExitRejectDraining
+	}
+	peerID := str.Conn().RemotePeer().String()
+	if reason, ok := p.CheckPeerAllowed(peerID); !ok {
+		return reason
+	}
+	if reason, ok := p.CheckProtocolAllowed(false); !ok {
+		return reason
+	}
+	if reason, ok := p.CheckPortAllowed(begin.TargetPort); !ok {
+		return reason
+	}
+	host := begin.TargetHost
+	ip := net.ParseIP(host)
+	if ip != nil {
+		if reason, ok := p.CheckTargetIPAllowed(ip); !ok {
+			return reason
+		}
+		return ""
+	}
+	if reason, ok := p.CheckDomainAllowed(host); !ok {
+		return reason
+	}
+	if !p.GetPolicy().RemoteDNS {
+		return ""
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return ExitRejectDomainDenied
+	}
+	for _, a := range addrs {
+		if reason, ok := p.CheckTargetIPAllowed(a); !ok {
+			return reason
+		}
+	}
+	return ""
 }
 
 // checkBeginPolicy 按文檔順序執行出口策略檢查，拒絕時返回非空原因。
@@ -347,4 +525,3 @@ func (s *Service) GetRecentRejects() []RejectEntry {
 	copy(out, s.recentRejects)
 	return out
 }
-

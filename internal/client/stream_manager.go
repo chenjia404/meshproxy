@@ -2,8 +2,10 @@ package client
 
 import (
 	"errors"
+	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -35,7 +37,22 @@ func (c *streamErrorConn) SetReadError(err error) {
 	c.mu.Unlock()
 }
 
-// Stream represents a logical stream bound to a local TCP connection.
+// udpReplyConn implements net.Conn for UDP streams: Write sends data to a channel
+// for the SOCKS5 UDP handler to forward to the client; Read returns EOF.
+type udpReplyConn struct {
+	ch chan []byte
+}
+
+func (c *udpReplyConn) Read(b []byte) (n int, err error)   { return 0, io.EOF }
+func (c *udpReplyConn) Write(b []byte) (n int, err error)  { c.ch <- append([]byte(nil), b...); return len(b), nil }
+func (c *udpReplyConn) Close() error                       { close(c.ch); return nil }
+func (c *udpReplyConn) LocalAddr() net.Addr                { return nil }
+func (c *udpReplyConn) RemoteAddr() net.Addr               { return nil }
+func (c *udpReplyConn) SetDeadline(t time.Time) error      { return nil }
+func (c *udpReplyConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *udpReplyConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// Stream represents a logical stream bound to a local TCP connection or UDP reply channel.
 type Stream struct {
 	ID         string
 	CircuitID   string
@@ -85,6 +102,23 @@ func (m *StreamManager) RegisterStream(circuitID string, conn net.Conn) *Stream 
 	return s
 }
 
+// RegisterStreamUDP registers a UDP stream. Data received from the circuit is sent to the
+// returned channel; the caller should read from it and send UDP to the client. Close the
+// stream with Remove(id) when done.
+func (m *StreamManager) RegisterStreamUDP(circuitID string) (*Stream, <-chan []byte) {
+	ch := make(chan []byte, 64)
+	conn := &udpReplyConn{ch: ch}
+	s := &Stream{
+		ID:        m.NewStreamID(),
+		CircuitID: circuitID,
+		Conn:      conn,
+	}
+	m.mu.Lock()
+	m.streams[s.ID] = s
+	m.mu.Unlock()
+	return s, ch
+}
+
 // Get returns the stream by ID.
 func (m *StreamManager) Get(id string) (*Stream, bool) {
 	m.mu.RLock()
@@ -93,13 +127,16 @@ func (m *StreamManager) Get(id string) (*Stream, bool) {
 	return s, ok
 }
 
-// Remove removes the stream from the manager and closes the connection.
+// Remove removes the stream from the manager and closes the connection (or UDP reply channel).
 func (m *StreamManager) Remove(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if s, ok := m.streams[id]; ok {
-		_ = s.Conn.Close()
+	s, ok := m.streams[id]
+	if ok {
 		delete(m.streams, id)
+	}
+	m.mu.Unlock()
+	if ok && s.Conn != nil {
+		_ = s.Conn.Close()
 	}
 }
 

@@ -194,8 +194,8 @@
     function renderCircuits(data) {
       var list = Array.isArray(data) ? data : [];
       if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前无电路</p></div>';
-      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>状态</th><th>路径</th><th>建立时间</th></tr></thead><tbody>' +
-        list.map(function(c){ var path = (c.plan && c.plan.hops) ? c.plan.hops.map(function(h){ return '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>'; }).join(' \u2192 ') : '-'; return '<tr><td><code>' + escapeHtml((c.id||'').slice(0,8)) + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + path + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>状态</th><th>路径</th><th>发送</th><th>接收</th><th>建立时间</th></tr></thead><tbody>' +
+        list.map(function(c){ var path = (c.plan && c.plan.hops) ? c.plan.hops.map(function(h){ return '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>'; }).join(' \u2192 ') : '-'; return '<tr><td><code>' + escapeHtml((c.id||'').slice(0,8)) + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
     function renderStreams(data) {
       var list = Array.isArray(data) ? data : [];
@@ -502,6 +502,22 @@
         list.map(function(e){ return '<div class="log-line"><span class="ts">' + (e.at ? new Date(e.at).toLocaleTimeString() : '') + '</span><span class="cat">[' + escapeHtml(e.category || '') + ']</span>' + escapeHtml(e.message || '') + '</div>'; }).join('') + '</div>';
     }
     function escapeHtml(s) { if (s == null) return ''; var div = document.createElement('div'); div.textContent = s; return div.innerHTML; }
+    function formatBytes(value) {
+      if (value == null || value === '') return '-';
+      var num = Number(value);
+      if (!Number.isFinite(num)) return '-';
+      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var n = num;
+      var idx = 0;
+      while (n >= 1024 && idx < units.length - 1) {
+        n /= 1024;
+        idx++;
+      }
+      if (idx === 0) {
+        return Math.round(n) + ' ' + units[idx];
+      }
+      return n.toFixed(1) + ' ' + units[idx];
+    }
     function formatUptime(sec) { if (sec == null) return '-'; var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60); return [h,m,s].map(function(v){ return String(v).padStart(2,'0'); }).join(':'); }
 
     var COLLAPSE_KEY = 'meshproxy-console-sidebar-collapsed';

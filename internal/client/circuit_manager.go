@@ -20,15 +20,15 @@ import (
 
 // CircuitManager manages circuit lifecycle and delegates storage to CircuitStore.
 type CircuitManager struct {
-	mu           sync.Mutex
-	ctx          context.Context
-	host         host.Host
-	store        *store.CircuitStore
-	pathSelector *PathSelector
-	streams      *StreamManager
-	pool             *CircuitPool
-	buildRetries     int // 1~2: retries when building circuit fails (relay/exit failover)
-	beginTCPRetries  int // 1~2: retries when exit connect (BEGIN_TCP) fails
+	mu              sync.Mutex
+	ctx             context.Context
+	host            host.Host
+	store           *store.CircuitStore
+	pathSelector    *PathSelector
+	streams         *StreamManager
+	pool            *CircuitPool
+	buildRetries    int // 1~2: retries when building circuit fails (relay/exit failover)
+	beginTCPRetries int // 1~2: retries when exit connect (BEGIN_TCP) fails
 	// activeStreams keeps the libp2p streams per circuit.
 	activeStreams map[string]network.Stream
 	// hopSessions 每條 circuit 的逐跳會話（順序 [relay, exit]），用於洋蔥加解密；不暴露給 API。
@@ -130,7 +130,7 @@ func (m *CircuitManager) EnsureCircuit(plan protocol.PathPlan) (string, error) {
 }
 
 // EnsureCircuitFromPool gets a circuit from the pool for the given kind, or creates one on demand.
-// Use ReturnToPool when the connection ends successfully, or MarkCircuitFailed on error.
+// Multiple streams can share the same circuit; use ReturnToPool when each stream ends.
 func (m *CircuitManager) EnsureCircuitFromPool(kind PoolKind) (string, error) {
 	m.mu.Lock()
 	pool := m.pool
@@ -140,7 +140,14 @@ func (m *CircuitManager) EnsureCircuitFromPool(kind PoolKind) (string, error) {
 			return id, nil
 		}
 	}
-	return m.CreateForPool(kind)
+	id, err := m.CreateForPool(kind)
+	if err != nil {
+		return "", err
+	}
+	if pool != nil {
+		pool.RegisterCircuitInUse(kind, id)
+	}
+	return id, nil
 }
 
 // CreateForPool creates a new circuit for the given pool kind (implements CircuitPoolFactory).
@@ -473,16 +480,22 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 				}
 				m.mu.Unlock()
 			} else if payload.Kind == "data" && payload.Data != nil {
-				if stream, ok := m.streams.Get(frame.StreamID); ok {
-					_, _ = stream.Conn.Write(payload.Data.Payload)
+				if stream, ok := m.streams.Get(frame.StreamID); ok && stream.Conn != nil {
+					n, _ := stream.Conn.Write(payload.Data.Payload)
+					if n > 0 {
+						m.addCircuitBytes(circuitID, 0, uint64(n))
+					}
 				}
 			}
 		case protocol.MsgTypeData, protocol.MsgTypeEnd:
 			if stream, ok := m.streams.Get(frame.StreamID); ok {
 				if frame.Type == protocol.MsgTypeData {
 					var cell protocol.DataCell
-					if err := json.Unmarshal(frame.PayloadJSON, &cell); err == nil {
-						_, _ = stream.Conn.Write(cell.Payload)
+					if err := json.Unmarshal(frame.PayloadJSON, &cell); err == nil && stream.Conn != nil {
+						n, _ := stream.Conn.Write(cell.Payload)
+						if n > 0 {
+							m.addCircuitBytes(circuitID, 0, uint64(n))
+						}
 					}
 				} else {
 					m.streams.Remove(frame.StreamID)
@@ -549,6 +562,96 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 	}
 }
 
+// BeginUDP sends a BEGIN_UDP request over the given circuit and waits for a
+// CONNECTED response from the exit. It returns error on failure.
+func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) error {
+	m.mu.Lock()
+	s, ok := m.activeStreams[circuitID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("no active stream for circuit %s", circuitID)
+	}
+	ch := make(chan protocol.Connected, 1)
+	m.pendingConnected[streamID] = ch
+	m.mu.Unlock()
+
+	hops := m.getHopSessions(circuitID)
+	if len(hops) == 0 {
+		return fmt.Errorf("no hop sessions for circuit %s", circuitID)
+	}
+	payload := protocol.OnionPayload{
+		Kind:     "begin_udp",
+		BeginUDP: &protocol.BeginUDP{TargetHost: host, TargetPort: port},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := protocol.WrapForward(hops, circuitID, streamID, payloadJSON)
+	if err != nil {
+		return err
+	}
+	cell := protocol.OnionCell{Ciphertext: ciphertext}
+	frame, err := protocol.NewOnionDataFrame(circuitID, streamID, cell)
+	if err != nil {
+		return err
+	}
+	if err := protocol.WriteFrame(s, frame); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			if resp.Error != "" {
+				return fmt.Errorf("remote udp connect failed: %s", resp.Error)
+			}
+			return fmt.Errorf("remote udp connect failed")
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for CONNECTED (udp) timed out")
+	}
+}
+
+// SendData sends a DATA frame over the given circuit/stream (used for UDP payloads).
+func (m *CircuitManager) SendData(circuitID, streamID string, payload []byte) error {
+	m.mu.Lock()
+	s, ok := m.activeStreams[circuitID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no active stream for circuit %s", circuitID)
+	}
+	hops := m.getHopSessions(circuitID)
+	if len(hops) == 0 {
+		return fmt.Errorf("no hop sessions for circuit %s", circuitID)
+	}
+	payloadCopy := append([]byte(nil), payload...)
+	pl := protocol.OnionPayload{Kind: "data", Data: &protocol.DataCell{Payload: payloadCopy}}
+	payloadJSON, err := json.Marshal(pl)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := protocol.WrapForward(hops, circuitID, streamID, payloadJSON)
+	if err != nil {
+		return err
+	}
+	cell := protocol.OnionCell{Ciphertext: ciphertext}
+	frame, err := protocol.NewOnionDataFrame(circuitID, streamID, cell)
+	if err != nil {
+		return err
+	}
+	if err := protocol.WriteFrame(s, frame); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		m.addCircuitBytes(circuitID, uint64(len(payload)), 0)
+	}
+	return nil
+}
+
 // StartDataPump starts a goroutine that reads from the local conn and sends
 // DATA frames over the given circuit/stream until EOF or error.
 func (m *CircuitManager) StartDataPump(circuitID, streamID string, conn net.Conn) {
@@ -588,6 +691,7 @@ func (m *CircuitManager) StartDataPump(circuitID, streamID string, conn net.Conn
 				if err := protocol.WriteFrame(s, frame); err != nil {
 					return
 				}
+				m.addCircuitBytes(circuitID, uint64(n), 0)
 			}
 			if err != nil {
 				endFrame, encErr := protocol.NewEndFrame(circuitID, streamID, "local_closed")
@@ -600,4 +704,9 @@ func (m *CircuitManager) StartDataPump(circuitID, streamID string, conn net.Conn
 	}()
 }
 
-
+func (m *CircuitManager) addCircuitBytes(circuitID string, sent, recv uint64) {
+	if m.store == nil {
+		return
+	}
+	m.store.AddStats(circuitID, sent, recv)
+}

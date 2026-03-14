@@ -51,9 +51,9 @@ type Config struct {
 
 // ExitConfig 出口節點策略與運行時配置（運營者控制允許代理的目標範圍）。
 type ExitConfig struct {
-	Enabled bool               `yaml:"enabled"`
-	Policy  ExitPolicyConfig   `yaml:"policy"`
-	Runtime ExitRuntimeConfig  `yaml:"runtime"`
+	Enabled bool              `yaml:"enabled"`
+	Policy  ExitPolicyConfig  `yaml:"policy"`
+	Runtime ExitRuntimeConfig `yaml:"runtime"`
 }
 
 // ExitPolicyConfig 出口策略：端口、域名、peer、私網/回環等。
@@ -159,6 +159,8 @@ type P2PConfig struct {
 type Socks5Config struct {
 	// Listen is the address for the local SOCKS5 server.
 	Listen string `yaml:"listen"`
+	// AllowUDPAssociate enables SOCKS5 UDP ASSOCIATE (relay UDP over circuits).
+	AllowUDPAssociate bool `yaml:"allow_udp_associate"`
 }
 
 // APIConfig groups local management API configuration.
@@ -188,7 +190,8 @@ func Default() Config {
 			DiscoveryTag: "meshproxy",
 		},
 		Socks5: Socks5Config{
-			Listen: "127.0.0.1:1080",
+			Listen:            "127.0.0.1:1080",
+			AllowUDPAssociate: true,
 		},
 		API: APIConfig{
 			Listen: "127.0.0.1:19080",
@@ -203,14 +206,14 @@ func Default() Config {
 			BuildRetries:    1,
 			BeginTCPRetries: 1,
 			ExitSelection: ExitSelectionConfig{
-				Mode:               ExitSelectionAuto,
-				RequireTCPSupport:  true,
+				Mode:              ExitSelectionAuto,
+				RequireTCPSupport: true,
 				FallbackToAny:     true,
 				AllowDirectExit:   true,
 			},
 			GeoIP: GeoIPConfig{
-				Provider:         "none",
-				CacheTTLMinutes:  1440,
+				Provider:        "none",
+				CacheTTLMinutes: 1440,
 			},
 		},
 	}
@@ -306,14 +309,14 @@ func (c *Config) postProcess() error {
 
 func defaultExitPolicyConfig() ExitPolicyConfig {
 	return ExitPolicyConfig{
-		AllowTCP:                true,
-		AllowUDP:                false,
-		RemoteDNS:               true,
-		AllowedPorts:            []int{80, 443},
-		DeniedPorts:             []int{25, 465, 587, 22, 3389},
-		AllowPrivateIPTargets:   false,
-		AllowLoopbackTargets:    false,
-		AllowLinkLocalTargets:   false,
+		AllowTCP:              true,
+		AllowUDP:              false,
+		RemoteDNS:             true,
+		AllowedPorts:          []int{80, 443},
+		DeniedPorts:           []int{25, 465, 587, 22, 3389},
+		AllowPrivateIPTargets: false,
+		AllowLoopbackTargets:  false,
+		AllowLinkLocalTargets: false,
 	}
 }
 

@@ -38,6 +38,12 @@ type BeginTCP struct {
 	TargetPort int    `json:"target_port"`
 }
 
+// BeginUDP represents a BEGIN_UDP request from client to exit (UDP session to target host:port).
+type BeginUDP struct {
+	TargetHost string `json:"target_host"`
+	TargetPort int    `json:"target_port"`
+}
+
 // Connected is sent by the exit when a TCP connection has been established (or failed).
 type Connected struct {
 	OK    bool   `json:"ok"`
@@ -77,12 +83,12 @@ type OnionCell struct {
 
 // OnionInner is a helper structure used for the current plaintext
 // onion implementation. Ciphertext carries the JSON-encoded OnionInner,
-// which then wraps either a BeginTCP or DataCell. Later iterations can
-// replace this with real encrypted blobs without改变上層邏輯。
+// which then wraps either a BeginTCP, BeginUDP or DataCell.
 type OnionInner struct {
-	Kind  string     `json:"kind"`            // "begin" or "data"
-	Begin *BeginTCP  `json:"begin,omitempty"` // present when Kind == "begin"
-	Data  *DataCell  `json:"data,omitempty"`  // present when Kind == "data"
+	Kind     string     `json:"kind"`              // "begin" | "begin_udp" | "data"
+	Begin    *BeginTCP  `json:"begin,omitempty"`   // present when Kind == "begin"
+	BeginUDP *BeginUDP  `json:"begin_udp,omitempty"`
+	Data     *DataCell  `json:"data,omitempty"`     // present when Kind == "data"
 }
 
 // HopKeys describes the forward and backward keys for a single hop.
@@ -138,8 +144,9 @@ const (
 
 // OnionPayload 表示最內層業務命令（exit 解密後得到）。
 type OnionPayload struct {
-	Kind      string     `json:"kind"` // "begin" | "data" | "end" | "connected" | "window_update"
+	Kind      string     `json:"kind"` // "begin" | "begin_udp" | "data" | "end" | "connected" | "window_update"
 	Begin     *BeginTCP  `json:"begin,omitempty"`
+	BeginUDP  *BeginUDP  `json:"begin_udp,omitempty"`
 	Data      *DataCell  `json:"data,omitempty"`
 	End       *EndCell   `json:"end,omitempty"`
 	Connected *Connected `json:"connected,omitempty"`

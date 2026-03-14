@@ -9,14 +9,16 @@ import (
 
 // CircuitRecord stores mutable information about a circuit.
 type CircuitRecord struct {
-	ID        string
-	State     protocol.CircuitState
-	Plan      protocol.PathPlan
+	ID    string
+	State protocol.CircuitState
+	Plan  protocol.PathPlan
 	// Keys holds per-hop forward/backward keys for this circuit. It will
 	// remain nil until key negotiation is implemented.
-	Keys      *protocol.CircuitKeys
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Keys          *protocol.CircuitKeys
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	BytesSent     uint64
+	BytesReceived uint64
 }
 
 // CircuitStore keeps track of all circuits in memory.
@@ -55,13 +57,28 @@ func (s *CircuitStore) GetAll() []protocol.CircuitInfo {
 	out := make([]protocol.CircuitInfo, 0, len(s.circuits))
 	for _, rec := range s.circuits {
 		out = append(out, protocol.CircuitInfo{
-			ID:        rec.ID,
-			State:     rec.State,
-			Plan:      rec.Plan,
-			CreatedAt: rec.CreatedAt,
-			UpdatedAt: rec.UpdatedAt,
+			ID:            rec.ID,
+			State:         rec.State,
+			Plan:          rec.Plan,
+			CreatedAt:     rec.CreatedAt,
+			UpdatedAt:     rec.UpdatedAt,
+			BytesSent:     rec.BytesSent,
+			BytesReceived: rec.BytesReceived,
 		})
 	}
 	return out
 }
 
+// AddStats increments the stored bytes for the given circuit.
+func (s *CircuitStore) AddStats(id string, sent, recv uint64) {
+	if id == "" || (sent == 0 && recv == 0) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.circuits[id]; ok && rec != nil {
+		rec.BytesSent += sent
+		rec.BytesReceived += recv
+		rec.UpdatedAt = time.Now()
+	}
+}

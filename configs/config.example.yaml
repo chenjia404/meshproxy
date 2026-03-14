@@ -12,6 +12,7 @@ p2p:
 
 socks5:
   listen: "127.0.0.1:1080"
+  # allow_udp_associate: true   # 啟用 SOCKS5 UDP ASSOCIATE（需出口策略 allow_udp 配合）
 
 api:
   listen: "127.0.0.1:19080"

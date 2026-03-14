@@ -53,7 +53,9 @@ type CircuitPool struct {
 	idle map[PoolKind][]poolEntry
 	// circuitToKind so we can return/fail by circuitID
 	circuitToKind map[string]PoolKind
-	// outCount[kind] = circuits currently lent out (not in idle)
+	// inUseStreamCount[circuitID] = number of streams on this circuit (0 = not lent, or in idle)
+	inUseStreamCount map[string]int
+	// outCount[kind] = number of circuits of this kind that have at least one stream (lent)
 	outCount map[PoolKind]int
 }
 
@@ -64,35 +66,59 @@ func NewCircuitPool(cfg config.CircuitPoolConfig, factory CircuitPoolFactory) *C
 		maxPerPool:    cfg.MaxPerPool,
 		idleTimeout:   time.Duration(cfg.IdleTimeoutSeconds) * time.Second,
 		replenishInt:  time.Duration(cfg.ReplenishIntervalSeconds) * time.Second,
-		factory:       factory,
-		idle:          make(map[PoolKind][]poolEntry),
-		circuitToKind: make(map[string]PoolKind),
-		outCount:      make(map[PoolKind]int),
+		factory:         factory,
+		idle:            make(map[PoolKind][]poolEntry),
+		circuitToKind:   make(map[string]PoolKind),
+		inUseStreamCount: make(map[string]int),
+		outCount:        make(map[PoolKind]int),
 	}
 }
 
-// GetFromPool takes an idle circuit from the pool for the given kind.
-// If the pool is empty it returns "", false and the caller should create a circuit on demand.
+// GetFromPool returns a circuit for a new stream: prefers reusing an already-in-use circuit
+// (multiple streams per circuit) that is still open; if none, takes from idle or returns false.
 func (p *CircuitPool) GetFromPool(kind PoolKind) (circuitID string, ok bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	list := p.idle[kind]
-	if len(list) == 0 {
-		return "", false
+	for cid, n := range p.inUseStreamCount {
+		if n > 0 && p.circuitToKind[cid] == kind {
+			p.mu.Unlock()
+			if p.factory.IsCircuitOpen(cid) {
+				p.mu.Lock()
+				if p.inUseStreamCount[cid] > 0 {
+					p.inUseStreamCount[cid]++
+					cidRet := cid
+					p.mu.Unlock()
+					return cidRet, true
+				}
+			} else {
+				p.mu.Lock()
+			}
+			continue
+		}
 	}
-	entry := list[len(list)-1]
-	list = list[:len(list)-1]
-	p.idle[kind] = list
-
-	circuitID = entry.circuitID
-	// keep circuitToKind so ReturnToPool/MarkCircuitFailed know which pool this belongs to
-	p.outCount[kind]++
-
-	return circuitID, true
+	// Take from idle; skip any that are no longer open
+	for len(p.idle[kind]) > 0 {
+		list := p.idle[kind]
+		entry := list[len(list)-1]
+		list = list[:len(list)-1]
+		p.idle[kind] = list
+		circuitID = entry.circuitID
+		p.mu.Unlock()
+		if p.factory.IsCircuitOpen(circuitID) {
+			p.mu.Lock()
+			p.inUseStreamCount[circuitID] = 1
+			p.outCount[kind]++
+			p.mu.Unlock()
+			return circuitID, true
+		}
+		p.mu.Lock()
+		delete(p.circuitToKind, circuitID)
+	}
+	p.mu.Unlock()
+	return "", false
 }
 
-// ReturnToPool puts a circuit back to the idle list if it is still open and belonged to a pool.
+// ReturnToPool is called when a stream on this circuit closes. Puts the circuit back to idle
+// only when its stream count drops to zero (so multiple streams can share one circuit).
 func (p *CircuitPool) ReturnToPool(circuitID string) {
 	p.mu.Lock()
 	kind, inPool := p.circuitToKind[circuitID]
@@ -100,6 +126,18 @@ func (p *CircuitPool) ReturnToPool(circuitID string) {
 		p.mu.Unlock()
 		return
 	}
+	n, _ := p.inUseStreamCount[circuitID]
+	if n <= 0 {
+		p.mu.Unlock()
+		return
+	}
+	n--
+	p.inUseStreamCount[circuitID] = n
+	if n > 0 {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.inUseStreamCount, circuitID)
 	p.outCount[kind]--
 	p.mu.Unlock()
 
@@ -113,7 +151,6 @@ func (p *CircuitPool) ReturnToPool(circuitID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.idle[kind] = append(p.idle[kind], poolEntry{circuitID: circuitID, idleSince: time.Now()})
-	// kind already in circuitToKind
 }
 
 // MarkCircuitFailed removes the circuit from pool accounting and does not return it to idle.
@@ -126,7 +163,10 @@ func (p *CircuitPool) MarkCircuitFailed(circuitID string) {
 		return
 	}
 	delete(p.circuitToKind, circuitID)
-	p.outCount[kind]--
+	if p.inUseStreamCount[circuitID] > 0 {
+		delete(p.inUseStreamCount, circuitID)
+		p.outCount[kind]--
+	}
 }
 
 // registerPoolCircuit is called when we add a newly created circuit to the idle pool.
@@ -137,7 +177,17 @@ func (p *CircuitPool) registerPoolCircuit(kind PoolKind, circuitID string) {
 	p.circuitToKind[circuitID] = kind
 }
 
-// totalCount returns idle count + out count for a kind.
+// RegisterCircuitInUse is called when a new circuit is created on demand (not from idle);
+// it is lent with one stream and must not be in the idle list.
+func (p *CircuitPool) RegisterCircuitInUse(kind PoolKind, circuitID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.circuitToKind[circuitID] = kind
+	p.inUseStreamCount[circuitID] = 1
+	p.outCount[kind]++
+}
+
+// totalCount returns idle count + lent circuit count for a kind.
 func (p *CircuitPool) totalCount(kind PoolKind) int {
 	return len(p.idle[kind]) + p.outCount[kind]
 }
@@ -224,18 +274,18 @@ type PoolStatus struct {
 	Kinds map[string]PoolKindStatus `json:"kinds"`
 }
 
-// Status returns current pool status (idle/in-use per kind).
+// Status returns current pool status (idle count and lent circuit count per kind).
 func (p *CircuitPool) Status() PoolStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	kinds := make(map[string]PoolKindStatus)
 	for _, kind := range AllPoolKinds() {
 		idleLen := len(p.idle[kind])
-		out := p.outCount[kind]
+		lentCount := p.outCount[kind]
 		kinds[string(kind)] = PoolKindStatus{
 			IdleCount:  idleLen,
-			InUseCount: out,
-			TotalCount: idleLen + out,
+			InUseCount: lentCount,
+			TotalCount: idleLen + lentCount,
 		}
 	}
 	return PoolStatus{Kinds: kinds}

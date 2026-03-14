@@ -120,7 +120,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
 	if a.relayCache != nil {
-		cfg.P2P.BootstrapPeers = appendUniquePeers(cfg.P2P.BootstrapPeers, a.relayCache.Addrs())
+		cfg.P2P.BootstrapPeers = appendUniquePeers(cfg.P2P.BootstrapPeers, a.cachedBootstrapAddrs())
 		a.cfg.P2P.BootstrapPeers = cfg.P2P.BootstrapPeers
 	}
 	go a.runRelayCache(ctx)
@@ -448,6 +448,53 @@ func appendUniquePeers(base, extra []string) []string {
 		seen[addr] = struct{}{}
 	}
 	return base
+}
+
+func (a *App) cachedBootstrapAddrs() []string {
+	if a.relayCache == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, rec := range a.relayCache.Records() {
+		if rec == nil {
+			continue
+		}
+		for _, addr := range rec.Addrs {
+			norm := ensurePeerMultiaddr(addr, rec.PeerID)
+			if norm == "" {
+				continue
+			}
+			if _, ok := seen[norm]; ok {
+				continue
+			}
+			seen[norm] = struct{}{}
+			out = append(out, norm)
+		}
+	}
+	return out
+}
+
+func ensurePeerMultiaddr(addr, peerID string) string {
+	if addr == "" || peerID == "" {
+		return ""
+	}
+	m, err := multiaddr.NewMultiaddr(addr)
+	if err != nil {
+		return ""
+	}
+	if _, err := m.ValueForProtocol(multiaddr.P_P2P); err == nil {
+		return m.String()
+	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return ""
+	}
+	p2pSeg, err := multiaddr.NewMultiaddr("/p2p/" + pid.String())
+	if err != nil {
+		return ""
+	}
+	return m.Encapsulate(p2pSeg).String()
 }
 
 func (a *App) runRelayCache(ctx context.Context) {

@@ -65,15 +65,17 @@ type StreamInfoResponse struct {
 
 // CircuitInfoResponse enriches protocol.CircuitInfo with derived fields for API.
 type CircuitInfoResponse struct {
-	ID          string               `json:"id"`
-	State       protocol.CircuitState `json:"state"`
-	Plan        protocol.PathPlan    `json:"plan"`
-	RelayPeerID string               `json:"relay_peer_id,omitempty"`
-	ExitPeerID  string               `json:"exit_peer_id,omitempty"`
-	HopCount    int                  `json:"hop_count"`
-	StreamCount int                  `json:"stream_count"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	ID            string                `json:"id"`
+	State         protocol.CircuitState `json:"state"`
+	Plan          protocol.PathPlan     `json:"plan"`
+	RelayPeerID   string                `json:"relay_peer_id,omitempty"`
+	ExitPeerID    string                `json:"exit_peer_id,omitempty"`
+	HopCount      int                   `json:"hop_count"`
+	StreamCount   int                   `json:"stream_count"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+	BytesSent     uint64                `json:"bytes_sent"`
+	BytesReceived uint64                `json:"bytes_received"`
 }
 
 // PoolKindStatusResponse is one pool kind's status for API.
@@ -121,15 +123,15 @@ type ExitCountryResolver interface {
 
 // LocalAPIOpts holds optional providers for extended API endpoints.
 type LocalAPIOpts struct {
-	Relays          RelaysProvider
-	Exits           ExitsProvider
-	Streams         StreamsProvider
-	Pool            PoolStatusProvider
-	Scores          ScoresProvider
-	Errors          RecentErrorsProvider
-	Metrics         MetricsSummaryProvider
-	ExitSelection      ExitSelectionProvider
-	ExitCandidates     ExitCandidatesProvider
+	Relays              RelaysProvider
+	Exits               ExitsProvider
+	Streams             StreamsProvider
+	Pool                PoolStatusProvider
+	Scores              ScoresProvider
+	Errors              RecentErrorsProvider
+	Metrics             MetricsSummaryProvider
+	ExitSelection       ExitSelectionProvider
+	ExitCandidates      ExitCandidatesProvider
 	ExitCountryResolver ExitCountryResolver // optional: for resolved country in exit-candidates / display
 	// ConfigPath 若非空，保存出口選擇時會寫回該配置文件，使重啟後仍生效。
 	ConfigPath string
@@ -144,12 +146,12 @@ type PoolStatusProvider interface {
 
 // LocalAPI exposes HTTP API for node status, nodes, circuits, relays, exits, streams, pool, scores, errors, metrics.
 type LocalAPI struct {
-	statusProvider   StatusProvider
-	nodeProvider     NodeProvider
-	circuitProvider  CircuitProvider
-	opts             *LocalAPIOpts
-	server           *http.Server
-	consoleHTML      []byte // embedded console index.html, served directly to avoid redirect
+	statusProvider  StatusProvider
+	nodeProvider    NodeProvider
+	circuitProvider CircuitProvider
+	opts            *LocalAPIOpts
+	server          *http.Server
+	consoleHTML     []byte // embedded console index.html, served directly to avoid redirect
 }
 
 // NewLocalAPI creates a new LocalAPI instance. opts may be nil for minimal API.
@@ -298,15 +300,17 @@ func (a *LocalAPI) handleCircuits(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = append(out, CircuitInfoResponse{
-			ID:          c.ID,
-			State:       c.State,
-			Plan:        c.Plan,
-			RelayPeerID: relayPeerID,
-			ExitPeerID:  exitPeerID,
-			HopCount:    hopCount,
-			StreamCount: streamCounts[c.ID],
-			CreatedAt:   c.CreatedAt,
-			UpdatedAt:   c.UpdatedAt,
+			ID:            c.ID,
+			State:         c.State,
+			Plan:          c.Plan,
+			RelayPeerID:   relayPeerID,
+			ExitPeerID:    exitPeerID,
+			HopCount:      hopCount,
+			StreamCount:   streamCounts[c.ID],
+			CreatedAt:     c.CreatedAt,
+			UpdatedAt:     c.UpdatedAt,
+			BytesSent:     c.BytesSent,
+			BytesReceived: c.BytesReceived,
 		})
 	}
 	writeJSON(w, out)
@@ -474,9 +478,9 @@ func (a *LocalAPI) handleExitCandidates(w http.ResponseWriter, r *http.Request) 
 
 // ExitStatusResponse 出口運行狀態（drain、連接數、最近拒絕）。
 type ExitStatusResponse struct {
-	DrainMode        bool            `json:"drain_mode"`
-	AcceptNewStreams bool            `json:"accept_new_streams"`
-	OpenConnections  int             `json:"open_connections"`
+	DrainMode        bool               `json:"drain_mode"`
+	AcceptNewStreams bool               `json:"accept_new_streams"`
+	OpenConnections  int                `json:"open_connections"`
 	RecentRejects    []exit.RejectEntry `json:"recent_rejects"`
 }
 
@@ -593,5 +597,3 @@ func writeJSON(w http.ResponseWriter, v any) {
 		return
 	}
 }
-
-

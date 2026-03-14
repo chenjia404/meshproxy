@@ -51,6 +51,14 @@ go build -o bin/meshproxy ./cmd/node
 - **POST /api/v1/exit/drain**：进入维护模式（不再接受新 stream）。
 - **POST /api/v1/exit/resume**：结束维护模式。
 
+## Android 编译（生成可在安卓上运行的二进制文件）
+
+在 Windows PowerShell 下，将 `./cmd/node` 编译为 Android arm64 二进制文件的示例命令为：
+
+```powershell
+$env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpath -buildvcs=false -o bin/meshproxy.so -ldflags="-w -s" -ldflags "-checklinkname=0" ./cmd/node
+```
+
 配置说明
 --------
 
@@ -63,10 +71,14 @@ go build -o bin/meshproxy ./cmd/node
 - **`identity_key_path`**：如为空，默认值为 `${data_dir}/identity.key`。
 - **`p2p.listen_addrs`**：libp2p 监听 multiaddr 列表，例如 `"/ip4/0.0.0.0/tcp/0"`。
 - **`p2p.bootstrap_peers`**：其他节点的 multiaddr，用于启动时连接引导。
-- **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。
+- **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。**`socks5.allow_udp_associate`**：是否啟用 SOCKS5 UDP ASSOCIATE（預設 `false`）；啟用後需出口策略 `exit.policy.allow_udp: true` 配合。
 - **`api.listen`**：本地 HTTP API 监听地址，例如 `127.0.0.1:19080`。
 
 **出口策略（仅在 `mode: relay+exit` 时生效）**：在配置中可加入 `exit` 段，用于控制出口允许的端口、域名、peer、是否允许私网/回环目标，以及维护模式（drain_mode）。默认配置较为保守：仅允许 TCP、80/443，禁止私网与回环。详见 `configs/config.example.yaml` 中的注释示例。
+
+**出口國家解析（GeoIP）**：當出口節點的 descriptor 未提供 `exit_info.country` 時，可通過 `client.geoip` 啟用「從出口節點 IP 推斷國家」：從節點 `listen_addrs` 中取首個公網 IP，再經 GeoIP 查詢得到國家代碼，用於 `country_only` / `country_preferred` 篩選以及 API `/api/v1/client/exit-candidates` 的 `country` 欄位。  
+- `client.geoip.provider: ip-api`：使用免費服務 ip-api.com（約 45 次/分鐘，建議設 `cache_ttl_minutes`）。  
+- `client.geoip.provider: geolite2`：使用本地 GeoLite2-Country.mmdb（`github.com/oschwald/geoip2-golang/v2`）；數據庫放在 `data_dir` 下，若不存在則自動從 [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb) 下載。
 
 双节点测试（示意）
 --------------
@@ -112,8 +124,8 @@ go build -o bin/meshproxy ./cmd/node
 已知限制
 ------
 
-- 目前仅支持 TCP 流量的多跳分层加密，且主要针对 `Local -> Relay -> Exit` 单 relay 拓扑做 MVP 验证。
-- 尚未支持 UDP、DNS over circuit 等进阶功能。
+- 目前支持 TCP 與 UDP：TCP 經 SOCKS5 CONNECT；UDP 經 SOCKS5 UDP ASSOCIATE（需 `socks5.allow_udp_associate: true` 且出口策略 `exit.policy.allow_udp: true`）。
+- 尚未支持 DNS over circuit 等进阶功能。
 - DHT / Gossip 仅用于最小节点 descriptor 发现与缓存，尚未设计完整路由/信誉机制。
 - Circuit / Stream 管理仍为内存内部状态，尚未考虑持久化与全网健康度评估。
 

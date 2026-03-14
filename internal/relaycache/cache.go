@@ -97,6 +97,24 @@ func (c *Cache) Addrs() []string {
 	return out
 }
 
+// Records returns a sorted snapshot of stored records.
+func (c *Cache) Records() []*Record {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*Record, 0, len(c.records))
+	for _, rec := range c.records {
+		addrs := append([]string(nil), rec.Addrs...)
+		out = append(out, &Record{
+			PeerID: rec.PeerID,
+			Addrs:  addrs,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].PeerID < out[j].PeerID
+	})
+	return out
+}
+
 func (c *Cache) load() error {
 	data, err := os.ReadFile(c.path)
 	if err != nil {

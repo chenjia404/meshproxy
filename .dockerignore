@@ -3,4 +3,4 @@ vendor
 *.log
 *.tmp
 *.swp
-
+dist
