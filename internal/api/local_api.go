@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"meshproxy/internal/config"
 	"meshproxy/internal/discovery"
 	"meshproxy/internal/protocol"
 )
@@ -101,15 +102,28 @@ type MetricsSummaryProvider interface {
 	GetSummary() map[string]any
 }
 
+// ExitSelectionProvider provides read/update of client exit selection config.
+type ExitSelectionProvider interface {
+	GetExitSelection() config.ExitSelectionConfig
+	SetExitSelection(cfg *config.ExitSelectionConfig)
+}
+
+// ExitCandidatesProvider returns the current list of exit candidates (after applying selection rules).
+type ExitCandidatesProvider interface {
+	ListExitCandidates() ([]*discovery.NodeDescriptor, error)
+}
+
 // LocalAPIOpts holds optional providers for extended API endpoints.
 type LocalAPIOpts struct {
-	Relays   RelaysProvider
-	Exits    ExitsProvider
-	Streams  StreamsProvider
-	Pool     PoolStatusProvider
-	Scores   ScoresProvider
-	Errors   RecentErrorsProvider
-	Metrics  MetricsSummaryProvider
+	Relays          RelaysProvider
+	Exits           ExitsProvider
+	Streams         StreamsProvider
+	Pool            PoolStatusProvider
+	Scores          ScoresProvider
+	Errors          RecentErrorsProvider
+	Metrics         MetricsSummaryProvider
+	ExitSelection   ExitSelectionProvider
+	ExitCandidates  ExitCandidatesProvider
 }
 
 // PoolStatusProvider returns current circuit pool status.
@@ -145,6 +159,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/scores", api.handleScores)
 	mux.HandleFunc("/api/v1/errors/recent", api.handleErrorsRecent)
 	mux.HandleFunc("/api/v1/metrics/summary", api.handleMetricsSummary)
+	mux.HandleFunc("/api/v1/client/exit-selection", api.handleExitSelection)
+	mux.HandleFunc("/api/v1/client/exit-candidates", api.handleExitCandidates)
 
 	// Console: serve index.html directly from embed (no FileServer, no redirect)
 	var consoleHTML []byte
@@ -349,6 +365,62 @@ func (a *LocalAPI) handleMetricsSummary(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, a.opts.Metrics.GetSummary())
+}
+
+func (a *LocalAPI) handleExitSelection(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ExitSelection == nil {
+		writeJSON(w, config.ExitSelectionConfig{Mode: config.ExitSelectionAuto})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, a.opts.ExitSelection.GetExitSelection())
+		return
+	case http.MethodPost:
+		var cfg config.ExitSelectionConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if cfg.Mode == "" {
+			cfg.Mode = config.ExitSelectionAuto
+		}
+		a.opts.ExitSelection.SetExitSelection(&cfg)
+		writeJSON(w, a.opts.ExitSelection.GetExitSelection())
+		return
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+}
+
+func (a *LocalAPI) handleExitCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ExitCandidates == nil {
+		writeJSON(w, []any{})
+		return
+	}
+	list, err := a.opts.ExitCandidates.ListExitCandidates()
+	if err != nil {
+		writeJSON(w, map[string]any{"error": err.Error(), "candidates": []any{}})
+		return
+	}
+	type candidate struct {
+		PeerID  string `json:"peer_id"`
+		Country string `json:"country,omitempty"`
+	}
+	out := make([]candidate, 0, len(list))
+	for _, n := range list {
+		c := candidate{PeerID: n.PeerID}
+		if n.ExitInfo != nil {
+			c.Country = n.ExitInfo.Country
+		}
+		out = append(out, c)
+	}
+	writeJSON(w, map[string]any{"candidates": out, "count": len(out)})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

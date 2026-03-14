@@ -17,6 +17,17 @@ const (
 	TopicRevoke        = "meshproxy.node.revoke"
 )
 
+// ExitDescriptor describes exit-specific capabilities (optional; used for exit selection).
+type ExitDescriptor struct {
+	Country     string `json:"country"`      // ISO country code e.g. "SG", "JP"
+	City        string `json:"city"`         // optional
+	AllowTCP    bool   `json:"allow_tcp"`    // supports TCP forwarding (default true if nil)
+	AllowUDP    bool   `json:"allow_udp"`
+	RemoteDNS   bool   `json:"remote_dns"`   // supports remote DNS resolution
+	BandwidthMbps int  `json:"bandwidth_mbps"`
+	Tags        []string `json:"tags"`
+}
+
 // NodeDescriptor describes a node's capabilities and basic metadata.
 type NodeDescriptor struct {
 	Version     string   `json:"version"`
@@ -26,6 +37,7 @@ type NodeDescriptor struct {
 	ListenAddrs []string `json:"listen_addrs"` // p2p listen multiaddrs
 	Relay       bool     `json:"relay"`
 	Exit        bool     `json:"exit"`
+	ExitInfo    *ExitDescriptor `json:"exit_info,omitempty"` // exit-only metadata for selection
 	Pricing     string   `json:"pricing"` // free-form for now
 	ExpiresAt   int64    `json:"expires_at"`
 	Signature   string   `json:"signature"` // base64-encoded

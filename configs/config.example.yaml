@@ -24,6 +24,18 @@ circuit_pool:
   replenish_interval_seconds: 30
 
 # 自動重試與故障切換：建鏈失敗重試、relay/exit 失效換路、BEGIN_TCP 換出口重試
+# 出口選擇：控制每條電路最後一跳 Exit 的篩選與排序 (auto | country_only | country_preferred | fixed_peer)
 client:
   build_retries: 1      # 建鏈失敗重試次數 (0/1/2)
   begin_tcp_retries: 1  # exit 連線失敗換出口重試次數 (0/1/2)
+  exit_selection:
+    mode: auto                    # auto | country_only | country_preferred | fixed_peer
+    allowed_countries: []         # country_only 時僅允許這些國家 (e.g. ["SG","JP"])
+    preferred_countries: []       # country_preferred 時優先順序 (e.g. ["TH","SG","MY"])
+    fixed_exit_peer_id: ""        # fixed_peer 時指定 peer_id
+    exclude_countries: []         # 任意模式皆排除這些國家
+    exclude_peer_ids: []
+    require_remote_dns: false
+    require_tcp_support: true
+    fallback_to_any: true         # 找不到符合條件時是否退回任意出口
+    allow_direct_exit: true       # 是否允許 Local -> Exit（否則強制經 relay）

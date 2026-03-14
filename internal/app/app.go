@@ -112,6 +112,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	// Path selector and circuit manager
 	localPeerID := a.PeerID()
 	selector := client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
+	selector.SetExitSelection(&cfg.Client.ExitSelection)
 	a.pathSelector = selector
 	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr)
 	a.circuitManager = cm
@@ -140,13 +141,15 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	// Local API (full observability: status, nodes, relays, exits, circuits, streams, pool, scores, errors, metrics)
 	opts := &api.LocalAPIOpts{
-		Relays:  discoveryStore,
-		Exits:   discoveryStore,
-		Streams: &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
-		Pool:    &poolStatusAPIAdapter{cm: cm},
-		Scores:  &scoresPlaceholder{},
-		Errors:  a.recentErrors,
-		Metrics: &metricsSummaryAdapter{app: a},
+		Relays:         discoveryStore,
+		Exits:          discoveryStore,
+		Streams:        &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
+		Pool:           &poolStatusAPIAdapter{cm: cm},
+		Scores:         &scoresPlaceholder{},
+		Errors:         a.recentErrors,
+		Metrics:        &metricsSummaryAdapter{app: a},
+		ExitSelection:  selector,
+		ExitCandidates: selector,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()

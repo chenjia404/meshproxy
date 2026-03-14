@@ -44,12 +44,40 @@ type Config struct {
 	Client ClientConfig `yaml:"client"`
 }
 
-// ClientConfig configures retry and failover for circuit build and exit connect.
+// ClientConfig configures retry and failover for circuit build and exit connect, and exit selection.
 type ClientConfig struct {
 	// BuildRetries is the number of retries when building a circuit fails (1 or 2; 0 = no retry).
 	BuildRetries int `yaml:"build_retries"`
 	// BeginTCPRetries is the number of retries when exit connect (BEGIN_TCP) fails, using another circuit/exit.
 	BeginTCPRetries int `yaml:"begin_tcp_retries"`
+	// ExitSelection configures how the last hop (exit) is chosen for each circuit.
+	ExitSelection ExitSelectionConfig `yaml:"exit_selection"`
+}
+
+// ExitSelectionMode is the strategy for choosing the exit node.
+type ExitSelectionMode string
+
+const (
+	ExitSelectionAuto             ExitSelectionMode = "auto"
+	ExitSelectionCountryOnly      ExitSelectionMode = "country_only"
+	ExitSelectionCountryPreferred ExitSelectionMode = "country_preferred"
+	ExitSelectionFixedPeer        ExitSelectionMode = "fixed_peer"
+)
+
+// ExitSelectionConfig configures exit node selection (last hop of the circuit).
+type ExitSelectionConfig struct {
+	Mode               ExitSelectionMode `yaml:"mode" json:"mode"`
+	AllowedCountries   []string          `yaml:"allowed_countries" json:"allowed_countries"`
+	PreferredCountries []string          `yaml:"preferred_countries" json:"preferred_countries"`
+	FixedExitPeerID    string            `yaml:"fixed_exit_peer_id" json:"fixed_exit_peer_id"`
+
+	ExcludeCountries  []string `yaml:"exclude_countries" json:"exclude_countries"`
+	ExcludePeerIDs    []string `yaml:"exclude_peer_ids" json:"exclude_peer_ids"`
+	RequireRemoteDNS  bool     `yaml:"require_remote_dns" json:"require_remote_dns"`
+	RequireTCPSupport bool     `yaml:"require_tcp_support" json:"require_tcp_support"`
+
+	FallbackToAny   bool `yaml:"fallback_to_any" json:"fallback_to_any"`
+	AllowDirectExit bool `yaml:"allow_direct_exit" json:"allow_direct_exit"`
 }
 
 // CircuitPoolConfig configures the circuit pool for pre-built circuits.
@@ -124,6 +152,12 @@ func Default() Config {
 		Client: ClientConfig{
 			BuildRetries:    1,
 			BeginTCPRetries: 1,
+			ExitSelection: ExitSelectionConfig{
+				Mode:               ExitSelectionAuto,
+				RequireTCPSupport:  true,
+				FallbackToAny:     true,
+				AllowDirectExit:   true,
+			},
 		},
 	}
 }
@@ -198,6 +232,9 @@ func (c *Config) postProcess() error {
 	if c.Client.BeginTCPRetries > 2 {
 		c.Client.BeginTCPRetries = 2
 	}
+	if c.Client.ExitSelection.Mode == "" {
+		c.Client.ExitSelection.Mode = ExitSelectionAuto
+	}
 	return nil
 }
 
@@ -216,7 +253,13 @@ func (c *Config) Validate() error {
 		return errors.New("api.listen must not be empty")
 	}
 
-	// Relay must always be enabled, which is implied by mode.
-	// When mode is relay+exit, exit is automatically enabled by the rest of the system.
+	switch c.Client.ExitSelection.Mode {
+	case ExitSelectionAuto, ExitSelectionCountryOnly, ExitSelectionCountryPreferred, ExitSelectionFixedPeer:
+	default:
+		return fmt.Errorf("invalid client.exit_selection.mode %q", c.Client.ExitSelection.Mode)
+	}
+	if c.Client.ExitSelection.Mode == ExitSelectionFixedPeer && c.Client.ExitSelection.FixedExitPeerID == "" {
+		return errors.New("client.exit_selection.fixed_exit_peer_id required when mode is fixed_peer")
+	}
 	return nil
 }
