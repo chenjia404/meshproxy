@@ -177,6 +177,7 @@ type OnionPayload struct {
 	Connected *Connected `json:"connected,omitempty"`
 	Ping      *Ping      `json:"ping,omitempty"`
 	Pong      *Pong      `json:"pong,omitempty"`
+	Pad       string     `json:"pad,omitempty"`
 }
 
 // OnionEnvelope 是單層洋蔥：Relay 解開後得到 Header + InnerCiphertext（或轉發給下一跳）。

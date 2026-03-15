@@ -27,6 +27,10 @@ const (
 	poolAcquireRetryInterval = 100 * time.Millisecond
 	poolAcquireRetryAttempts = 50
 	circuitCreateTimeout     = 30 * time.Second
+	circuitProtectionWindow  = 2 * time.Minute
+	transientReadRetryDelay  = 300 * time.Millisecond
+	highRTTDemotionThreshold = 3 * time.Second
+	highRTTEvictThreshold    = 7 * time.Second
 )
 
 type BeginErrorKind string
@@ -99,7 +103,7 @@ func NewCircuitManager(ctx context.Context, h host.Host, store *store.CircuitSto
 		hopSessions:      make(map[string][]*protocol.HopSession),
 		pendingConnected: make(map[string]chan protocol.Connected),
 		pendingPongs:     make(map[string]chan protocol.Pong),
-		beginTimeout:     20 * time.Second,
+		beginTimeout:     30 * time.Second,
 		heartbeatDue:     make(map[string]time.Time),
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -155,7 +159,7 @@ func (m *CircuitManager) SetBeginConnectTimeout(timeout time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if timeout <= 0 {
-		timeout = 20 * time.Second
+		timeout = 30 * time.Second
 	}
 	m.beginTimeout = timeout
 }
@@ -358,7 +362,7 @@ func (m *CircuitManager) IsCircuitOpen(circuitID string) bool {
 		return false
 	}
 	rec, ok := m.store.Get(circuitID)
-	return ok && rec != nil && rec.State == protocol.CircuitOpen && rec.Alive
+	return ok && rec != nil && isReusableCircuitState(rec.State) && rec.Alive
 }
 
 // CircuitReuseScore returns the reuse preference score for a circuit.
@@ -370,7 +374,21 @@ func (m *CircuitManager) CircuitReuseScore(circuitID string) int {
 	if !ok || rec == nil {
 		return 0
 	}
-	return rec.HeartbeatSuccesses
+	score := rec.HeartbeatSuccesses * 100
+	score -= rec.ConsecutiveFailures * 50
+	if rec.State == protocol.CircuitOpen {
+		score += 100
+	}
+	if time.Now().Before(rec.ProtectionUntil) {
+		score += 1000
+	}
+	if rec.SmoothedRTT > 0 {
+		score -= int(rec.SmoothedRTT / time.Millisecond)
+		if rec.SmoothedRTT >= highRTTDemotionThreshold {
+			score -= 3000
+		}
+	}
+	return score
 }
 
 // ReturnToPool returns a circuit to the pool for reuse (call when SOCKS5 connection ends cleanly).
@@ -411,19 +429,44 @@ func (m *CircuitManager) CreateRelayExitCircuit(plan protocol.PathPlan) (string,
 	return m.createCircuitWithPlan(plan)
 }
 
+func isDirectExitPlan(plan protocol.PathPlan) bool {
+	return len(plan.Hops) == 1 && plan.Hops[0].IsExit
+}
+
+func (m *CircuitManager) isDirectExitCircuit(circuitID string) bool {
+	if m.store == nil {
+		return false
+	}
+	rec, ok := m.store.Get(circuitID)
+	return ok && rec != nil && isDirectExitPlan(rec.Plan)
+}
+
 func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, error) {
+	var err error
+	defer func() {
+		if m.pathSelector == nil {
+			return
+		}
+		if err != nil {
+			m.pathSelector.ReportPathFailure(plan)
+			return
+		}
+		m.pathSelector.ReportPathSuccess(plan)
+	}()
+
 	m.mu.Lock()
 	id := uuid.NewString()
 	now := time.Now()
 	createDeadline := now.Add(circuitCreateTimeout)
 	rec := &store.CircuitRecord{
-		ID:            id,
-		State:         protocol.CircuitNew,
-		Plan:          plan,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		LastTrafficAt: now,
-		Alive:         true,
+		ID:              id,
+		State:           protocol.CircuitNew,
+		Plan:            plan,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		LastTrafficAt:   now,
+		Alive:           true,
+		ProtectionUntil: now.Add(circuitProtectionWindow),
 	}
 	m.store.Upsert(rec)
 	rec.State = protocol.CircuitCreating
@@ -443,7 +486,8 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	if newStreamTimeout <= 0 {
 		m.mu.Unlock()
 		m.store.Delete(id)
-		return "", fmt.Errorf("circuit create timeout")
+		err = fmt.Errorf("circuit create timeout")
+		return "", err
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, newStreamTimeout)
 	stream, err := m.host.NewStream(ctx, peerID, protocol.CircuitProtocolID)
@@ -456,6 +500,19 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	_ = stream.SetDeadline(createDeadline)
 	m.activeStreams[id] = stream
 	m.mu.Unlock()
+
+	if isDirectExitPlan(plan) {
+		m.mu.Lock()
+		rec.State = protocol.CircuitOpen
+		rec.UpdatedAt = time.Now()
+		rec.Alive = true
+		rec.ProtectionUntil = time.Now().Add(circuitProtectionWindow)
+		m.store.Upsert(rec)
+		go m.readLoop(id, stream)
+		m.mu.Unlock()
+		_ = stream.SetDeadline(time.Time{})
+		return id, nil
+	}
 
 	// 與第一跳密鑰協商
 	priv0, pub0, err := protocol.GenerateEphemeralKeyPair()
@@ -479,13 +536,15 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	if err != nil || respFrame.Type != protocol.MsgTypeKeyExchangeResp {
 		stream.Close()
 		m.closeCircuitLocked(id)
-		return "", fmt.Errorf("key exchange with first hop: %w", err)
+		err = fmt.Errorf("key exchange with first hop: %w", err)
+		return "", err
 	}
 	var resp protocol.KeyExchangeResp
 	if err := json.Unmarshal(respFrame.PayloadJSON, &resp); err != nil || len(resp.Payload) != protocol.X25519KeySize {
 		stream.Close()
 		m.closeCircuitLocked(id)
-		return "", fmt.Errorf("invalid key exchange resp")
+		err = fmt.Errorf("invalid key exchange resp")
+		return "", err
 	}
 	firstSession, err := protocol.NewHopSessionFromKeyExchange(targetPeerID, protocol.HopRoleRelay, priv0, resp.Payload, time.Now().Unix())
 	if err != nil {
@@ -545,19 +604,22 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 		if err != nil || backFrame.Type != protocol.MsgTypeOnionData {
 			stream.Close()
 			m.closeCircuitLocked(id)
-			return "", fmt.Errorf("extend response: %w", err)
+			err = fmt.Errorf("extend response: %w", err)
+			return "", err
 		}
 		var backCell protocol.OnionCell
 		if json.Unmarshal(backFrame.PayloadJSON, &backCell) != nil {
 			stream.Close()
 			m.closeCircuitLocked(id)
-			return "", fmt.Errorf("extend response invalid")
+			err = fmt.Errorf("extend response invalid")
+			return "", err
 		}
 		exitPub, err := protocol.UnwrapBackward(firstSession, id, backFrame.StreamID, backCell.Ciphertext)
 		if err != nil || len(exitPub) != protocol.X25519KeySize {
 			stream.Close()
 			m.closeCircuitLocked(id)
-			return "", fmt.Errorf("extend unwrap: %w", err)
+			err = fmt.Errorf("extend unwrap: %w", err)
+			return "", err
 		}
 		exitSession, err := protocol.NewHopSessionFromKeyExchange(exitPeerID, protocol.HopRoleExit, privExit, exitPub, time.Now().Unix())
 		if err != nil {
@@ -574,6 +636,7 @@ func (m *CircuitManager) createCircuitWithPlan(plan protocol.PathPlan) (string, 
 	rec.State = protocol.CircuitOpen
 	rec.UpdatedAt = time.Now()
 	rec.Alive = true
+	rec.ProtectionUntil = time.Now().Add(circuitProtectionWindow)
 	m.store.Upsert(rec)
 	m.heartbeatDue[id] = time.Now().Add(m.nextHeartbeatDelayLocked())
 	go m.readLoop(id, stream)
@@ -615,7 +678,11 @@ func (m *CircuitManager) readLoop(circuitID string, s network.Stream) {
 	for {
 		frame, err := protocol.ReadFrame(s)
 		if err != nil {
+			if m.handleTransientReadError(circuitID, err) {
+				continue
+			}
 			streamErr = err
+			m.reportPathFailureForCircuit(circuitID)
 			return
 		}
 		switch frame.Type {
@@ -709,6 +776,33 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 		m.mu.Unlock()
 	}()
 
+	if m.isDirectExitCircuit(circuitID) {
+		frame, err := protocol.NewBeginTCPFrame(circuitID, streamID, protocol.BeginTCP{TargetHost: host, TargetPort: port})
+		if err != nil {
+			return err
+		}
+		if err := protocol.WriteFrame(s, frame); err != nil {
+			return &BeginError{Kind: BeginErrorCircuit, Message: err.Error()}
+		}
+
+		ctx, cancel := context.WithTimeout(m.ctx, beginTimeout)
+		defer cancel()
+		select {
+		case resp := <-ch:
+			if !resp.OK {
+				if resp.Error != "" {
+					return &BeginError{Kind: BeginErrorRemote, Message: fmt.Sprintf("remote connect failed: %s", resp.Error)}
+				}
+				return &BeginError{Kind: BeginErrorRemote, Message: "remote connect failed"}
+			}
+			m.touchCircuitActivity(circuitID)
+			return nil
+		case <-ctx.Done():
+			m.markCircuitTimeout(circuitID)
+			return &BeginError{Kind: BeginErrorTimeout, Message: "wait for CONNECTED timed out"}
+		}
+	}
+
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
 		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no hop sessions for circuit %s", circuitID)}
@@ -717,7 +811,7 @@ func (m *CircuitManager) BeginTCP(circuitID, streamID, host string, port int) er
 		Kind:  "begin",
 		Begin: &protocol.BeginTCP{TargetHost: host, TargetPort: port},
 	}
-	payloadJSON, err := json.Marshal(payload)
+	payloadJSON, err := protocol.MarshalPaddedOnionPayload(payload)
 	if err != nil {
 		return err
 	}
@@ -772,6 +866,33 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 		m.mu.Unlock()
 	}()
 
+	if m.isDirectExitCircuit(circuitID) {
+		frame, err := protocol.NewBeginUDPFrame(circuitID, streamID, protocol.BeginUDP{TargetHost: host, TargetPort: port})
+		if err != nil {
+			return err
+		}
+		if err := protocol.WriteFrame(s, frame); err != nil {
+			return &BeginError{Kind: BeginErrorCircuit, Message: err.Error()}
+		}
+
+		ctx, cancel := context.WithTimeout(m.ctx, beginTimeout)
+		defer cancel()
+		select {
+		case resp := <-ch:
+			if !resp.OK {
+				if resp.Error != "" {
+					return &BeginError{Kind: BeginErrorRemote, Message: fmt.Sprintf("remote udp connect failed: %s", resp.Error)}
+				}
+				return &BeginError{Kind: BeginErrorRemote, Message: "remote udp connect failed"}
+			}
+			m.touchCircuitActivity(circuitID)
+			return nil
+		case <-ctx.Done():
+			m.markCircuitTimeout(circuitID)
+			return &BeginError{Kind: BeginErrorTimeout, Message: "wait for CONNECTED (udp) timed out"}
+		}
+	}
+
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
 		return &BeginError{Kind: BeginErrorCircuit, Message: fmt.Sprintf("no hop sessions for circuit %s", circuitID)}
@@ -780,7 +901,7 @@ func (m *CircuitManager) BeginUDP(circuitID, streamID, host string, port int) er
 		Kind:     "begin_udp",
 		BeginUDP: &protocol.BeginUDP{TargetHost: host, TargetPort: port},
 	}
-	payloadJSON, err := json.Marshal(payload)
+	payloadJSON, err := protocol.MarshalPaddedOnionPayload(payload)
 	if err != nil {
 		return err
 	}
@@ -823,13 +944,26 @@ func (m *CircuitManager) SendData(circuitID, streamID string, payload []byte) er
 	if !ok {
 		return fmt.Errorf("no active stream for circuit %s", circuitID)
 	}
+	if m.isDirectExitCircuit(circuitID) {
+		frame, err := protocol.NewDataFrame(circuitID, streamID, payload)
+		if err != nil {
+			return err
+		}
+		if err := protocol.WriteFrame(s, frame); err != nil {
+			return err
+		}
+		if len(payload) > 0 {
+			m.addCircuitBytes(circuitID, uint64(len(payload)), 0)
+		}
+		return nil
+	}
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
 		return fmt.Errorf("no hop sessions for circuit %s", circuitID)
 	}
 	payloadCopy := append([]byte(nil), payload...)
 	pl := protocol.OnionPayload{Kind: "data", Data: &protocol.DataCell{Payload: payloadCopy}}
-	payloadJSON, err := json.Marshal(pl)
+	payloadJSON, err := protocol.MarshalPaddedOnionPayload(pl)
 	if err != nil {
 		return err
 	}
@@ -861,12 +995,39 @@ func (m *CircuitManager) StartDataPump(circuitID, streamID string, conn net.Conn
 		return
 	}
 
+	if m.isDirectExitCircuit(circuitID) {
+		go func() {
+			buf := make([]byte, protocol.TCPDataChunkBytes)
+			for {
+				n, err := conn.Read(buf)
+				if n > 0 {
+					frame, frameErr := protocol.NewDataFrame(circuitID, streamID, buf[:n])
+					if frameErr != nil {
+						return
+					}
+					if err := protocol.WriteFrame(s, frame); err != nil {
+						return
+					}
+					m.addCircuitBytes(circuitID, uint64(n), 0)
+				}
+				if err != nil {
+					endFrame, frameErr := protocol.NewEndFrame(circuitID, streamID, "local_closed")
+					if frameErr == nil {
+						_ = protocol.WriteFrame(s, endFrame)
+					}
+					return
+				}
+			}
+		}()
+		return
+	}
+
 	hops := m.getHopSessions(circuitID)
 	if len(hops) == 0 {
 		return
 	}
 	go func() {
-		buf := make([]byte, 16*1024)
+		buf := make([]byte, protocol.TCPDataChunkBytes)
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
@@ -874,7 +1035,7 @@ func (m *CircuitManager) StartDataPump(circuitID, streamID string, conn net.Conn
 					Kind: "data",
 					Data: &protocol.DataCell{Payload: buf[:n]},
 				}
-				payloadJSON, encErr := json.Marshal(payload)
+				payloadJSON, encErr := protocol.MarshalPaddedOnionPayload(payload)
 				if encErr != nil {
 					return
 				}
@@ -923,13 +1084,15 @@ func (m *CircuitManager) touchCircuitActivity(circuitID string) {
 	rec.UpdatedAt = time.Now()
 	rec.Alive = true
 	rec.ConsecutiveFailures = 0
+	rec.State = protocol.CircuitOpen
+	rec.ProtectionUntil = time.Now().Add(circuitProtectionWindow)
 	m.store.Upsert(rec)
 	m.scheduleHeartbeat(circuitID)
 }
 
 // CanReuseCircuitAfterBeginError reports whether a circuit should be kept after a BEGIN failure.
 func (m *CircuitManager) CanReuseCircuitAfterBeginError(circuitID string, err error) bool {
-	if !m.IsCircuitOpen(circuitID) {
+	if !m.canReuseCircuit(circuitID) {
 		return false
 	}
 	var beginErr *BeginError
@@ -972,7 +1135,10 @@ func (m *CircuitManager) heartbeatCandidates(now time.Time) []string {
 	out := make([]string, 0, len(ids))
 	for _, circuitID := range ids {
 		rec, ok := m.store.Get(circuitID)
-		if !ok || rec == nil || rec.State != protocol.CircuitOpen {
+		if !ok || rec == nil || !isReusableCircuitState(rec.State) {
+			continue
+		}
+		if m.isDirectExitCircuit(circuitID) {
 			continue
 		}
 		out = append(out, circuitID)
@@ -1028,7 +1194,7 @@ func (m *CircuitManager) sendHeartbeat(circuitID string, sentAt time.Time) (prot
 			SentAtUnix: sentAt.UnixMilli(),
 		},
 	}
-	payloadJSON, err := json.Marshal(payload)
+	payloadJSON, err := protocol.MarshalPaddedOnionPayload(payload)
 	if err != nil {
 		return protocol.Pong{}, err
 	}
@@ -1074,10 +1240,19 @@ func (m *CircuitManager) handleHeartbeatSuccess(circuitID string, lastPing time.
 	}
 	recovered := !rec.Alive
 	m.store.SetHealth(circuitID, true, lastPing, lastPong, 0, rec.HeartbeatSuccesses+1, smoothed)
+	m.store.SetState(circuitID, protocol.CircuitOpen)
+	m.store.ExtendProtection(circuitID, time.Now().Add(circuitProtectionWindow))
+	if m.pathSelector != nil {
+		m.pathSelector.ReportPathRTT(rec.Plan, smoothed)
+	}
 	m.scheduleHeartbeat(circuitID)
 	log.Printf("[heartbeat] heartbeat_pong_received circuit=%s ping=%s rtt_ms=%.1f", circuitID, pong.PingID, float64(rtt.Nanoseconds())/1e6)
 	if recovered {
 		log.Printf("[heartbeat] heartbeat_circuit_recovered circuit=%s", circuitID)
+	}
+	if smoothed >= highRTTEvictThreshold {
+		log.Printf("[heartbeat] heartbeat_circuit_evict_high_rtt circuit=%s rtt_ms=%.1f", circuitID, float64(smoothed.Nanoseconds())/1e6)
+		m.evictCircuitForHighRTT(circuitID)
 	}
 }
 
@@ -1099,10 +1274,12 @@ func (m *CircuitManager) handleHeartbeatFailure(circuitID string, lastPing time.
 	m.store.SetHealth(circuitID, alive, lastPing, rec.LastPongAt, failures, rec.HeartbeatSuccesses, rec.SmoothedRTT)
 	log.Printf("[heartbeat] heartbeat_timeout circuit=%s failures=%d", circuitID, failures)
 	if alive {
+		m.store.SetState(circuitID, protocol.CircuitDegraded)
 		m.scheduleHeartbeat(circuitID)
 		return
 	}
 	log.Printf("[heartbeat] heartbeat_circuit_unhealthy circuit=%s", circuitID)
+	m.reportPathFailureForCircuit(circuitID)
 	if pool != nil {
 		pool.MarkCircuitFailed(circuitID)
 	}
@@ -1117,20 +1294,67 @@ func (m *CircuitManager) markCircuitTimeout(circuitID string) {
 	if !ok || rec == nil {
 		return
 	}
-	m.mu.Lock()
-	threshold := m.heartbeat.FailureThreshold
-	m.mu.Unlock()
-	if threshold <= 0 {
-		threshold = 5
-	}
-	rec.ConsecutiveFailures++
-	rec.Alive = rec.ConsecutiveFailures < threshold
+	rec.Alive = true
+	rec.State = protocol.CircuitDegraded
 	rec.UpdatedAt = time.Now()
 	m.store.Upsert(rec)
 }
 
+func (m *CircuitManager) handleTransientReadError(circuitID string, err error) bool {
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		return false
+	}
+	if !netErr.Timeout() && !netErr.Temporary() {
+		return false
+	}
+	if m.store != nil {
+		m.store.SetState(circuitID, protocol.CircuitDegraded)
+	}
+	time.Sleep(transientReadRetryDelay)
+	return true
+}
+
+func (m *CircuitManager) reportPathFailureForCircuit(circuitID string) {
+	if m.pathSelector == nil || m.store == nil {
+		return
+	}
+	rec, ok := m.store.Get(circuitID)
+	if !ok || rec == nil {
+		return
+	}
+	m.pathSelector.ReportPathFailure(rec.Plan)
+}
+
+func (m *CircuitManager) evictCircuitForHighRTT(circuitID string) {
+	m.mu.Lock()
+	pool := m.pool
+	m.mu.Unlock()
+	if pool != nil {
+		pool.MarkCircuitFailed(circuitID)
+	}
+	m.CloseCircuit(circuitID)
+}
+
+func (m *CircuitManager) canReuseCircuit(circuitID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.activeStreams[circuitID]; !ok {
+		return false
+	}
+	rec, ok := m.store.Get(circuitID)
+	return ok && rec != nil && rec.Alive && isReusableCircuitState(rec.State)
+}
+
+func isReusableCircuitState(state protocol.CircuitState) bool {
+	return state == protocol.CircuitOpen || state == protocol.CircuitDegraded
+}
+
 func (m *CircuitManager) scheduleHeartbeat(circuitID string) {
 	if circuitID == "" {
+		return
+	}
+	if m.isDirectExitCircuit(circuitID) {
 		return
 	}
 	m.mu.Lock()

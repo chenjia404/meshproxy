@@ -116,6 +116,12 @@ type ExitSelectionProvider interface {
 	SetExitSelection(cfg *config.ExitSelectionConfig)
 }
 
+// Socks5TunnelProvider provides read/update of the client socks5.tunnel_to_exit flag.
+type Socks5TunnelProvider interface {
+	GetTunnelToExit() bool
+	SetTunnelToExit(enabled bool)
+}
+
 // ExitCandidatesProvider returns the current list of exit candidates (after applying selection rules).
 type ExitCandidatesProvider interface {
 	ListExitCandidates() ([]*discovery.NodeDescriptor, error)
@@ -137,6 +143,7 @@ type LocalAPIOpts struct {
 	Errors              RecentErrorsProvider
 	Metrics             MetricsSummaryProvider
 	ExitSelection       ExitSelectionProvider
+	Socks5Tunnel        Socks5TunnelProvider
 	ExitCandidates      ExitCandidatesProvider
 	ExitCountryResolver ExitCountryResolver // optional: for resolved country in exit-candidates / display
 	// ConfigPath 若非空，保存出口選擇時會寫回該配置文件，使重啟後仍生效。
@@ -436,25 +443,46 @@ func (a *LocalAPI) handleExitSelection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, a.opts.ExitSelection.GetExitSelection())
+		resp := map[string]any{}
+		if b, err := json.Marshal(a.opts.ExitSelection.GetExitSelection()); err == nil {
+			_ = json.Unmarshal(b, &resp)
+		}
+		if a.opts.Socks5Tunnel != nil {
+			resp["tunnel_to_exit"] = a.opts.Socks5Tunnel.GetTunnelToExit()
+		}
+		writeJSON(w, resp)
 		return
 	case http.MethodPost:
-		var cfg config.ExitSelectionConfig
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		var payload struct {
+			config.ExitSelectionConfig
+			TunnelToExit *bool `json:"tunnel_to_exit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		cfg := payload.ExitSelectionConfig
 		if cfg.Mode == "" {
 			cfg.Mode = config.ExitSelectionAuto
 		}
 		a.opts.ExitSelection.SetExitSelection(&cfg)
+		if a.opts.Socks5Tunnel != nil && payload.TunnelToExit != nil {
+			a.opts.Socks5Tunnel.SetTunnelToExit(*payload.TunnelToExit)
+		}
 		if a.opts.ConfigPath != "" {
-			if err := config.SaveExitSelection(a.opts.ConfigPath, cfg); err != nil {
+			if err := config.SaveExitSelectionSettings(a.opts.ConfigPath, cfg, payload.TunnelToExit); err != nil {
 				http.Error(w, "save to config file failed: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
-		writeJSON(w, a.opts.ExitSelection.GetExitSelection())
+		resp := map[string]any{}
+		if b, err := json.Marshal(a.opts.ExitSelection.GetExitSelection()); err == nil {
+			_ = json.Unmarshal(b, &resp)
+		}
+		if a.opts.Socks5Tunnel != nil {
+			resp["tunnel_to_exit"] = a.opts.Socks5Tunnel.GetTunnelToExit()
+		}
+		writeJSON(w, resp)
 		return
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

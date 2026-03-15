@@ -8,10 +8,15 @@ p2p:
   listen_addrs:
     - "/ip4/0.0.0.0/tcp/4001"
     - "/ip6/::/tcp/4001"
+    - /ip4/0.0.0.0/udp/4001/quic-v1
+    - /ip6/::/udp/4001/quic-v1
   bootstrap_peers: []
+  # nodisc: true               # 为 true 时禁用 DHT Advertise/FindPeers 节点发现，仅使用 bootstrap、已连接节点 gossip 和 peer exchange
 
 socks5:
   listen: "127.0.0.1:1080"
+  # tunnel_to_exit: true        # 客户端启用后，本地 1080 收到的 TCP 原样转发到 exit 的 SOCKS5
+  # exit_upstream: "127.0.0.1:1081"   # exit 节点上的直连 SOCKS5，直接出网并受出口策略限制
   # allow_udp_associate: true   # 啟用 SOCKS5 UDP ASSOCIATE（需出口策略 allow_udp 配合）
 
 api:
@@ -31,7 +36,7 @@ circuit_pool:
 client:
   build_retries: 1      # 建鏈失敗重試次數 (0/1/2)
   begin_tcp_retries: 1  # exit 連線失敗換出口重試次數 (0/1/2)
-  begin_connect_timeout_seconds: 20
+  begin_connect_timeout_seconds: 30
   heartbeat_enabled: true
   heartbeat_interval_seconds: 30
   heartbeat_timeout_seconds: 8
@@ -60,7 +65,7 @@ client:
 #     allow_tcp: true
 #     allow_udp: false
 #     remote_dns: true
-#     allowed_ports: [80, 443]
+#     allowed_ports: [80, 443, 8080]
 #     denied_ports: [25, 465, 587, 22, 3389]
 #     allowed_domains: []
 #     denied_domains: []

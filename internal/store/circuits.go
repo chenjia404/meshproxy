@@ -26,6 +26,7 @@ type CircuitRecord struct {
 	HeartbeatSuccesses  int
 	SmoothedRTT         time.Duration
 	Alive               bool
+	ProtectionUntil     time.Time
 }
 
 // CircuitStore keeps track of all circuits in memory.
@@ -122,6 +123,34 @@ func (s *CircuitStore) SetHealth(id string, alive bool, lastPing, lastPong time.
 		rec.HeartbeatSuccesses = heartbeatSuccesses
 		rec.SmoothedRTT = smoothedRTT
 		rec.UpdatedAt = time.Now()
+	}
+}
+
+// SetState updates only the circuit state and updated timestamp.
+func (s *CircuitStore) SetState(id string, state protocol.CircuitState) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.circuits[id]; ok && rec != nil {
+		rec.State = state
+		rec.UpdatedAt = time.Now()
+	}
+}
+
+// ExtendProtection extends the protection window for a circuit.
+func (s *CircuitStore) ExtendProtection(id string, until time.Time) {
+	if id == "" || until.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec, ok := s.circuits[id]; ok && rec != nil {
+		if until.After(rec.ProtectionUntil) {
+			rec.ProtectionUntil = until
+			rec.UpdatedAt = time.Now()
+		}
 	}
 }
 

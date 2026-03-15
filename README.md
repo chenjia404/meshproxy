@@ -71,7 +71,11 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 - **`identity_key_path`**：如为空，默认值为 `${data_dir}/identity.key`。
 - **`p2p.listen_addrs`**：libp2p 监听 multiaddr 列表，例如 `"/ip4/0.0.0.0/tcp/0"`。
 - **`p2p.bootstrap_peers`**：其他节点的 multiaddr，用于启动时连接引导。
-- **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。**`socks5.allow_udp_associate`**：是否啟用 SOCKS5 UDP ASSOCIATE（預設 `false`）；啟用後需出口策略 `exit.policy.allow_udp: true` 配合。
+- **`p2p.nodisc`**：是否禁用 DHT 节点发现。为 `true` 时不会执行 rendezvous `Advertise/FindPeers`，只依赖 `bootstrap_peers`、已连接节点的 gossip descriptor 与 peer exchange。
+- **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。
+- **`socks5.allow_udp_associate`**：是否啟用 SOCKS5 UDP ASSOCIATE（預設 `false`）；啟用後需出口策略 `exit.policy.allow_udp: true` 配合。
+- **`socks5.tunnel_to_exit`**：是否开启“本地原样转发到 exit 的 SOCKS5”模式。开启后，本地 `socks5.listen` 接收到的 TCP 连接不会在本地解析 SOCKS5，而是直接通过 raw libp2p stream 原样转发到 exit 节点上的 SOCKS5 服务。
+- **`socks5.exit_upstream`**：当 `socks5.tunnel_to_exit: true` 时，exit 节点实际连接的上游 SOCKS5 地址，默认 `127.0.0.1:1081`。`relay+exit` 节点会额外启动一个标准 SOCKS5（默认 1081），它直接出网，但仍受出口策略限制。
 - **`api.listen`**：本地 HTTP API 监听地址，例如 `127.0.0.1:19080`。
 
 **出口策略（仅在 `mode: relay+exit` 时生效）**：在配置中可加入 `exit` 段，用于控制出口允许的端口、域名、peer、是否允许私网/回环目标，以及维护模式（drain_mode）。默认配置较为保守：仅允许 TCP、80/443，禁止私网与回环。详见 `configs/config.example.yaml` 中的注释示例。
@@ -92,9 +96,23 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 
 1. 在节点 A 上启动 meshproxy，记录其 `PeerId` 与实际 `p2p_listen_addrs`。  
 2. 在节点 B 的 `configs/config.example.yaml` 中，将 A 的 multiaddr 写入 `p2p.bootstrap_peers`。  
-3. 在节点 B 上启动 meshproxy。  
-4. 使用浏览器将 HTTP/HTTPS 代理设置为 B 的 SOCKS5 地址（默认 `127.0.0.1:1080`）。  
-5. 尝试访问网站，并通过两端日志及后续的 `circuits` / `streams` 查询电路路径。
+3. 如果希望节点 B 不在本地解析 SOCKS5，而是把原始 SOCKS5 流量直接转发给节点 A 的本地 SOCKS5，可在节点 B 配置：
+
+```yaml
+socks5:
+  listen: "127.0.0.1:1080"
+  tunnel_to_exit: true
+  exit_upstream: "127.0.0.1:1081"
+```
+
+4. 在节点 B 上启动 meshproxy。  
+5. 使用浏览器将 HTTP/HTTPS 代理设置为 B 的 SOCKS5 地址（默认 `127.0.0.1:1080`）。  
+6. 尝试访问网站，并通过两端日志及后续的 `circuits` / `streams` 查询电路路径。
+
+说明：
+
+- `tunnel_to_exit: true` 只建议在客户端节点开启；exit 节点自身通常应保持关闭。
+- `exit_upstream` 是 exit 端真正处理 SOCKS5 的监听地址；默认就是 exit 节点本机新增的 `127.0.0.1:1081`。
 
 浏览器 SOCKS5 配置提示
 ------------------
@@ -128,4 +146,3 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 - 尚未支持 DNS over circuit 等进阶功能。
 - DHT / Gossip 仅用于最小节点 descriptor 发现与缓存，尚未设计完整路由/信誉机制。
 - Circuit / Stream 管理仍为内存内部状态，尚未考虑持久化与全网健康度评估。
-

@@ -34,12 +34,12 @@ type PolicyChecker struct {
 	runtime config.ExitRuntimeConfig
 	enabled bool
 	// 便於檢查的集合（從 slice 構建）
-	deniedPortsSet   map[int]bool
-	allowedPortsSet  map[int]bool
-	deniedDomainsSet map[string]bool
+	deniedPortsSet    map[int]bool
+	allowedPortsSet   map[int]bool
+	deniedDomainsSet  map[string]bool
 	allowedDomainsSet map[string]bool
-	peerBlacklistSet map[string]bool
-	peerWhitelistSet map[string]bool
+	peerBlacklistSet  map[string]bool
+	peerWhitelistSet  map[string]bool
 }
 
 // NewPolicyChecker 從配置創建檢查器。policy 可為 nil 表示不限制（僅用於非 exit 節點）。
@@ -63,7 +63,7 @@ func NewPolicyChecker(exitCfg *config.ExitConfig) *PolicyChecker {
 func defaultExitPolicyInConfig() config.ExitPolicyConfig {
 	return config.ExitPolicyConfig{
 		AllowTCP: true, AllowUDP: false, RemoteDNS: true,
-		AllowedPorts: []int{80, 443}, DeniedPorts: []int{25, 465, 587, 22, 3389},
+		AllowedPorts: []int{80, 443, 8080}, DeniedPorts: []int{25, 465, 587, 22, 3389},
 		AllowPrivateIPTargets: false, AllowLoopbackTargets: false, AllowLinkLocalTargets: false,
 	}
 }

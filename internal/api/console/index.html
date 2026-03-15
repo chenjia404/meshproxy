@@ -276,6 +276,7 @@
         var allowDirect = cfg.allow_direct_exit !== false;
         var requireDNS = !!cfg.require_remote_dns;
         var requireTCP = cfg.require_tcp_support !== false;
+        var tunnelToExit = !!cfg.tunnel_to_exit;
 
         var tagsHtml = function(id, list, placeholder) {
           var tags = list.map(function(c){ return '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>'; }).join('');
@@ -299,6 +300,7 @@
 
         html += '<div class="form-row"><label><input type="checkbox" id="exit-fallback"' + (fallback ? ' checked' : '') + '> 找不到符合条件时允许退回任意出口</label></div>';
         html += '<div class="form-row"><label><input type="checkbox" id="exit-allow-direct"' + (allowDirect ? ' checked' : '') + '> 允许直连出口（Local → Exit）</label><div class="hint">关闭则必须经至少一个 Relay。</div></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-tunnel-to-exit"' + (tunnelToExit ? ' checked' : '') + '> 本地 SOCKS5 原样转发到 Exit 的 SOCKS5</label><div class="hint">开启后，本地 1080 不再解析 SOCKS5，请求会通过 raw libp2p stream 直接转给 exit 节点上的 SOCKS5。</div></div>';
         html += '<div class="form-row"><label><input type="checkbox" id="exit-require-dns"' + (requireDNS ? ' checked' : '') + '> 仅选支持 Remote DNS 的出口</label></div>';
         html += '<div class="form-row"><label><input type="checkbox" id="exit-require-tcp"' + (requireTCP ? ' checked' : '') + '> 仅选支持 TCP 的出口</label></div>';
         html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">保存设置</button></div>';
@@ -345,7 +347,8 @@
               require_remote_dns: document.getElementById('exit-require-dns').checked,
               require_tcp_support: document.getElementById('exit-require-tcp').checked,
               fallback_to_any: document.getElementById('exit-fallback').checked,
-              allow_direct_exit: document.getElementById('exit-allow-direct').checked
+              allow_direct_exit: document.getElementById('exit-allow-direct').checked,
+              tunnel_to_exit: document.getElementById('exit-tunnel-to-exit').checked
             };
             var btn = document.getElementById('exit-save');
             btn.disabled = true;

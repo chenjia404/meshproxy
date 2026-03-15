@@ -14,17 +14,20 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
+	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	"github.com/multiformats/go-multiaddr"
 )
 
 // Host wraps the libp2p host and its listen addresses.
 type Host struct {
 	Host        host.Host
+	Routing     routing.Routing
 	ListenAddrs []multiaddr.Multiaddr
 }
 
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
 func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*Host, error) {
+	var hostRouting routing.Routing
 
 	connmgr_, _ := connmgr.NewConnManager(
 		50,  // Lowwater
@@ -41,6 +44,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 		libp2p.EnableNATService(),
 
 		libp2p.DefaultTransports,
+		libp2p.Security(libp2ptls.ID, libp2ptls.New),
 		libp2p.Security(noise.ID, noise.New),
 		// 中繼功能配置
 		libp2p.EnableRelay(),             // 啟用中繼功能
@@ -51,9 +55,11 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 		libp2p.DefaultPeerstore,
 
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			var err error
-			d, err = dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
-			return d, err
+			r, err := dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
+			if err == nil {
+				hostRouting = r
+			}
+			return r, err
 		}),
 		libp2p.ConnectionManager(connmgr_),
 	}
@@ -83,6 +89,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 
 	return &Host{
 		Host:        h,
+		Routing:     hostRouting,
 		ListenAddrs: h.Addrs(),
 	}, nil
 }

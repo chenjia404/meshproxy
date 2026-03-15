@@ -3,7 +3,7 @@ package p2p
 import (
 	"context"
 
-	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/chenjia404/meshproxy/internal/safe"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
@@ -14,47 +14,38 @@ import (
 // StartDiscovery 預留 DHT 節點發現的擴展點。
 // 目前版本僅依賴顯式 bootstrap_peers + gossip descriptor，
 // 沒有引入額外 discovery 模組，以避免 go-libp2p 版本衝突。
-func StartDiscovery(ctx context.Context, h host.Host, _ routing.Routing, rendezvous string, onPeerFound func(peer.AddrInfo)) {
-	// log.Printf("[discovery] rendezvous discovery not enabled (tag=%s)", rendezvous)
-	// _ = time.Second
-	nodeDiscovery(ctx, h, rendezvous, onPeerFound)
-
+func StartDiscovery(ctx context.Context, h host.Host, router routing.Routing, rendezvous string, onPeerFound func(peer.AddrInfo)) {
+	nodeDiscovery(ctx, h, router, rendezvous, onPeerFound)
 }
 
-var d *dht.IpfsDHT
-
-func nodeDiscovery(ctx context.Context, h host.Host, Protocol string, onPeerFound func(peer.AddrInfo)) (error, host.Host, error) {
-	err := d.Bootstrap(ctx)
-	if err != nil {
-		return nil, nil, err
+func nodeDiscovery(ctx context.Context, h host.Host, router routing.Routing, protocolTag string, onPeerFound func(peer.AddrInfo)) (error, host.Host, error) {
+	if router == nil {
+		return nil, h, nil
 	}
-	d1 := routing2.NewRoutingDiscovery(d)
+	discovery := routing2.NewRoutingDiscovery(router)
+	var err error
 
-	go func() {
-		_, err = d1.Advertise(ctx, Protocol)
+	safe.Go("p2p.discovery.advertiseOnce", func() {
+		_, err = discovery.Advertise(ctx, protocolTag)
 		if err != nil {
 			// log.Println(err)
 		}
-	}()
+	})
 
-	go func() {
-
+	safe.Go("p2p.discovery.findPeersLoop", func() {
 		for i := 0; i < 10; {
-			// log.Println("开始寻找节点")
-			_, err = d1.Advertise(ctx, Protocol)
-
+			_, err = discovery.Advertise(ctx, protocolTag)
 			if err != nil {
-				//log.Println(err)
+				// log.Println(err)
 			}
 
-			peerChan, err := d1.FindPeers(ctx, Protocol)
+			peerChan, err := discovery.FindPeers(ctx, protocolTag)
 			if err != nil {
-				//log.Println(err)
+				// log.Println(err)
 			}
 
 			for peer := range peerChan {
 				if peer.ID == h.ID() {
-					//log.Println("过滤自己")
 					continue
 				}
 				if onPeerFound != nil {
@@ -62,20 +53,13 @@ func nodeDiscovery(ctx context.Context, h host.Host, Protocol string, onPeerFoun
 				}
 
 				if h.Network().Connectedness(peer.ID) != network.Connected {
-					//log.Println("尝试连接:", peer)
 					err = h.Connect(ctx, peer)
 					if err == nil {
-						// log.Println("连接成功", peer.ID)
-						// fmt.Printf("当前连接节点数%d\n", len(h.Network().Peers()))
 						i++
-					} else {
-						//log.Println(err)
 					}
 				}
-
 			}
 		}
-
-	}()
+	})
 	return err, h, nil
 }

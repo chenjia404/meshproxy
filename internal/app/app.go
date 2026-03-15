@@ -28,7 +28,9 @@ import (
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/relay"
 	"github.com/chenjia404/meshproxy/internal/relaycache"
+	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/store"
+	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 // App is the main meshproxy application wiring together all components.
@@ -41,13 +43,13 @@ type App struct {
 	store *store.MemoryStore
 
 	host   *p2p.Host
-	dht    *p2p.DHT
 	gossip *p2p.Gossip
 
 	discovery *discovery.Manager
 
-	socks5   *client.Socks5Server
-	localAPI *api.LocalAPI
+	socks5     *client.Socks5Server
+	exitSocks5 *exit.Socks5Server
+	localAPI   *api.LocalAPI
 
 	circuitStore   *store.CircuitStore
 	pathSelector   *client.PathSelector
@@ -120,27 +122,21 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 	a.host = h
 
-	// DHT
-	dhtComp, err := p2p.NewDHT(ctx, h.Host)
-	if err != nil {
-		return nil, fmt.Errorf("init dht: %w", err)
+	// DHT-based rendezvous discovery can be disabled for fixed-topology deployments.
+	if !cfg.P2P.NoDiscovery {
+		p2p.StartDiscovery(ctx, h.Host, h.Routing, cfg.P2P.DiscoveryTag, func(info peer.AddrInfo) {
+			if a.relayCache == nil || info.ID == "" {
+				return
+			}
+			addrs := filterMultiaddrStrings(info.Addrs)
+			if len(addrs) == 0 {
+				return
+			}
+			if err := a.relayCache.Add(info.ID.String(), addrs); err != nil {
+				log.Printf("[relaycache] persist discovered peer %s: %v", info.ID.String(), err)
+			}
+		})
 	}
-	a.dht = dhtComp
-
-	// DHT-based peer discovery: all nodes sharing the same discovery tag
-	// will try to find and connect to each other automatically.
-	p2p.StartDiscovery(ctx, h.Host, dhtComp.Routing(), cfg.P2P.DiscoveryTag, func(info peer.AddrInfo) {
-		if a.relayCache == nil || info.ID == "" {
-			return
-		}
-		addrs := filterMultiaddrStrings(info.Addrs)
-		if len(addrs) == 0 {
-			return
-		}
-		if err := a.relayCache.Add(info.ID.String(), addrs); err != nil {
-			log.Printf("[relaycache] persist discovered peer %s: %v", info.ID.String(), err)
-		}
-	})
 
 	// Gossip
 	gossipComp, err := p2p.NewGossip(ctx, h.Host)
@@ -163,10 +159,10 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
 	a.installDirectPeerExchange()
-	go a.runPeerExchange(ctx)
+	safe.Go("app.runPeerExchange", func() { a.runPeerExchange(ctx) })
 
 	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
-	go runPeerAddrLearner(ctx, h.Host, dhtComp.Routing(), discoveryStore, 25*time.Second)
+	safe.Go("app.runPeerAddrLearner", func() { runPeerAddrLearner(ctx, h.Host, h.Routing, discoveryStore, 25*time.Second) })
 
 	// Bootstrap
 	p2p.Bootstrap(ctx, h.Host, cfg.P2P.BootstrapPeers)
@@ -233,18 +229,47 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	pool.StartMaintenance(ctx)
 
 	// Relay service when this node relays (relay or relay+exit).
+	var relaySvc *relay.Service
 	if cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeRelayExit {
-		_ = relay.NewService(a.Host())
+		relaySvc = relay.NewService(a.Host())
 	}
 	// Exit service when this node is relay+exit（帶出口策略檢查）。始終創建 Policy 以便出口政策 API 可註冊。
 	var exitSvc *exit.Service
 	if cfg.Mode == config.ModeRelayExit {
 		policy := exit.NewPolicyChecker(cfg.Exit) // cfg.Exit 為 nil 時使用預設策略
-		exitSvc = exit.NewService(a.Host(), policy)
+		exitSvc = exit.NewService(a.Host(), policy, cfg.Socks5.ExitUpstream)
+		exitSocks := exit.NewSocks5Server(cfg.Socks5.ExitUpstream, policy)
+		if err := exitSocks.Start(); err != nil {
+			return nil, fmt.Errorf("start exit socks5: %w", err)
+		}
+		a.exitSocks5 = exitSocks
+	}
+	if exitSvc != nil && relaySvc != nil {
+		a.Host().SetStreamHandler(p2p.ProtocolRawTunnelE2E, func(str network.Stream) {
+			var header tunnel.RouteHeader
+			if err := tunnel.ReadJSONFrame(str, &header); err != nil {
+				_ = str.Close()
+				return
+			}
+			if len(header.Path) == 0 || header.HopIndex < 0 || header.HopIndex >= len(header.Path) {
+				_ = str.Close()
+				return
+			}
+			if header.HopIndex < len(header.Path)-1 {
+				relaySvc.HandleRawTunnelStreamWithHeader(str, header)
+				return
+			}
+			exitSvc.HandleRawTunnelE2EStreamWithHeader(str, header)
+		})
+	} else if exitSvc != nil {
+		a.Host().SetStreamHandler(p2p.ProtocolRawTunnelE2E, exitSvc.HandleRawTunnelE2EStream)
+	} else if relaySvc != nil {
+		a.Host().SetStreamHandler(p2p.ProtocolRawTunnelE2E, relaySvc.HandleRawTunnelStream)
 	}
 
-	socks := client.NewSocks5Server(cfg.Socks5.Listen, cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
+	socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
 	socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
+	socks.SetTunnelToExit(cfg.Socks5.TunnelToExit, cfg.Socks5.ExitUpstream)
 	if err := socks.Start(); err != nil {
 		return nil, fmt.Errorf("start socks5: %w", err)
 	}
@@ -261,6 +286,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		Errors:              a.recentErrors,
 		Metrics:             &metricsSummaryAdapter{app: a},
 		ExitSelection:       selector,
+		Socks5Tunnel:        &socks5TunnelAPIAdapter{app: a},
 		ExitCandidates:      selector,
 		ExitCountryResolver: selector,
 		ConfigPath:          cfg.ConfigFilePath,
@@ -286,11 +312,13 @@ func (a *App) Run() error {
 	if err := a.socks5.Close(); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if a.exitSocks5 != nil {
+		if err := a.exitSocks5.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if a.discovery != nil {
 		a.discovery.Stop()
-	}
-	if err := a.dht.Close(); err != nil && firstErr == nil {
-		firstErr = err
 	}
 	if err := a.host.Close(); err != nil && firstErr == nil {
 		firstErr = err
@@ -432,6 +460,27 @@ func (p *poolConfigAPIAdapter) SetPoolTotalLimits(minTotal, maxTotal int) bool {
 	return p.cm.SetPoolTotalLimits(minTotal, maxTotal)
 }
 
+type socks5TunnelAPIAdapter struct {
+	app *App
+}
+
+func (s *socks5TunnelAPIAdapter) GetTunnelToExit() bool {
+	if s.app == nil {
+		return false
+	}
+	return s.app.cfg.Socks5.TunnelToExit
+}
+
+func (s *socks5TunnelAPIAdapter) SetTunnelToExit(enabled bool) {
+	if s.app == nil {
+		return
+	}
+	s.app.cfg.Socks5.TunnelToExit = enabled
+	if s.app.socks5 != nil {
+		s.app.socks5.SetTunnelToExit(enabled, s.app.cfg.Socks5.ExitUpstream)
+	}
+}
+
 // errorRecorderAdapter adapts api.RecentErrorsStore to client.ErrorRecorder.
 type errorRecorderAdapter struct {
 	store *api.RecentErrorsStore
@@ -516,7 +565,7 @@ func (a *App) runPeerExchange(ctx context.Context) {
 	if a.gossip == nil || a.discovery == nil || a.idMgr == nil || a.selfDesc == nil {
 		return
 	}
-	go a.runPeerExchangeSubscriber(ctx)
+	safe.Go("app.runPeerExchangeSubscriber", func() { a.runPeerExchangeSubscriber(ctx) })
 	a.publishPeerExchange()
 
 	ticker := time.NewTicker(peerExchangeInterval)
@@ -641,7 +690,7 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	if _, loaded := a.peerExchangeOnce.LoadOrStore(pid.String(), struct{}{}); loaded {
 		return
 	}
-	go a.exchangePeerSnapshot(pid)
+	safe.Go("app.exchangePeerSnapshot", func() { a.exchangePeerSnapshot(pid) })
 }
 
 func (a *App) recordConnectedRelay(pid peer.ID, remote multiaddr.Multiaddr) {
@@ -659,7 +708,7 @@ func (a *App) recordConnectedRelay(pid peer.ID, remote multiaddr.Multiaddr) {
 	if len(addrs) == 0 {
 		return
 	}
-	go a.persistConnectedPeerByProtocol(pid, addrs)
+	safe.Go("app.persistConnectedPeerByProtocol", func() { a.persistConnectedPeerByProtocol(pid, addrs) })
 }
 
 func (a *App) persistConnectedPeerByProtocol(pid peer.ID, addrs []string) {

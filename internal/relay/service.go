@@ -14,7 +14,10 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 // Service 實現 relay 節點：與客戶端做每跳密鑰協商，收到 OnionData 時只解一層，將內層密文轉發給 next_hop。
@@ -42,7 +45,19 @@ func NewService(h host.Host) *Service {
 }
 
 func (s *Service) handleStream(str network.Stream) {
-	go s.serveStream(str)
+	safe.Go("relay.serveStream", func() { s.serveStream(str) })
+}
+
+// HandleRawTunnelStream forwards a raw tunnel stream to the next hop and then
+// only performs byte shuttling. Relay nodes do not inspect encrypted payloads.
+func (s *Service) HandleRawTunnelStream(str network.Stream) {
+	safe.Go("relay.serveRawTunnel", func() { s.serveRawTunnel(str) })
+}
+
+// HandleRawTunnelStreamWithHeader continues handling after the route header has
+// already been consumed by an outer dispatcher.
+func (s *Service) HandleRawTunnelStreamWithHeader(str network.Stream, header tunnel.RouteHeader) {
+	safe.Go("relay.serveRawTunnelWithHeader", func() { s.serveRawTunnelWithHeader(str, header) })
 }
 
 // serveStream 與客戶端完成密鑰協商後，循環處理 OnionData：解一層，轉發內層給 next_hop。
@@ -126,7 +141,7 @@ func (s *Service) serveStream(str network.Stream) {
 				}
 				s.nextHopStreams[frame.CircuitID] = nextStr
 				s.writeMu[frame.CircuitID] = &writeMu
-				go s.pumpNextHopToClient(frame.CircuitID, nextStr, str, session, &writeMu)
+				safe.Go("relay.pumpNextHopToClient", func() { s.pumpNextHopToClient(frame.CircuitID, nextStr, str, session, &writeMu) })
 			}
 			nextStr = s.nextHopStreams[frame.CircuitID]
 			s.mu.Unlock()
@@ -155,6 +170,57 @@ func (s *Service) serveStream(str network.Stream) {
 			// 其他類型忽略或關閉
 		}
 	}
+}
+
+func (s *Service) serveRawTunnel(str network.Stream) {
+	defer str.Close()
+
+	var header tunnel.RouteHeader
+	if err := tunnel.ReadJSONFrame(str, &header); err != nil {
+		return
+	}
+	s.serveRawTunnelWithHeader(str, header)
+}
+
+func (s *Service) serveRawTunnelWithHeader(str network.Stream, header tunnel.RouteHeader) {
+	if len(header.Path) == 0 || header.HopIndex < 0 || header.HopIndex >= len(header.Path) {
+		return
+	}
+	if header.Path[header.HopIndex] != s.host.ID().String() {
+		return
+	}
+	nextIndex := header.HopIndex + 1
+	if nextIndex >= len(header.Path) {
+		return
+	}
+	nextPeerID, err := peer.Decode(header.Path[nextIndex])
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	nextStr, err := s.host.NewStream(ctx, nextPeerID, p2p.ProtocolRawTunnelE2E)
+	if err != nil {
+		return
+	}
+	defer nextStr.Close()
+
+	header.HopIndex = nextIndex
+	if err := tunnel.WriteJSONFrame(nextStr, header); err != nil {
+		return
+	}
+
+	var once sync.Once
+	closeBoth := func() {
+		_ = str.Close()
+		_ = nextStr.Close()
+	}
+	safe.Go("relay.serveRawTunnel.copyUp", func() {
+		_, _ = io.Copy(nextStr, str)
+		once.Do(closeBoth)
+	})
+	_, _ = io.Copy(str, nextStr)
+	once.Do(closeBoth)
 }
 
 func (s *Service) pumpNextHopToClient(circuitID string, nextStr network.Stream, clientStr network.Stream, session *protocol.HopSession, writeMu *sync.Mutex) {

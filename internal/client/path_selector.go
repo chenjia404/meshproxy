@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
@@ -17,22 +19,38 @@ type PeerAddrsProvider func(peerID string) []string
 
 // PathSelector chooses appropriate relay/exit paths based on discovery information and exit selection config.
 type PathSelector struct {
-	mu               sync.RWMutex
-	store            *discovery.Store
-	localPeer        string
-	routePolicy      RoutePolicy
-	exitSelection    *config.ExitSelectionConfig
-	geoIP            geoip.Resolver
+	mu                sync.RWMutex
+	store             *discovery.Store
+	localPeer         string
+	routePolicy       RoutePolicy
+	exitSelection     *config.ExitSelectionConfig
+	geoIP             geoip.Resolver
 	peerAddrsProvider PeerAddrsProvider
+	peerHealth        map[string]*peerHealth
 }
+
+type peerHealth struct {
+	SuccessCount        int
+	ConsecutiveFailures int
+	LastSuccess         time.Time
+	LastFailure         time.Time
+	CooldownUntil       time.Time
+	SmoothedRTT         time.Duration
+}
+
+const (
+	peerFailureCooldownBase = 15 * time.Second
+	peerFailureCooldownMax  = 4 * time.Minute
+)
 
 // NewPathSelector creates a new PathSelector.
 func NewPathSelector(store *discovery.Store, localPeerID string, policy RoutePolicy) *PathSelector {
 	return &PathSelector{
-		store:       store,
-		localPeer:   localPeerID,
-		routePolicy:  policy,
+		store:         store,
+		localPeer:     localPeerID,
+		routePolicy:   policy,
 		exitSelection: nil,
+		peerHealth:    make(map[string]*peerHealth),
 	}
 }
 
@@ -95,7 +113,75 @@ func (p *PathSelector) CountryForExit(d *discovery.NodeDescriptor) string {
 	return p.EffectiveCountryForDescriptor(d)
 }
 
-// SelectBestPath selects a path plan according to policy (relay+exit preferred).
+// ReportPathSuccess increases the preference of hops that participated in a healthy circuit.
+func (p *PathSelector) ReportPathSuccess(plan protocol.PathPlan) {
+	p.reportPath(plan, true)
+}
+
+// ReportPathFailure puts the hops in a short cooldown to avoid immediate re-selection.
+func (p *PathSelector) ReportPathFailure(plan protocol.PathPlan) {
+	p.reportPath(plan, false)
+}
+
+// ReportPathRTT updates smoothed RTT observations for all hops in the path.
+func (p *PathSelector) ReportPathRTT(plan protocol.PathPlan, rtt time.Duration) {
+	if rtt <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, hop := range plan.Hops {
+		if hop.PeerID == "" {
+			continue
+		}
+		st := p.peerHealth[hop.PeerID]
+		if st == nil {
+			st = &peerHealth{}
+			p.peerHealth[hop.PeerID] = st
+		}
+		if st.SmoothedRTT > 0 {
+			st.SmoothedRTT = time.Duration(float64(st.SmoothedRTT)*0.8 + float64(rtt)*0.2)
+		} else {
+			st.SmoothedRTT = rtt
+		}
+	}
+}
+
+func (p *PathSelector) reportPath(plan protocol.PathPlan, success bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, hop := range plan.Hops {
+		if hop.PeerID == "" {
+			continue
+		}
+		st := p.peerHealth[hop.PeerID]
+		if st == nil {
+			st = &peerHealth{}
+			p.peerHealth[hop.PeerID] = st
+		}
+		if success {
+			st.SuccessCount++
+			st.ConsecutiveFailures = 0
+			st.LastSuccess = now
+			st.CooldownUntil = time.Time{}
+			continue
+		}
+		st.ConsecutiveFailures++
+		st.LastFailure = now
+		cooldown := peerFailureCooldownBase
+		for i := 1; i < st.ConsecutiveFailures; i++ {
+			cooldown *= 2
+			if cooldown >= peerFailureCooldownMax {
+				cooldown = peerFailureCooldownMax
+				break
+			}
+		}
+		st.CooldownUntil = now.Add(cooldown)
+	}
+}
+
+// SelectBestPath selects a path plan according to policy (direct exit preferred when allowed).
 func (p *PathSelector) SelectBestPath() (protocol.PathPlan, error) {
 	return p.SelectPathForPool(PoolAnonymous)
 }
@@ -103,6 +189,54 @@ func (p *PathSelector) SelectBestPath() (protocol.PathPlan, error) {
 // SelectPathForPool selects a path plan for the given pool kind.
 func (p *PathSelector) SelectPathForPool(kind PoolKind) (protocol.PathPlan, error) {
 	return p.SelectPathForPoolExcluding(kind, nil)
+}
+
+// SelectRawTunnelPathExcluding selects a path for the raw tunnel mode. It
+// prefers relay+exit when available, and only falls back to direct exit when no
+// suitable relay exists.
+func (p *PathSelector) SelectRawTunnelPathExcluding(excludePeerIDs []string) (protocol.PathPlan, error) {
+	exclude := make(map[string]bool)
+	for _, id := range excludePeerIDs {
+		exclude[id] = true
+	}
+	exits, err := p.filterExitsWithSelection(exclude)
+	if err != nil {
+		return protocol.PathPlan{}, err
+	}
+	if len(exits) == 0 {
+		return protocol.PathPlan{}, errors.New("no exit nodes available")
+	}
+	relays := p.filterRelaysExcluding(exclude)
+
+	p.mu.RLock()
+	cfg := p.exitSelection
+	allowDirect := true
+	if cfg != nil {
+		allowDirect = cfg.AllowDirectExit
+	}
+	p.mu.RUnlock()
+
+	for _, relay := range relays {
+		for _, exit := range exits {
+			if relay.PeerID == exit.PeerID {
+				continue
+			}
+			return protocol.PathPlan{
+				Hops: []protocol.PathHop{
+					{PeerID: relay.PeerID, IsRelay: true, IsExit: false},
+					{PeerID: exit.PeerID, IsRelay: false, IsExit: true},
+				},
+				ExitHopIndex: 1,
+			}, nil
+		}
+	}
+	if allowDirect {
+		return protocol.PathPlan{
+			Hops:         []protocol.PathHop{{PeerID: exits[0].PeerID, IsRelay: false, IsExit: true}},
+			ExitHopIndex: 0,
+		}, nil
+	}
+	return protocol.PathPlan{}, errors.New("no relay+exit path available")
 }
 
 // SelectPathForPoolExcluding selects a path plan excluding the given peer IDs (for relay/exit failover).
@@ -164,6 +298,9 @@ func (p *PathSelector) SelectPathForPoolExcluding(kind PoolKind, excludePeerIDs 
 		}
 		return protocol.PathPlan{}, errors.New("no relay+exit path available")
 	case PoolAnonymous, PoolCountry:
+		if allowDirect {
+			return directExit(exits[0]), nil
+		}
 		if len(relays) > 0 {
 			for _, relay := range relays {
 				for _, exit := range exits {
@@ -173,9 +310,6 @@ func (p *PathSelector) SelectPathForPoolExcluding(kind PoolKind, excludePeerIDs 
 					return relayExit(relay, exit), nil
 				}
 			}
-		}
-		if allowDirect {
-			return directExit(exits[0]), nil
 		}
 		return protocol.PathPlan{}, errors.New("no relay+exit path available (allow_direct_exit is false)")
 	default:
@@ -205,6 +339,9 @@ func (p *PathSelector) selectRelayExitOrDirect(
 	directExit func(*discovery.NodeDescriptor) protocol.PathPlan,
 	relayExit func(*discovery.NodeDescriptor, *discovery.NodeDescriptor) protocol.PathPlan,
 ) (protocol.PathPlan, error) {
+	if len(exits) > 0 {
+		return directExit(exits[0]), nil
+	}
 	if len(relays) > 0 {
 		for _, relay := range relays {
 			for _, exit := range exits {
@@ -215,7 +352,7 @@ func (p *PathSelector) selectRelayExitOrDirect(
 			}
 		}
 	}
-	return directExit(exits[0]), nil
+	return protocol.PathPlan{}, errors.New("no exit nodes available")
 }
 
 // filterExitsWithSelection returns exits filtered by exit selection config, with fallback_to_any applied if needed.
@@ -250,13 +387,13 @@ func (p *PathSelector) filterExitsWithSelection(exclude map[string]bool) ([]*dis
 	if fallback && mode != config.ExitSelectionAuto {
 		// Retry with auto (only base filters)
 		fallbackCfg := &config.ExitSelectionConfig{
-			Mode:               config.ExitSelectionAuto,
-			ExcludeCountries:   cfg.ExcludeCountries,
-			ExcludePeerIDs:     cfg.ExcludePeerIDs,
-			RequireRemoteDNS:   cfg.RequireRemoteDNS,
-			RequireTCPSupport:  cfg.RequireTCPSupport,
-			FallbackToAny:      false,
-			AllowDirectExit:    cfg.AllowDirectExit,
+			Mode:              config.ExitSelectionAuto,
+			ExcludeCountries:  cfg.ExcludeCountries,
+			ExcludePeerIDs:    cfg.ExcludePeerIDs,
+			RequireRemoteDNS:  cfg.RequireRemoteDNS,
+			RequireTCPSupport: cfg.RequireTCPSupport,
+			FallbackToAny:     false,
+			AllowDirectExit:   cfg.AllowDirectExit,
 		}
 		candidates = applyExitSelection(base, fallbackCfg, p.localPeer, p.routePolicy.AllowSelfExit, exclude, countryFunc)
 		if len(candidates) > 0 {
@@ -285,7 +422,7 @@ func (p *PathSelector) filterRelaysExcluding(exclude map[string]bool) []*discove
 		}
 		out = append(out, n)
 	}
-	return out
+	return p.rankNodes(out)
 }
 
 func (p *PathSelector) filterExits() []*discovery.NodeDescriptor {
@@ -304,7 +441,74 @@ func (p *PathSelector) filterExitsExcluding(exclude map[string]bool) []*discover
 		}
 		out = append(out, n)
 	}
-	return out
+	return p.rankNodes(out)
+}
+
+func (p *PathSelector) rankNodes(nodes []*discovery.NodeDescriptor) []*discovery.NodeDescriptor {
+	if len(nodes) <= 1 {
+		return nodes
+	}
+	p.mu.RLock()
+	now := time.Now()
+	health := make(map[string]peerHealth, len(nodes))
+	available := make([]*discovery.NodeDescriptor, 0, len(nodes))
+	cooled := make([]*discovery.NodeDescriptor, 0, len(nodes))
+	for _, n := range nodes {
+		if st := p.peerHealth[n.PeerID]; st != nil {
+			health[n.PeerID] = *st
+			if st.CooldownUntil.After(now) {
+				cooled = append(cooled, n)
+				continue
+			}
+		}
+		available = append(available, n)
+	}
+	p.mu.RUnlock()
+	sort.SliceStable(available, func(i, j int) bool {
+		return betterNode(available[i], available[j], health)
+	})
+	sort.SliceStable(cooled, func(i, j int) bool {
+		return betterNode(cooled[i], cooled[j], health)
+	})
+	if len(available) > 0 {
+		return append(available, cooled...)
+	}
+	return cooled
+}
+
+func betterNode(a, b *discovery.NodeDescriptor, health map[string]peerHealth) bool {
+	if a == nil || b == nil {
+		return a != nil
+	}
+	ha, oka := health[a.PeerID]
+	hb, okb := health[b.PeerID]
+	if oka && okb {
+		if ha.SmoothedRTT > 0 && hb.SmoothedRTT > 0 && ha.SmoothedRTT != hb.SmoothedRTT {
+			return ha.SmoothedRTT < hb.SmoothedRTT
+		}
+		if ha.SmoothedRTT > 0 && hb.SmoothedRTT == 0 {
+			return true
+		}
+		if ha.SmoothedRTT == 0 && hb.SmoothedRTT > 0 {
+			return false
+		}
+	}
+	if oka && !okb {
+		return true
+	}
+	if !oka && okb {
+		return false
+	}
+	if ha.SuccessCount != hb.SuccessCount {
+		return ha.SuccessCount > hb.SuccessCount
+	}
+	if ha.ConsecutiveFailures != hb.ConsecutiveFailures {
+		return ha.ConsecutiveFailures < hb.ConsecutiveFailures
+	}
+	if !ha.LastSuccess.Equal(hb.LastSuccess) {
+		return ha.LastSuccess.After(hb.LastSuccess)
+	}
+	return a.PeerID < b.PeerID
 }
 
 // DebugString returns a human-readable description of a path plan.
@@ -322,4 +526,3 @@ func DebugString(plan protocol.PathPlan) string {
 	}
 	return result
 }
-

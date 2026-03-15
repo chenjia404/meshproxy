@@ -1,13 +1,26 @@
 package client
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"strconv"
 	"sync"
+	"time"
+
+	host "github.com/libp2p/go-libp2p/core/host"
+	network "github.com/libp2p/go-libp2p/core/network"
+	peer "github.com/libp2p/go-libp2p/core/peer"
+
+	"github.com/chenjia404/meshproxy/internal/p2p"
+	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 // ErrorRecorder records errors for observability (e.g. API /api/v1/errors/recent). Optional.
@@ -20,18 +33,22 @@ type Socks5Server struct {
 	addr              string
 	listener          net.Listener
 	closeChan         chan struct{}
+	host              host.Host
 	circuitMgr        *CircuitManager
 	pathSelector      *PathSelector
 	streamManager     *StreamManager
 	errorRecorder     ErrorRecorder
 	allowUDPAssociate bool
+	tunnelToExit      bool
+	exitUpstream      string
 }
 
 // NewSocks5Server creates a new SOCKS5 server instance. errRec may be nil.
-func NewSocks5Server(addr string, cm *CircuitManager, selector *PathSelector, sm *StreamManager, errRec ErrorRecorder) *Socks5Server {
+func NewSocks5Server(addr string, h host.Host, cm *CircuitManager, selector *PathSelector, sm *StreamManager, errRec ErrorRecorder) *Socks5Server {
 	return &Socks5Server{
 		addr:              addr,
 		closeChan:         make(chan struct{}),
+		host:              h,
 		circuitMgr:        cm,
 		pathSelector:      selector,
 		streamManager:     sm,
@@ -45,6 +62,12 @@ func (s *Socks5Server) SetAllowUDPAssociate(enable bool) {
 	s.allowUDPAssociate = enable
 }
 
+// SetTunnelToExit enables raw TCP tunneling to the selected exit's upstream SOCKS5 service.
+func (s *Socks5Server) SetTunnelToExit(enable bool, upstream string) {
+	s.tunnelToExit = enable
+	s.exitUpstream = upstream
+}
+
 // Start begins listening for incoming TCP connections.
 func (s *Socks5Server) Start() error {
 	l, err := net.Listen("tcp", s.addr)
@@ -54,7 +77,7 @@ func (s *Socks5Server) Start() error {
 	s.listener = l
 	log.Printf("[socks5] listening on %s", s.addr)
 
-	go s.acceptLoop()
+	safe.Go("client.socks5.acceptLoop", s.acceptLoop)
 	return nil
 }
 
@@ -88,7 +111,7 @@ func (s *Socks5Server) acceptLoop() {
 			continue
 		}
 
-		go s.handleConn(conn)
+		safe.Go("client.socks5.handleConn", func() { s.handleConn(conn) })
 	}
 }
 
@@ -120,6 +143,11 @@ func (s *Socks5Server) releaseCircuitAfterBeginError(circuitID string, err error
 // handleConn implements the SOCKS5 state machine and uses the circuit pool when available.
 func (s *Socks5Server) handleConn(conn net.Conn) {
 	log.Printf("[socks5] new connection from %s to %s", conn.RemoteAddr().String(), conn.LocalAddr().String())
+
+	if s.tunnelToExit {
+		s.handleTunnelConn(conn)
+		return
+	}
 
 	host, port, cmd, err := s.handleHandshake(conn)
 	if err != nil {
@@ -218,6 +246,176 @@ func (s *Socks5Server) handleConn(conn net.Conn) {
 
 	// 8. Start bidirectional relay (when wrapped closes, ReturnToPool is called)
 	s.circuitMgr.StartDataPump(circuitID, stream.ID, wrapped)
+}
+
+func (s *Socks5Server) handleTunnelConn(conn net.Conn) {
+	excludeExitIDs := []string{}
+	maxRetries := s.circuitMgr.BeginTCPRetries()
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		plan, peerID, err := s.selectTunnelPath(excludeExitIDs)
+		if err != nil {
+			lastErr = err
+			break
+		}
+		tunnelStream, err := s.openTunnelStream(peerID)
+		if err != nil {
+			lastErr = err
+			excludeExitIDs = append(excludeExitIDs, peerID.String())
+			if s.pathSelector != nil {
+				s.pathSelector.ReportPathFailure(plan)
+			}
+			log.Printf("[socks5] open raw tunnel stream failed: %v", err)
+			continue
+		}
+		tunnelID, err := newTunnelID()
+		if err != nil {
+			_ = tunnelStream.Close()
+			lastErr = err
+			excludeExitIDs = append(excludeExitIDs, plan.Hops[plan.ExitHopIndex].PeerID)
+			continue
+		}
+		if err := s.writeTunnelRouteHeader(tunnelStream, tunnelID, plan); err != nil {
+			_ = tunnelStream.Close()
+			lastErr = err
+			excludeExitIDs = append(excludeExitIDs, plan.Hops[plan.ExitHopIndex].PeerID)
+			if s.pathSelector != nil {
+				s.pathSelector.ReportPathFailure(plan)
+			}
+			continue
+		}
+		sess, err := tunnel.ClientHandshake(tunnelStream, tunnelID)
+		if err != nil {
+			_ = tunnelStream.Close()
+			lastErr = err
+			excludeExitIDs = append(excludeExitIDs, plan.Hops[plan.ExitHopIndex].PeerID)
+			if s.pathSelector != nil {
+				s.pathSelector.ReportPathFailure(plan)
+			}
+			log.Printf("[socks5] raw tunnel handshake failed: %v", err)
+			continue
+		}
+		if s.pathSelector != nil {
+			s.pathSelector.ReportPathSuccess(plan)
+		}
+		log.Printf("[socks5] raw tunnel established path=%s via %s", DebugString(plan), p2p.ProtocolRawTunnelE2E)
+		s.pipeEncryptedTunnel(conn, tunnelStream, sess)
+		return
+	}
+
+	if lastErr != nil && s.errorRecorder != nil {
+		s.errorRecorder.Record("socks5_tunnel", "open raw tunnel failed: "+lastErr.Error())
+	}
+	if lastErr != nil {
+		log.Printf("[socks5] open raw tunnel failed: %v", lastErr)
+	}
+	_ = conn.Close()
+}
+
+func (s *Socks5Server) selectTunnelPath(excludeExitIDs []string) (protocol.PathPlan, peer.ID, error) {
+	plan, err := s.pathSelector.SelectRawTunnelPathExcluding(excludeExitIDs)
+	if err != nil {
+		return protocol.PathPlan{}, "", err
+	}
+	if len(plan.Hops) == 0 {
+		return protocol.PathPlan{}, "", fmt.Errorf("empty raw tunnel path")
+	}
+	pid, err := peer.Decode(plan.Hops[0].PeerID)
+	if err != nil {
+		return protocol.PathPlan{}, "", err
+	}
+	return plan, pid, nil
+}
+
+func (s *Socks5Server) openTunnelStream(peerID peer.ID) (network.Stream, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return s.host.NewStream(ctx, peerID, p2p.ProtocolRawTunnelE2E)
+}
+
+func (s *Socks5Server) writeTunnelRouteHeader(stream network.Stream, tunnelID string, plan protocol.PathPlan) error {
+	path := make([]string, 0, len(plan.Hops))
+	for _, hop := range plan.Hops {
+		path = append(path, hop.PeerID)
+	}
+	header := tunnel.RouteHeader{
+		Version:    1,
+		TunnelID:   tunnelID,
+		Path:       path,
+		HopIndex:   0,
+		TargetExit: plan.Hops[plan.ExitHopIndex].PeerID,
+	}
+	return tunnel.WriteJSONFrame(stream, header)
+}
+
+func (s *Socks5Server) pipeEncryptedTunnel(conn net.Conn, stream network.Stream, sess *tunnel.Session) {
+	var once sync.Once
+	closeBoth := func() {
+		_ = conn.Close()
+		_ = stream.Close()
+	}
+
+	go func() {
+		for {
+			var frame tunnel.EncryptedFrame
+			if err := tunnel.ReadJSONFrame(stream, &frame); err != nil {
+				once.Do(closeBoth)
+				return
+			}
+			switch frame.Type {
+			case tunnel.FrameTypeData:
+				plain, err := sess.Open(frame)
+				if err != nil {
+					once.Do(closeBoth)
+					return
+				}
+				if len(plain) == 0 {
+					continue
+				}
+				if _, err := conn.Write(plain); err != nil {
+					once.Do(closeBoth)
+					return
+				}
+			case tunnel.FrameTypeClose:
+				once.Do(closeBoth)
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, protocol.TCPDataChunkBytes)
+	for {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			frame, frameErr := sess.Seal(tunnel.FrameTypeData, buf[:n])
+			if frameErr != nil {
+				once.Do(closeBoth)
+				return
+			}
+			if frameErr = tunnel.WriteJSONFrame(stream, frame); frameErr != nil {
+				once.Do(closeBoth)
+				return
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				if frame, frameErr := sess.Seal(tunnel.FrameTypeClose, nil); frameErr == nil {
+					_ = tunnel.WriteJSONFrame(stream, frame)
+				}
+			}
+			once.Do(closeBoth)
+			return
+		}
+	}
+}
+
+func newTunnelID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // handleHandshake performs a minimal SOCKS5 NO-AUTH handshake and parses the request.

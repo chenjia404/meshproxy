@@ -181,6 +181,19 @@ func NewBeginTCPFrame(circuitID, streamID string, msg BeginTCP) (Frame, error) {
 	}, nil
 }
 
+func NewBeginUDPFrame(circuitID, streamID string, msg BeginUDP) (Frame, error) {
+	p, err := json.Marshal(msg)
+	if err != nil {
+		return Frame{}, err
+	}
+	return Frame{
+		Type:        MsgTypeBeginUDP,
+		CircuitID:   circuitID,
+		StreamID:    streamID,
+		PayloadJSON: p,
+	}, nil
+}
+
 // NewConnectedFrame creates a frame carrying a Connected message.
 func NewConnectedFrame(circuitID, streamID string, msg Connected) (Frame, error) {
 	p, err := json.Marshal(msg)
@@ -287,4 +300,3 @@ func StartStreamReader(ctx context.Context, s network.Stream, handler func(Frame
 		}
 	}()
 }
-

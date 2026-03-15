@@ -9,6 +9,8 @@ import (
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+
+	"github.com/chenjia404/meshproxy/internal/safe"
 )
 
 // Bootstrap connects to the configured bootstrap peers in the background.
@@ -21,7 +23,7 @@ func Bootstrap(ctx context.Context, h host.Host, peers []string) {
 	for _, addrStr := range peers {
 		addrStr := addrStr
 		wg.Add(1)
-		go func() {
+		safe.Go("p2p.bootstrap.connectPeer", func() {
 			defer wg.Done()
 
 			maddr, err := multiaddr.NewMultiaddr(addrStr)
@@ -44,11 +46,10 @@ func Bootstrap(ctx context.Context, h host.Host, peers []string) {
 				return
 			}
 			log.Printf("[bootstrap] connected to %s", addrStr)
-		}()
+		})
 	}
 
-	go func() {
+	safe.Go("p2p.bootstrap.waitAll", func() {
 		wg.Wait()
-	}()
+	})
 }
-

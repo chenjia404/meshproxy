@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -166,6 +167,9 @@ type P2PConfig struct {
 	// BootstrapPeers are the multiaddrs of peers to connect to on startup.
 	BootstrapPeers []string `yaml:"bootstrap_peers"`
 
+	// NoDiscovery disables DHT rendezvous advertise/find-peers discovery.
+	NoDiscovery bool `yaml:"nodisc"`
+
 	// DiscoveryTag is the rendezvous string used for DHT-based peer discovery.
 	// Nodes sharing the same tag will try to discover and connect to each other.
 	DiscoveryTag string `yaml:"discovery_tag"`
@@ -175,6 +179,10 @@ type P2PConfig struct {
 type Socks5Config struct {
 	// Listen is the address for the local SOCKS5 server.
 	Listen string `yaml:"listen"`
+	// TunnelToExit forwards accepted TCP streams to the selected exit's local SOCKS5 service without parsing SOCKS5 locally.
+	TunnelToExit bool `yaml:"tunnel_to_exit"`
+	// ExitUpstream is the SOCKS5 address that the exit node should connect to when TunnelToExit is enabled.
+	ExitUpstream string `yaml:"exit_upstream"`
 	// AllowUDPAssociate enables SOCKS5 UDP ASSOCIATE (relay UDP over circuits).
 	AllowUDPAssociate bool `yaml:"allow_udp_associate"`
 }
@@ -198,6 +206,7 @@ func Default() Config {
 				"/ip6/::/udp/4001/quic-v1",
 			},
 			BootstrapPeers: []string{
+				"/ip4/8.210.130.36/tcp/4002/p2p/12D3KooWMxVFQZVQwnPqVF4Leosp1qewEtCzYqnEgizSAi33x3EK",
 				"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
 				"/dnsaddr/bootstrap.libp2p.io/ipfs/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
 				"/dnsaddr/bootstrap.libp2p.io/ipfs/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
@@ -206,6 +215,8 @@ func Default() Config {
 			DiscoveryTag: "meshproxy",
 		},
 		Socks5: Socks5Config{
+			TunnelToExit:      true,
+			ExitUpstream:      "127.0.0.1:1081",
 			Listen:            "127.0.0.1:1080",
 			AllowUDPAssociate: true,
 		},
@@ -223,7 +234,7 @@ func Default() Config {
 		Client: ClientConfig{
 			BuildRetries:                   1,
 			BeginTCPRetries:                1,
-			BeginConnectTimeoutSeconds:     20,
+			BeginConnectTimeoutSeconds:     30,
 			HeartbeatEnabled:               true,
 			HeartbeatIntervalSeconds:       30,
 			HeartbeatTimeoutSeconds:        8,
@@ -323,7 +334,7 @@ func (c *Config) postProcess() error {
 		c.Client.BeginTCPRetries = 2
 	}
 	if c.Client.BeginConnectTimeoutSeconds <= 0 {
-		c.Client.BeginConnectTimeoutSeconds = 20
+		c.Client.BeginConnectTimeoutSeconds = 30
 	}
 	if c.Client.HeartbeatIntervalSeconds <= 0 {
 		c.Client.HeartbeatIntervalSeconds = 30
@@ -362,7 +373,7 @@ func defaultExitPolicyConfig() ExitPolicyConfig {
 		AllowTCP:              true,
 		AllowUDP:              false,
 		RemoteDNS:             true,
-		AllowedPorts:          []int{80, 443},
+		AllowedPorts:          []int{80, 443, 8080},
 		DeniedPorts:           []int{25, 465, 587, 22, 3389},
 		AllowPrivateIPTargets: false,
 		AllowLoopbackTargets:  false,
@@ -386,6 +397,14 @@ func (c *Config) Validate() error {
 
 	if c.Socks5.Listen == "" {
 		return errors.New("socks5.listen must not be empty")
+	}
+	if c.Socks5.ExitUpstream == "" {
+		c.Socks5.ExitUpstream = "127.0.0.1:1081"
+	}
+	if c.Socks5.TunnelToExit {
+		if _, _, err := net.SplitHostPort(c.Socks5.ExitUpstream); err != nil {
+			return fmt.Errorf("invalid socks5.exit_upstream %q: %w", c.Socks5.ExitUpstream, err)
+		}
 	}
 	if c.API.Listen == "" {
 		return errors.New("api.listen must not be empty")
@@ -418,6 +437,22 @@ func SaveExitSelection(path string, ec ExitSelectionConfig) error {
 		return fmt.Errorf("load config for save: %w", err)
 	}
 	c.Client.ExitSelection = ec
+	return Write(path, &c)
+}
+
+// SaveExitSelectionSettings persists client.exit_selection and optional socks5.tunnel_to_exit together.
+func SaveExitSelectionSettings(path string, ec ExitSelectionConfig, tunnelToExit *bool) error {
+	if path == "" {
+		return nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.Client.ExitSelection = ec
+	if tunnelToExit != nil {
+		c.Socks5.TunnelToExit = *tunnelToExit
+	}
 	return Write(path, &c)
 }
 
