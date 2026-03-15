@@ -19,10 +19,10 @@ builds:
     ldflags:
       - -s -w -X main.gitRev="{{.ShortCommit}}" -X main.buildTime="{{.CommitDate}}"
     asmflags:
-      - all=-trimpath={{.Env.GOPATH}}
+      # - all=-trimpath={{.Env.GOPATH}}
       - ./dontoptimizeme=-N
     gcflags:
-      - all=-trimpath={{.Env.GOPATH}}
+      # - all=-trimpath={{.Env.GOPATH}}
 
 archives:
   -
