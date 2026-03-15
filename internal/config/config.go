@@ -225,9 +225,9 @@ func Default() Config {
 		},
 		CircuitPool: CircuitPoolConfig{
 			MinPerPool:               1,
-			MaxPerPool:               1,
-			MinTotal:                 1,
-			MaxTotal:                 1,
+			MaxPerPool:               3,
+			MinTotal:                 3,
+			MaxTotal:                 5,
 			IdleTimeoutSeconds:       300,
 			ReplenishIntervalSeconds: 30,
 		},

@@ -25,9 +25,9 @@ api:
 # 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
 circuit_pool:
   min_per_pool: 1
-  max_per_pool: 2
-  min_total: 1
-  max_total: 1
+  max_per_pool: 3
+  min_total: 3
+  max_total: 5
   idle_timeout_seconds: 300
   replenish_interval_seconds: 30
 
