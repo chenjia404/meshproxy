@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -173,6 +174,8 @@ type ChatProvider interface {
 	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
 	RevokeMessage(conversationID, msgID string) error
+	SendFile(conversationID, fileName, mimeType string, data []byte) (chat.Message, error)
+	GetMessageFile(conversationID, msgID string) (chat.Message, []byte, error)
 	SendText(conversationID, text string) (chat.Message, error)
 	ConnectPeer(peerID string) error
 	PeerStatus(peerID string) (map[string]any, error)
@@ -975,6 +978,27 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 			writeJSON(w, map[string]string{"status": "revoked"})
 			return
 		}
+		if len(parts) == 4 && parts[3] == "file" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			msgID := parts[2]
+			msg, blob, err := a.opts.ChatService.GetMessageFile(conversationID, msgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mimeType := msg.MIMEType
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", mimeType)
+			w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(msg.FileName)+`"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(blob)
+			return
+		}
 		if len(parts) != 2 {
 			http.NotFound(w, r)
 			return
@@ -996,6 +1020,35 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 				return
 			}
 			msg, err := a.opts.ChatService.SendText(conversationID, body.Text)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, msg)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	case "files":
+		switch r.Method {
+		case http.MethodPost:
+			if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+				http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, "missing file: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			data, err := chat.ValidateChatFileData(file)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			fileName := chat.NormalizeChatFileName(header.Filename)
+			mimeType := http.DetectContentType(data)
+			msg, err := a.opts.ChatService.SendFile(conversationID, fileName, mimeType, data)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return

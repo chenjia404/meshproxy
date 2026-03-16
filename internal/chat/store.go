@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,6 +32,7 @@ type Store struct {
 const (
 	MinRetentionMinutes = 1
 	MaxRetentionMinutes = 60 * 24 * 365
+	MaxChatFileBytes    = 64 << 20
 )
 
 func NewStore(path, localPeerID string) (*Store, error) {
@@ -111,6 +113,9 @@ func (s *Store) migrate() error {
 			direction TEXT NOT NULL,
 			msg_type TEXT NOT NULL,
 			plaintext TEXT NOT NULL,
+			file_name TEXT NOT NULL DEFAULT '',
+			mime_type TEXT NOT NULL DEFAULT '',
+			file_size INTEGER NOT NULL DEFAULT 0,
 			ciphertext_blob BLOB NOT NULL,
 			transport_mode TEXT NOT NULL,
 			state TEXT NOT NULL,
@@ -145,6 +150,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.ensureConversationRetentionSyncColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureMessageFileColumns(); err != nil {
 		return err
 	}
 	return nil
@@ -202,6 +210,50 @@ func (s *Store) ensureConversationRetentionSyncColumns() error {
 	}
 	if !hasAt {
 		if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_synced_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureMessageFileColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasFileName := false
+	hasMime := false
+	hasFileSize := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		switch name {
+		case "file_name":
+			hasFileName = true
+		case "mime_type":
+			hasMime = true
+		case "file_size":
+			hasFileSize = true
+		}
+	}
+	if !hasFileName {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN file_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasMime {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN mime_type TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasFileSize {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}
@@ -494,9 +546,9 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 	}
 	createdAt := msg.CreatedAt.UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt)
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt)
 	if err != nil {
 		return Message{}, err
 	}
@@ -508,7 +560,7 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 }
 
 func (s *Store) ListMessages(conversationID string) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
+	rows, err := s.db.Query(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +569,7 @@ func (s *Store) ListMessages(conversationID string) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var createdAt, deliveredAt string
-		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseDBTime(createdAt)
@@ -536,14 +588,22 @@ func (s *Store) MarkMessageDelivered(msgID string, deliveredAt time.Time) error 
 func (s *Store) GetMessage(msgID string) (Message, error) {
 	var m Message
 	var createdAt, deliveredAt string
-	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
-		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
+	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
+		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
 	if err != nil {
 		return Message{}, err
 	}
 	m.CreatedAt = parseDBTime(createdAt)
 	m.DeliveredAt = parseDBTime(deliveredAt)
 	return m, nil
+}
+
+func (s *Store) GetMessageBlob(msgID string) ([]byte, error) {
+	var blob []byte
+	if err := s.db.QueryRow(`SELECT ciphertext_blob FROM messages WHERE msg_id=?`, msgID).Scan(&blob); err != nil {
+		return nil, err
+	}
+	return blob, nil
 }
 
 func (s *Store) DeleteMessage(conversationID, msgID string) error {
@@ -554,6 +614,29 @@ func (s *Store) DeleteMessage(conversationID, msgID string) error {
 		return err
 	}
 	return s.refreshConversationMessageSummary(conversationID)
+}
+
+func NormalizeChatFileName(name string) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." || base == "/" {
+		return "file"
+	}
+	base = strings.ReplaceAll(base, "\x00", "")
+	if len(base) > 120 {
+		base = base[:120]
+	}
+	return base
+}
+
+func ValidateChatFileData(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxChatFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxChatFileBytes {
+		return nil, fmt.Errorf("file too large: max %d bytes", MaxChatFileBytes)
+	}
+	return data, nil
 }
 
 func (s *Store) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {

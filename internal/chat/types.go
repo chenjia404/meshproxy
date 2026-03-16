@@ -7,6 +7,7 @@ const (
 	MessageTypeSessionAccept   = "session_accept"
 	MessageTypeSessionReject   = "session_reject"
 	MessageTypeChatText        = "chat_text"
+	MessageTypeChatFile        = "chat_file"
 	MessageTypeDeliveryAck     = "delivery_ack"
 	MessageTypeMessageRevoke   = "message_revoke"
 	MessageTypeRetentionUpdate = "retention_update"
@@ -87,6 +88,9 @@ type Message struct {
 	Direction      string    `json:"direction"`
 	MsgType        string    `json:"msg_type"`
 	Plaintext      string    `json:"plaintext"`
+	FileName       string    `json:"file_name,omitempty"`
+	MIMEType       string    `json:"mime_type,omitempty"`
+	FileSize       int64     `json:"file_size,omitempty"`
 	TransportMode  string    `json:"transport_mode"`
 	State          string    `json:"state"`
 	Counter        uint64    `json:"counter"`
@@ -129,6 +133,20 @@ type ChatText struct {
 	MsgID          string `json:"msg_id"`
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
+	Ciphertext     []byte `json:"ciphertext"`
+	Counter        uint64 `json:"counter"`
+	SentAtUnix     int64  `json:"sent_at_unix"`
+}
+
+type ChatFile struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	MsgID          string `json:"msg_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	FileName       string `json:"file_name"`
+	MIMEType       string `json:"mime_type"`
+	FileSize       int64  `json:"file_size"`
 	Ciphertext     []byte `json:"ciphertext"`
 	Counter        uint64 `json:"counter"`
 	SentAtUnix     int64  `json:"sent_at_unix"`

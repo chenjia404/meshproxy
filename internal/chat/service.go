@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -126,6 +127,77 @@ func (s *Service) ListMessages(conversationID string) ([]Message, error) {
 	return s.store.ListMessages(conversationID)
 }
 
+func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byte) (Message, error) {
+	if len(data) == 0 {
+		return Message{}, errors.New("file is empty")
+	}
+	if len(data) > MaxChatFileBytes {
+		return Message{}, fmt.Errorf("file too large: max %d bytes", MaxChatFileBytes)
+	}
+	fileName = NormalizeChatFileName(fileName)
+	conv, err := s.store.GetConversation(conversationID)
+	if err != nil {
+		return Message{}, err
+	}
+	if contact, err := s.store.GetPeer(conv.PeerID); err == nil && contact.Blocked {
+		return Message{}, errors.New("peer is blocked")
+	}
+	if err := s.ensurePeerConnected(conv.PeerID); err != nil {
+		return Message{}, err
+	}
+	sess, err := s.store.GetSessionState(conversationID)
+	if err != nil {
+		return Message{}, err
+	}
+	counter := sess.SendCounter
+	nonce := protocol.BuildAEADNonce("fwd", counter)
+	aad := []byte(conversationID + "\x00chat_file")
+	ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, data, aad)
+	if err != nil {
+		return Message{}, err
+	}
+	msg := Message{
+		MsgID:          uuid.NewString(),
+		ConversationID: conversationID,
+		SenderPeerID:   s.localPeer,
+		ReceiverPeerID: conv.PeerID,
+		Direction:      "outbound",
+		MsgType:        MessageTypeChatFile,
+		FileName:       fileName,
+		MIMEType:       mimeType,
+		FileSize:       int64(len(data)),
+		TransportMode:  TransportModeDirect,
+		State:          MessageStateLocalOnly,
+		Counter:        counter,
+		CreatedAt:      time.Now(),
+	}
+	msg, err = s.store.AddMessage(msg, data)
+	if err != nil {
+		return Message{}, err
+	}
+	wire := ChatFile{
+		Type:           MessageTypeChatFile,
+		ConversationID: conversationID,
+		MsgID:          msg.MsgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       conv.PeerID,
+		FileName:       fileName,
+		MIMEType:       mimeType,
+		FileSize:       int64(len(data)),
+		Ciphertext:     ciphertext,
+		Counter:        counter,
+		SentAtUnix:     msg.CreatedAt.UnixMilli(),
+	}
+	if err := s.sendEnvelope(conv.PeerID, wire); err != nil {
+		return Message{}, err
+	}
+	if err := s.store.UpdateSendCounter(conversationID, counter+1); err != nil {
+		return Message{}, err
+	}
+	msg.State = MessageStateSentToTransport
+	return s.store.AddMessage(msg, data)
+}
+
 func (s *Service) RevokeMessage(conversationID, msgID string) error {
 	msg, err := s.store.GetMessage(msgID)
 	if err != nil {
@@ -149,6 +221,24 @@ func (s *Service) RevokeMessage(conversationID, msgID string) error {
 		return err
 	}
 	return s.store.DeleteMessage(conversationID, msgID)
+}
+
+func (s *Service) GetMessageFile(conversationID, msgID string) (Message, []byte, error) {
+	msg, err := s.store.GetMessage(msgID)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	if msg.ConversationID != conversationID {
+		return Message{}, nil, errors.New("message does not belong to conversation")
+	}
+	if msg.MsgType != MessageTypeChatFile {
+		return Message{}, nil, errors.New("message is not a file")
+	}
+	blob, err := s.store.GetMessageBlob(msgID)
+	if err != nil {
+		return Message{}, nil, err
+	}
+	return msg, blob, nil
 }
 
 func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
@@ -759,6 +849,57 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			AckedAtUnix:    time.Now().UnixMilli(),
 		}
 		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeChatFile:
+		var msg ChatFile
+		if err := remarshal(env, &msg); err != nil {
+			return err
+		}
+		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
+			return nil
+		}
+		conv, err := s.store.GetConversation(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		sess, err := s.store.GetSessionState(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+		aad := []byte(msg.ConversationID + "\x00chat_file")
+		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+		if err != nil {
+			return err
+		}
+		incoming := Message{
+			MsgID:          msg.MsgID,
+			ConversationID: msg.ConversationID,
+			SenderPeerID:   msg.FromPeerID,
+			ReceiverPeerID: s.localPeer,
+			Direction:      "inbound",
+			MsgType:        MessageTypeChatFile,
+			FileName:       NormalizeChatFileName(msg.FileName),
+			MIMEType:       msg.MIMEType,
+			FileSize:       int64(len(plain)),
+			TransportMode:  "relay",
+			State:          MessageStateReceived,
+			Counter:        msg.Counter,
+			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
+		}
+		if _, err := s.store.AddMessage(incoming, plain); err != nil {
+			return err
+		}
+		_ = s.store.UpsertPeer(msg.FromPeerID, "")
+		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
+		ack := DeliveryAck{
+			Type:           MessageTypeDeliveryAck,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       msg.FromPeerID,
+			AckedAtUnix:    time.Now().UnixMilli(),
+		}
+		return s.sendEnvelope(conv.PeerID, ack)
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
@@ -841,6 +982,57 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 		}
 		if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
+			return err
+		}
+		_ = s.store.UpsertPeer(msg.FromPeerID, "")
+		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
+		ack := DeliveryAck{
+			Type:           MessageTypeDeliveryAck,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       msg.FromPeerID,
+			AckedAtUnix:    time.Now().UnixMilli(),
+		}
+		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeChatFile:
+		var msg ChatFile
+		if err := remarshal(env, &msg); err != nil {
+			return err
+		}
+		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
+			return nil
+		}
+		conv, err := s.store.GetConversation(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		sess, err := s.store.GetSessionState(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+		aad := []byte(msg.ConversationID + "\x00chat_file")
+		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+		if err != nil {
+			return err
+		}
+		incoming := Message{
+			MsgID:          msg.MsgID,
+			ConversationID: msg.ConversationID,
+			SenderPeerID:   msg.FromPeerID,
+			ReceiverPeerID: s.localPeer,
+			Direction:      "inbound",
+			MsgType:        MessageTypeChatFile,
+			FileName:       NormalizeChatFileName(msg.FileName),
+			MIMEType:       msg.MIMEType,
+			FileSize:       int64(len(plain)),
+			TransportMode:  TransportModeDirect,
+			State:          MessageStateReceived,
+			Counter:        msg.Counter,
+			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
+		}
+		if _, err := s.store.AddMessage(incoming, plain); err != nil {
 			return err
 		}
 		_ = s.store.UpsertPeer(msg.FromPeerID, "")

@@ -72,6 +72,11 @@
     .retention-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.45rem; }
     .retention-row input { width: 180px; padding: 0.4rem 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
     .retention-unit { color: var(--muted); font-size: 0.88rem; }
+    .file-preview { margin-top: 0.5rem; }
+    .file-preview img { max-width: min(100%, 320px); border-radius: 8px; display: block; }
+    .file-preview video { max-width: min(100%, 420px); border-radius: 8px; display: block; background: #000; }
+    .file-link { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.03); color: var(--text); text-decoration: none; max-width: 100%; }
+    .file-link .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
       .chat-layout { min-height: auto; }
@@ -175,6 +180,33 @@
       if (state === 'sent_to_transport') return '<span class="badge msg-sent">已发送</span>';
       if (state === 'failed') return '<span class="badge msg-failed">失败</span>';
       return '<span class="badge msg-local">' + escapeHtml(state || '本地') + '</span>';
+    }
+
+    function isImageMessage(msg) {
+      return msg && msg.msg_type === 'chat_file' && /^image\//.test(msg.mime_type || '');
+    }
+
+    function isVideoMessage(msg) {
+      return msg && msg.msg_type === 'chat_file' && /^video\//.test(msg.mime_type || '');
+    }
+
+    function fileUrl(msg) {
+      return '/api/v1/chat/conversations/' + encodeURIComponent(msg.conversation_id) + '/messages/' + encodeURIComponent(msg.msg_id) + '/file';
+    }
+
+    function renderMessageBody(msg) {
+      if (!msg || msg.msg_type !== 'chat_file') {
+        return '<div>' + escapeHtml(msg.plaintext || '') + '</div>';
+      }
+      const url = fileUrl(msg);
+      const fileName = escapeHtml(msg.file_name || 'file');
+      if (isImageMessage(msg)) {
+        return '<div class="file-preview"><img src="' + url + '" alt="' + fileName + '"></div>';
+      }
+      if (isVideoMessage(msg)) {
+        return '<div class="file-preview"><video src="' + url + '" controls autoplay muted playsinline preload="metadata"></video></div>';
+      }
+      return '<div class="file-preview"><a class="file-link" href="' + url + '" download="' + fileName + '"><span>文件</span><span class="name">' + fileName + '</span></a></div>';
     }
 
     function renderRefreshStatus() {
@@ -500,7 +532,7 @@
         wrap.innerHTML = state.messages.map(msg => (
           '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
             '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + messageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
-            '<div>' + escapeHtml(msg.plaintext || '') + '</div>' +
+            renderMessageBody(msg) +
             (msg.direction === 'outbound'
               ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
               : '') +
@@ -537,7 +569,7 @@
       const draft = state.composerDrafts[conv.conversation_id] || '';
       const shouldRebuild = state.composerConversationId !== conv.conversation_id || !document.getElementById('composer-text');
       if (shouldRebuild) {
-        composer.innerHTML = '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div><div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button></div>';
+        composer.innerHTML = '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div><input id="composer-file" type="file" hidden><div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送文件</button></div>';
         state.composerConversationId = conv.conversation_id;
         const input = document.getElementById('composer-text');
         if (input) {
@@ -560,6 +592,31 @@
               await refreshConversations();
             } catch (err) {
               showMessage('err', '发送失败: ' + err.message);
+            }
+          };
+        }
+        const fileBtn = document.getElementById('send-file-btn');
+        const fileInput = document.getElementById('composer-file');
+        if (fileBtn && fileInput) {
+          fileBtn.onclick = () => fileInput.click();
+          fileInput.onchange = async () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+            const form = new FormData();
+            form.append('file', file);
+            try {
+              const resp = await fetch('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/files', {
+                method: 'POST',
+                body: form
+              });
+              const data = await resp.json().catch(() => ({}));
+              if (!resp.ok) throw new Error(data.error || resp.statusText);
+              showMessage('ok', '文件已发送');
+              fileInput.value = '';
+              await refreshMessages();
+              await refreshConversations();
+            } catch (err) {
+              showMessage('err', '发送文件失败: ' + err.message);
             }
           };
         }
