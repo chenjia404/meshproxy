@@ -461,6 +461,9 @@
       const retentionDraft = Object.prototype.hasOwnProperty.call(state.retentionDrafts, conv?.conversation_id || '')
         ? state.retentionDrafts[conv.conversation_id]
         : (conv?.retention_minutes || 0);
+      const retentionSyncState = conv?.retention_sync_state || 'synced';
+      const retentionSyncLabel = retentionSyncState === 'pending' ? '等待对端确认' : '已与对端一致';
+      const retentionSyncBadge = retentionSyncState === 'pending' ? 'relay' : 'direct';
       const transportBadgeClass = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'offline';
       const transportLabel = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'unknown';
       const connLabel = connectedness === 'Connected' || connectedness === 'connected' ? '已连接' : connectedness === 'NotConnected' || connectedness === 'not connected' ? '未连接' : connectedness;
@@ -472,6 +475,7 @@
           '</div>' +
           '<div class="retention-box">' +
             '<div class="muted">自动删除：' + escapeHtml(conv.retention_minutes > 0 ? (conv.retention_minutes + ' 分钟') : '关闭') + '</div>' +
+            '<div class="status-row"><span class="badge ' + escapeHtml(retentionSyncBadge) + '">retention: ' + escapeHtml(retentionSyncLabel) + '</span></div>' +
             '<div class="retention-row">' +
               '<input id="retention-minutes" type="number" min="0" max="525600" step="1" value="' + escapeHtml(String(retentionDraft)) + '" placeholder="0 表示关闭，1~525600 分钟">' +
               '<span class="retention-unit">分钟</span>' +
@@ -585,7 +589,7 @@
             const idx = state.conversations.findIndex(item => item.conversation_id === conv.conversation_id);
             if (idx >= 0) state.conversations[idx] = updated;
             state.retentionDrafts[conv.conversation_id] = String(updated.retention_minutes || 0);
-            showMessage('ok', minutes > 0 ? ('已设置自动删除为 ' + minutes + ' 分钟') : '已关闭自动删除');
+            showMessage('ok', (minutes > 0 ? ('已设置自动删除为 ' + minutes + ' 分钟') : '已关闭自动删除') + '，并已推送到对端');
             await refreshMessages();
             renderConversations();
             renderMessages();

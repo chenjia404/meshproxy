@@ -3,12 +3,14 @@ package chat
 import "time"
 
 const (
-	MessageTypeSessionRequest = "session_request"
-	MessageTypeSessionAccept  = "session_accept"
-	MessageTypeSessionReject  = "session_reject"
-	MessageTypeChatText       = "chat_text"
-	MessageTypeDeliveryAck    = "delivery_ack"
-	MessageTypeMessageRevoke  = "message_revoke"
+	MessageTypeSessionRequest  = "session_request"
+	MessageTypeSessionAccept   = "session_accept"
+	MessageTypeSessionReject   = "session_reject"
+	MessageTypeChatText        = "chat_text"
+	MessageTypeDeliveryAck     = "delivery_ack"
+	MessageTypeMessageRevoke   = "message_revoke"
+	MessageTypeRetentionUpdate = "retention_update"
+	MessageTypeRetentionAck    = "retention_ack"
 )
 
 const (
@@ -64,15 +66,17 @@ type Request struct {
 }
 
 type Conversation struct {
-	ConversationID    string    `json:"conversation_id"`
-	PeerID            string    `json:"peer_id"`
-	State             string    `json:"state"`
-	LastMessageAt     time.Time `json:"last_message_at"`
-	LastTransportMode string    `json:"last_transport_mode"`
-	UnreadCount       int       `json:"unread_count"`
-	RetentionMinutes  int       `json:"retention_minutes"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ConversationID     string    `json:"conversation_id"`
+	PeerID             string    `json:"peer_id"`
+	State              string    `json:"state"`
+	LastMessageAt      time.Time `json:"last_message_at"`
+	LastTransportMode  string    `json:"last_transport_mode"`
+	UnreadCount        int       `json:"unread_count"`
+	RetentionMinutes   int       `json:"retention_minutes"`
+	RetentionSyncState string    `json:"retention_sync_state"`
+	RetentionSyncedAt  time.Time `json:"retention_synced_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Message struct {
@@ -146,4 +150,22 @@ type MessageRevoke struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	RevokedAtUnix  int64  `json:"revoked_at_unix"`
+}
+
+type RetentionAck struct {
+	Type             string `json:"type"`
+	ConversationID   string `json:"conversation_id"`
+	FromPeerID       string `json:"from_peer_id"`
+	ToPeerID         string `json:"to_peer_id"`
+	RetentionMinutes int    `json:"retention_minutes"`
+	AckedAtUnix      int64  `json:"acked_at_unix"`
+}
+
+type RetentionUpdate struct {
+	Type             string `json:"type"`
+	ConversationID   string `json:"conversation_id"`
+	FromPeerID       string `json:"from_peer_id"`
+	ToPeerID         string `json:"to_peer_id"`
+	RetentionMinutes int    `json:"retention_minutes"`
+	UpdatedAtUnix    int64  `json:"updated_at_unix"`
 }

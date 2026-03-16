@@ -98,6 +98,8 @@ func (s *Store) migrate() error {
 			last_transport_mode TEXT NOT NULL,
 			unread_count INTEGER NOT NULL,
 			retention_minutes INTEGER NOT NULL DEFAULT 0,
+			retention_sync_state TEXT NOT NULL DEFAULT 'synced',
+			retention_synced_at TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
@@ -142,6 +144,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureConversationRetentionColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureConversationRetentionSyncColumns(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -165,6 +170,42 @@ func (s *Store) ensureConversationRetentionColumn() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_minutes INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+func (s *Store) ensureConversationRetentionSyncColumns() error {
+	rows, err := s.db.Query(`PRAGMA table_info(conversations)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasState := false
+	hasAt := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "retention_sync_state" {
+			hasState = true
+		}
+		if name == "retention_synced_at" {
+			hasAt = true
+		}
+	}
+	if !hasState {
+		if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_sync_state TEXT NOT NULL DEFAULT 'synced'`); err != nil {
+			return err
+		}
+	}
+	if !hasAt {
+		if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_synced_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureProfile(localPeerID string) error {
@@ -376,9 +417,9 @@ func (s *Store) UpdateRequestState(requestID, state, conversationID string) erro
 func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conversation, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
-	`, conv.ConversationID, conv.PeerID, conv.State, now, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, now, now)
+		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	`, conv.ConversationID, conv.PeerID, conv.State, now, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), now, now)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -395,12 +436,14 @@ func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conver
 func (s *Store) GetConversation(id string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,created_at,updated_at FROM conversations WHERE conversation_id=?`, id).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &createdAt, &updatedAt)
+	var retentionSyncedAt string
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE conversation_id=?`, id).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
 	if err != nil {
 		return Conversation{}, err
 	}
 	c.LastMessageAt = parseDBTime(lastMessageAt)
+	c.RetentionSyncedAt = parseDBTime(retentionSyncedAt)
 	c.CreatedAt = parseDBTime(createdAt)
 	c.UpdatedAt = parseDBTime(updatedAt)
 	return c, nil
@@ -409,19 +452,21 @@ func (s *Store) GetConversation(id string) (Conversation, error) {
 func (s *Store) GetConversationByPeer(peerID string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,created_at,updated_at FROM conversations WHERE peer_id=?`, peerID).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &createdAt, &updatedAt)
+	var retentionSyncedAt string
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE peer_id=?`, peerID).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
 	if err != nil {
 		return Conversation{}, err
 	}
 	c.LastMessageAt = parseDBTime(lastMessageAt)
+	c.RetentionSyncedAt = parseDBTime(retentionSyncedAt)
 	c.CreatedAt = parseDBTime(createdAt)
 	c.UpdatedAt = parseDBTime(updatedAt)
 	return c, nil
 }
 
 func (s *Store) ListConversations() ([]Conversation, error) {
-	rows, err := s.db.Query(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,created_at,updated_at FROM conversations ORDER BY updated_at DESC`)
+	rows, err := s.db.Query(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -429,11 +474,12 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	var out []Conversation
 	for rows.Next() {
 		var c Conversation
-		var lastMessageAt, createdAt, updatedAt string
-		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &createdAt, &updatedAt); err != nil {
+		var lastMessageAt, retentionSyncedAt, createdAt, updatedAt string
+		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		c.LastMessageAt = parseDBTime(lastMessageAt)
+		c.RetentionSyncedAt = parseDBTime(retentionSyncedAt)
 		c.CreatedAt = parseDBTime(createdAt)
 		c.UpdatedAt = parseDBTime(updatedAt)
 		out = append(out, c)
@@ -527,6 +573,15 @@ func (s *Store) UpdateConversationRetention(conversationID string, minutes int) 
 	return s.GetConversation(conversationID)
 }
 
+func (s *Store) UpdateConversationRetentionSync(conversationID, syncState string, syncedAt time.Time) error {
+	if syncState == "" {
+		syncState = "synced"
+	}
+	_, err := s.db.Exec(`UPDATE conversations SET retention_sync_state=?, retention_synced_at=?, updated_at=? WHERE conversation_id=?`,
+		syncState, formatDBTime(syncedAt), time.Now().UTC().Format(time.RFC3339Nano), conversationID)
+	return err
+}
+
 func (s *Store) CleanupExpiredMessages(now time.Time) error {
 	rows, err := s.db.Query(`SELECT conversation_id, retention_minutes FROM conversations WHERE retention_minutes > 0`)
 	if err != nil {
@@ -599,6 +654,20 @@ func parseDBTime(v string) time.Time {
 	}
 	t, _ := time.Parse(time.RFC3339Nano, v)
 	return t
+}
+
+func formatDBTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func firstNonEmpty(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 func shortPeerID(v string) string {

@@ -85,7 +85,29 @@ func (s *Service) ListConversations() ([]Conversation, error) {
 }
 
 func (s *Service) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
-	return s.store.UpdateConversationRetention(conversationID, minutes)
+	conv, err := s.store.GetConversation(conversationID)
+	if err != nil {
+		return Conversation{}, err
+	}
+	update := RetentionUpdate{
+		Type:             MessageTypeRetentionUpdate,
+		ConversationID:   conversationID,
+		FromPeerID:       s.localPeer,
+		ToPeerID:         conv.PeerID,
+		RetentionMinutes: minutes,
+		UpdatedAtUnix:    time.Now().UnixMilli(),
+	}
+	if err := s.sendEnvelope(conv.PeerID, update); err != nil {
+		return Conversation{}, err
+	}
+	updated, err := s.store.UpdateConversationRetention(conversationID, minutes)
+	if err != nil {
+		return Conversation{}, err
+	}
+	if err := s.store.UpdateConversationRetentionSync(conversationID, "pending", time.Time{}); err != nil {
+		return Conversation{}, err
+	}
+	return s.store.GetConversation(updated.ConversationID)
 }
 
 func (s *Service) ListContacts() ([]Contact, error) {
@@ -580,6 +602,10 @@ func protocolForEnvelope(v any) coreprotocol.ID {
 		return p2p.ProtocolChatMsg
 	case DeliveryAck, *DeliveryAck:
 		return p2p.ProtocolChatAck
+	case RetentionAck, *RetentionAck:
+		return p2p.ProtocolChatAck
+	case RetentionUpdate, *RetentionUpdate:
+		return p2p.ProtocolChatMsg
 	default:
 		return p2p.ProtocolChatMsg
 	}
@@ -745,6 +771,33 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+	case MessageTypeRetentionUpdate:
+		var update RetentionUpdate
+		if err := remarshal(env, &update); err != nil {
+			return err
+		}
+		conv, err := s.store.UpdateConversationRetention(update.ConversationID, update.RetentionMinutes)
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpdateConversationRetentionSync(update.ConversationID, "synced", time.Now()); err != nil {
+			return err
+		}
+		ack := RetentionAck{
+			Type:             MessageTypeRetentionAck,
+			ConversationID:   update.ConversationID,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         update.FromPeerID,
+			RetentionMinutes: conv.RetentionMinutes,
+			AckedAtUnix:      time.Now().UnixMilli(),
+		}
+		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeRetentionAck:
+		var ack RetentionAck
+		if err := remarshal(env, &ack); err != nil {
+			return err
+		}
+		return s.store.UpdateConversationRetentionSync(ack.ConversationID, "synced", time.UnixMilli(ack.AckedAtUnix))
 	default:
 		return nil
 	}
@@ -807,6 +860,33 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 			return err
 		}
 		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+	case MessageTypeRetentionUpdate:
+		var update RetentionUpdate
+		if err := remarshal(env, &update); err != nil {
+			return err
+		}
+		conv, err := s.store.UpdateConversationRetention(update.ConversationID, update.RetentionMinutes)
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpdateConversationRetentionSync(update.ConversationID, "synced", time.Now()); err != nil {
+			return err
+		}
+		ack := RetentionAck{
+			Type:             MessageTypeRetentionAck,
+			ConversationID:   update.ConversationID,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         update.FromPeerID,
+			RetentionMinutes: conv.RetentionMinutes,
+			AckedAtUnix:      time.Now().UnixMilli(),
+		}
+		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeRetentionAck:
+		var ack RetentionAck
+		if err := remarshal(env, &ack); err != nil {
+			return err
+		}
+		return s.store.UpdateConversationRetentionSync(ack.ConversationID, "synced", time.UnixMilli(ack.AckedAtUnix))
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
