@@ -10,4 +10,10 @@ const (
 	ProtocolPeerX        protocol.ID = "/meshproxy/peer-exchange/1.0.0"
 	ProtocolSocks5       protocol.ID = "/meshproxy/socks5-tunnel/1.0.0"
 	ProtocolRawTunnelE2E protocol.ID = "/meshproxy/raw-tunnel-e2e/1.0.0"
+	ProtocolChatRequest  protocol.ID = "/meshproxy/chat/request/1.0.0"
+	ProtocolChatMsg      protocol.ID = "/meshproxy/chat/msg/1.0.0"
+	ProtocolChatAck      protocol.ID = "/meshproxy/chat/ack/1.0.0"
+	ProtocolChatPresence protocol.ID = "/meshproxy/chat/presence/1.0.0"
+	ProtocolChatRelayE2E protocol.ID = "/meshproxy/chat/relay-e2e/1.0.0"
+	ProtocolChatVoiceSig protocol.ID = "/meshproxy/chat/voice-signal/1.0.0"
 )

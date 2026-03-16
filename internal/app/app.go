@@ -18,6 +18,7 @@ import (
 	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"github.com/chenjia404/meshproxy/internal/api"
+	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/client"
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
@@ -50,6 +51,7 @@ type App struct {
 	socks5     *client.Socks5Server
 	exitSocks5 *exit.Socks5Server
 	localAPI   *api.LocalAPI
+	chat       *chat.Service
 
 	circuitStore   *store.CircuitStore
 	pathSelector   *client.PathSelector
@@ -172,6 +174,12 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a.streamMgr = streamMgr
 	a.recentErrors = api.NewRecentErrorsStore(100)
 
+	chatSvc, err := chat.NewService(ctx, filepath.Join(cfg.DataDir, "chat.db"), a.Host(), h.Routing, discoveryStore)
+	if err != nil {
+		return nil, fmt.Errorf("init chat service: %w", err)
+	}
+	a.chat = chatSvc
+
 	// Path selector and circuit manager
 	localPeerID := a.PeerID()
 	selector := client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
@@ -266,6 +274,24 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	} else if relaySvc != nil {
 		a.Host().SetStreamHandler(p2p.ProtocolRawTunnelE2E, relaySvc.HandleRawTunnelStream)
 	}
+	if chatSvc != nil && relaySvc != nil {
+		a.Host().SetStreamHandler(p2p.ProtocolChatRelayE2E, func(str network.Stream) {
+			var header tunnel.RouteHeader
+			if err := tunnel.ReadJSONFrame(str, &header); err != nil {
+				_ = str.Close()
+				return
+			}
+			if len(header.Path) == 0 || header.HopIndex < 0 || header.HopIndex >= len(header.Path) {
+				_ = str.Close()
+				return
+			}
+			if header.HopIndex < len(header.Path)-1 {
+				relaySvc.HandleChatRelayStreamWithHeader(str, header)
+				return
+			}
+			chatSvc.HandleRelayE2EStreamWithHeader(str, header)
+		})
+	}
 
 	socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
 	socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
@@ -291,6 +317,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		ExitCountryResolver: selector,
 		ConfigPath:          cfg.ConfigFilePath,
 		ExitService:         exitSvc,
+		ChatService:         chatSvc,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()
@@ -311,6 +338,11 @@ func (a *App) Run() error {
 	}
 	if err := a.socks5.Close(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if a.chat != nil {
+		if err := a.chat.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if a.exitSocks5 != nil {
 		if err := a.exitSocks5.Close(); err != nil && firstErr == nil {

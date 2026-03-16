@@ -13,6 +13,7 @@ import (
 	host "github.com/libp2p/go-libp2p/core/host"
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	coreprotocol "github.com/libp2p/go-libp2p/core/protocol"
 
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
@@ -58,6 +59,17 @@ func (s *Service) HandleRawTunnelStream(str network.Stream) {
 // already been consumed by an outer dispatcher.
 func (s *Service) HandleRawTunnelStreamWithHeader(str network.Stream, header tunnel.RouteHeader) {
 	safe.Go("relay.serveRawTunnelWithHeader", func() { s.serveRawTunnelWithHeader(str, header) })
+}
+
+// HandleChatRelayStream forwards chat relay-e2e streams to the next hop.
+func (s *Service) HandleChatRelayStream(str network.Stream) {
+	safe.Go("relay.serveChatRelay", func() { s.serveChatRelay(str) })
+}
+
+// HandleChatRelayStreamWithHeader continues handling after the route header has
+// already been consumed by an outer dispatcher.
+func (s *Service) HandleChatRelayStreamWithHeader(str network.Stream, header tunnel.RouteHeader) {
+	safe.Go("relay.serveChatRelayWithHeader", func() { s.serveChatRelayWithHeader(str, header) })
 }
 
 // serveStream 與客戶端完成密鑰協商後，循環處理 OnionData：解一層，轉發內層給 next_hop。
@@ -183,6 +195,24 @@ func (s *Service) serveRawTunnel(str network.Stream) {
 }
 
 func (s *Service) serveRawTunnelWithHeader(str network.Stream, header tunnel.RouteHeader) {
+	s.servePassthroughTunnelWithHeader(str, header, p2p.ProtocolRawTunnelE2E)
+}
+
+func (s *Service) serveChatRelay(str network.Stream) {
+	defer str.Close()
+
+	var header tunnel.RouteHeader
+	if err := tunnel.ReadJSONFrame(str, &header); err != nil {
+		return
+	}
+	s.serveChatRelayWithHeader(str, header)
+}
+
+func (s *Service) serveChatRelayWithHeader(str network.Stream, header tunnel.RouteHeader) {
+	s.servePassthroughTunnelWithHeader(str, header, p2p.ProtocolChatRelayE2E)
+}
+
+func (s *Service) servePassthroughTunnelWithHeader(str network.Stream, header tunnel.RouteHeader, protocolID coreprotocol.ID) {
 	if len(header.Path) == 0 || header.HopIndex < 0 || header.HopIndex >= len(header.Path) {
 		return
 	}
@@ -199,7 +229,7 @@ func (s *Service) serveRawTunnelWithHeader(str network.Stream, header tunnel.Rou
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	nextStr, err := s.host.NewStream(ctx, nextPeerID, p2p.ProtocolRawTunnelE2E)
+	nextStr, err := s.host.NewStream(ctx, nextPeerID, protocolID)
 	if err != nil {
 		return
 	}

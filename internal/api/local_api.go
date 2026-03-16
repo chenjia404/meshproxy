@@ -6,8 +6,10 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
@@ -15,7 +17,8 @@ import (
 )
 
 //go:generate go run ../tools/syncconsole
-//go:embed console/*
+//go:generate go run ../tools/syncchatui
+//go:embed console/* chat/*
 var consoleFS embed.FS
 
 // StatusProvider defines the subset of application state required by the local API.
@@ -151,6 +154,28 @@ type LocalAPIOpts struct {
 	ConfigPath string
 	// ExitService 僅在 mode=relay+exit 時非空，用於出口策略/狀態 API。
 	ExitService *exit.Service
+	// ChatService provides first-stage direct chat APIs.
+	ChatService ChatProvider
+}
+
+// ChatProvider exposes direct chat functions to the local API.
+type ChatProvider interface {
+	GetProfile() (chat.Profile, error)
+	UpdateProfile(nickname string) (chat.Profile, error)
+	ListContacts() ([]chat.Contact, error)
+	UpdateContactNickname(peerID, nickname string) (chat.Contact, error)
+	SetContactBlocked(peerID string, blocked bool) (chat.Contact, error)
+	ListRequests() ([]chat.Request, error)
+	SendRequest(toPeerID, introText string) (chat.Request, error)
+	AcceptRequest(requestID string) (chat.Conversation, error)
+	RejectRequest(requestID string) error
+	ListConversations() ([]chat.Conversation, error)
+	ListMessages(conversationID string) ([]chat.Message, error)
+	SendText(conversationID, text string) (chat.Message, error)
+	ConnectPeer(peerID string) error
+	PeerStatus(peerID string) (map[string]any, error)
+	NetworkStatus() map[string]any
+	Close() error
 }
 
 // PoolStatusProvider returns current circuit pool status.
@@ -172,6 +197,7 @@ type LocalAPI struct {
 	opts            *LocalAPIOpts
 	server          *http.Server
 	consoleHTML     []byte // embedded console index.html, served directly to avoid redirect
+	chatHTML        []byte // embedded chat index.html, served directly to avoid redirect
 }
 
 // NewLocalAPI creates a new LocalAPI instance. opts may be nil for minimal API.
@@ -195,6 +221,16 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/client/exit-selection", api.handleExitSelection)
 	mux.HandleFunc("/api/v1/client/exit-candidates", api.handleExitCandidates)
 	mux.HandleFunc("/api/v1/client/circuit-pool", api.handleCircuitPoolConfig)
+	mux.HandleFunc("/api/v1/chat/me", api.handleChatMe)
+	mux.HandleFunc("/api/v1/chat/profile", api.handleChatProfile)
+	mux.HandleFunc("/api/v1/chat/contacts", api.handleChatContacts)
+	mux.HandleFunc("/api/v1/chat/contacts/", api.handleChatContactItem)
+	mux.HandleFunc("/api/v1/chat/requests", api.handleChatRequests)
+	mux.HandleFunc("/api/v1/chat/requests/", api.handleChatRequestItem)
+	mux.HandleFunc("/api/v1/chat/conversations", api.handleChatConversations)
+	mux.HandleFunc("/api/v1/chat/conversations/", api.handleChatConversationItem)
+	mux.HandleFunc("/api/v1/chat/network/status", api.handleChatNetworkStatus)
+	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
 		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
@@ -208,6 +244,11 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 		consoleHTML, _ = fs.ReadFile(sub, "index.html")
 	}
 	api.consoleHTML = consoleHTML
+	var chatHTML []byte
+	if sub, err := fs.Sub(consoleFS, "chat"); err == nil {
+		chatHTML, _ = fs.ReadFile(sub, "index.html")
+	}
+	api.chatHTML = chatHTML
 
 	// Wrap mux to serve /console and /console/ with 200 + body (never redirect)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +258,16 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
 				w.Write(api.consoleHTML)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		if path == "/chat" || path == "/chat/" {
+			if len(api.chatHTML) > 0 {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				w.Write(api.chatHTML)
 				return
 			}
 			http.NotFound(w, r)
@@ -689,6 +740,301 @@ func (a *LocalAPI) handleExitResume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]string{"status": "resume"})
+}
+
+func (a *LocalAPI) handleChatMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	profile, err := a.opts.ChatService.GetProfile()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, profile)
+}
+
+func (a *LocalAPI) handleChatProfile(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		profile, err := a.opts.ChatService.GetProfile()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, profile)
+	case http.MethodPost:
+		var body struct {
+			Nickname string `json:"nickname"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		profile, err := a.opts.ChatService.UpdateProfile(body.Nickname)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, profile)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleChatRequests(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		reqs, err := a.opts.ChatService.ListRequests()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, reqs)
+	case http.MethodPost:
+		var body struct {
+			ToPeerID  string `json:"to_peer_id"`
+			IntroText string `json:"intro_text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		req, err := a.opts.ChatService.SendRequest(body.ToPeerID, body.IntroText)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, req)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleChatContacts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	contacts, err := a.opts.ChatService.ListContacts()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, contacts)
+}
+
+func (a *LocalAPI) handleChatContactItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/contacts/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	peerID, action := parts[0], parts[1]
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	switch action {
+	case "nickname":
+		var body struct {
+			Nickname string `json:"nickname"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		contact, err := a.opts.ChatService.UpdateContactNickname(peerID, body.Nickname)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, contact)
+	case "block":
+		var body struct {
+			Blocked bool `json:"blocked"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		contact, err := a.opts.ChatService.SetContactBlocked(peerID, body.Blocked)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, contact)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *LocalAPI) handleChatConversations(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		convs, err := a.opts.ChatService.ListConversations()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, convs)
+	case http.MethodPost:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleChatRequestItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/requests/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	requestID, action := parts[0], parts[1]
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	switch action {
+	case "accept":
+		conv, err := a.opts.ChatService.AcceptRequest(requestID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, conv)
+	case "reject":
+		if err := a.opts.ChatService.RejectRequest(requestID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "rejected"})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[1] != "messages" {
+		http.NotFound(w, r)
+		return
+	}
+	conversationID := parts[0]
+	switch r.Method {
+	case http.MethodGet:
+		msgs, err := a.opts.ChatService.ListMessages(conversationID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, msgs)
+	case http.MethodPost:
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		msg, err := a.opts.ChatService.SendText(conversationID, body.Text)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, msg)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleChatNetworkStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, a.opts.ChatService.NetworkStatus())
+}
+
+func (a *LocalAPI) handleChatPeerRoutes(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/peers/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	peerID := parts[0]
+	action := parts[1]
+	switch action {
+	case "status":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		resp, err := a.opts.ChatService.PeerStatus(peerID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resp)
+	case "connect":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.opts.ChatService.ConnectPeer(peerID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "connected"})
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>meshproxy 聊天</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 1rem; }
+    h1 { margin: 0 0 1rem; font-size: 1.35rem; }
+    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 1rem; }
+    .stack { display: grid; gap: 1rem; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .card h2 { margin: 0 0 0.75rem; font-size: 0.95rem; color: var(--muted); }
+    .kv { display: grid; grid-template-columns: 120px 1fr; gap: 0.4rem 0.8rem; font-size: 0.9rem; }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; word-break: break-all; }
+    .form-row { margin-bottom: 0.75rem; }
+    .form-row label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.25rem; }
+    .form-row input, .form-row textarea { width: 100%; padding: 0.45rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .form-row textarea { min-height: 86px; resize: vertical; }
+    .btn { border: none; border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; }
+    .btn-primary { background: var(--accent); color: #08111c; }
+    .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn-danger { background: rgba(248,81,73,0.16); color: var(--err); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .list { display: grid; gap: 0.5rem; }
+    .item { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; background: rgba(255,255,255,0.02); }
+    .item.active { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+    .item h3 { margin: 0 0 0.25rem; font-size: 0.92rem; }
+    .muted { color: var(--muted); font-size: 0.82rem; }
+    .msg { padding: 0.55rem 0.7rem; border-radius: 6px; margin-bottom: 0.8rem; }
+    .msg.ok { background: rgba(63,185,80,0.12); color: var(--ok); }
+    .msg.err { background: rgba(248,81,73,0.12); color: var(--err); }
+    .msg.info { background: rgba(88,166,255,0.12); color: var(--accent); }
+    .chat-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 70vh; }
+    .messages { display: grid; gap: 0.6rem; max-height: 60vh; overflow: auto; padding-right: 0.2rem; }
+    .bubble { border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem; }
+    .bubble.outbound { background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.25); }
+    .bubble.inbound { background: rgba(255,255,255,0.03); }
+    .bubble .meta { color: var(--muted); font-size: 0.78rem; margin-bottom: 0.3rem; }
+    .composer textarea { min-height: 100px; }
+    code { font-family: ui-monospace, monospace; }
+    .empty { color: var(--muted); font-style: italic; }
+    .status-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.5rem; }
+    .badge { display: inline-flex; align-items: center; padding: 0.18rem 0.55rem; border-radius: 999px; font-size: 0.78rem; border: 1px solid transparent; }
+    .badge.direct { background: rgba(63,185,80,0.12); color: var(--ok); border-color: rgba(63,185,80,0.25); }
+    .badge.relay { background: rgba(88,166,255,0.12); color: var(--accent); border-color: rgba(88,166,255,0.25); }
+    .badge.offline { background: rgba(248,81,73,0.12); color: var(--err); border-color: rgba(248,81,73,0.25); }
+    .badge.msg-local { background: rgba(255,255,255,0.06); color: var(--muted); border-color: rgba(255,255,255,0.12); }
+    .badge.msg-sent { background: rgba(88,166,255,0.12); color: var(--accent); border-color: rgba(88,166,255,0.25); }
+    .badge.msg-delivered { background: rgba(63,185,80,0.12); color: var(--ok); border-color: rgba(63,185,80,0.25); }
+    .badge.msg-failed { background: rgba(248,81,73,0.12); color: var(--err); border-color: rgba(248,81,73,0.25); }
+    .refresh-bar { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; margin: 0 0 1rem; color: var(--muted); font-size: 0.82rem; }
+    .refresh-pill { padding: 0.2rem 0.55rem; border-radius: 999px; background: rgba(255,255,255,0.04); }
+    .contact-actions { margin-top: 0.6rem; display: grid; gap: 0.45rem; }
+    .contact-actions input { width: 100%; padding: 0.4rem 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .contact-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
+    @media (max-width: 920px) {
+      .grid { grid-template-columns: 1fr; }
+      .chat-layout { min-height: auto; }
+      .messages { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>聊天</h1>
+    <div id="global-msg"></div>
+    <div class="refresh-bar">
+      <div id="refresh-status" class="refresh-pill">自动刷新：初始化中…</div>
+      <div id="refresh-hint"></div>
+    </div>
+    <div class="grid">
+      <div class="stack">
+        <section class="card" id="profile-card"></section>
+        <section class="card" id="network-card"></section>
+        <section class="card" id="request-send-card"></section>
+        <section class="card" id="request-list-card"></section>
+      </div>
+      <div class="stack">
+        <section class="card" id="conversation-list-card"></section>
+        <section class="card chat-layout">
+          <div id="conversation-header"></div>
+          <div id="messages" class="messages"></div>
+          <div id="composer" class="composer"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <script>
+    const state = {
+      me: null,
+      contacts: [],
+      requests: [],
+      conversations: [],
+      selectedConversationId: '',
+      messages: [],
+      network: null,
+      peerStatus: null,
+      lastRefreshAt: null,
+      previousRequestCount: 0,
+      previousMessageCount: 0,
+      composerDrafts: {},
+      composerConversationId: '',
+      contactNicknameDrafts: {},
+    };
+
+    function api(path) { return path; }
+    function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
+    function post(path, body) {
+      return fetch(api(path), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined
+      }).then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        return data;
+      });
+    }
+
+    function showMessage(kind, text) {
+      document.getElementById('global-msg').innerHTML = '<div class="msg ' + kind + '">' + escapeHtml(text) + '</div>';
+      setTimeout(() => {
+        const el = document.getElementById('global-msg');
+        if (el) el.innerHTML = '';
+      }, 3000);
+    }
+
+    function escapeHtml(value) {
+      if (value == null) return '';
+      const div = document.createElement('div');
+      div.textContent = value;
+      return div.innerHTML;
+    }
+
+    function shortPeer(peerID) {
+      if (!peerID) return '-';
+      return peerID.length > 20 ? peerID.slice(0, 20) + '…' : peerID;
+    }
+
+    function displayName(peerID, fallback) {
+      const contact = (state.contacts || []).find(c => c.peer_id === peerID);
+      if (contact && contact.nickname) return contact.nickname;
+      return fallback || shortPeer(peerID);
+    }
+
+    function formatTime(value) {
+      if (!value) return '-';
+      const d = new Date(value);
+      if (Number.isNaN(d.valueOf())) return '-';
+      return d.toLocaleString();
+    }
+
+    function messageStateBadge(state) {
+      if (state === 'delivered_remote') return '<span class="badge msg-delivered">已送达</span>';
+      if (state === 'sent_to_transport') return '<span class="badge msg-sent">已发送</span>';
+      if (state === 'failed') return '<span class="badge msg-failed">失败</span>';
+      return '<span class="badge msg-local">' + escapeHtml(state || '本地') + '</span>';
+    }
+
+    function renderRefreshStatus() {
+      const statusEl = document.getElementById('refresh-status');
+      const hintEl = document.getElementById('refresh-hint');
+      if (statusEl) {
+        statusEl.textContent = '自动刷新：' + (state.lastRefreshAt ? formatTime(state.lastRefreshAt) : '尚未完成');
+      }
+      if (hintEl && !hintEl.textContent) {
+        hintEl.textContent = '每 5 秒同步请求箱、会话和消息';
+      }
+    }
+
+    function flashRefreshHint(text) {
+      const hintEl = document.getElementById('refresh-hint');
+      if (!hintEl) return;
+      hintEl.textContent = text;
+      setTimeout(() => {
+        if (hintEl.textContent === text) {
+          hintEl.textContent = '每 5 秒同步请求箱、会话和消息';
+        }
+      }, 3000);
+    }
+
+    function renderProfile() {
+      const me = state.me;
+      if (!me) {
+        document.getElementById('profile-card').innerHTML = '<h2>本机资料</h2><p class="empty">加载中…</p>';
+        return;
+      }
+      document.getElementById('profile-card').innerHTML =
+        '<h2>本机资料</h2>' +
+        '<dl class="kv">' +
+          '<dt>Peer ID</dt><dd><code>' + escapeHtml(me.peer_id) + '</code></dd>' +
+          '<dt>昵称</dt><dd>' + escapeHtml(me.nickname || '-') + '</dd>' +
+          '<dt>Chat KEX</dt><dd><code>' + escapeHtml(shortPeer(me.chat_kex_pub)) + '</code></dd>' +
+        '</dl>' +
+        '<div class="form-row"><label>修改昵称</label><input id="nickname-input" type="text" value="' + escapeHtml(me.nickname || '') + '" placeholder="输入昵称"></div>' +
+        '<div class="actions"><button class="btn btn-primary" id="save-nickname-btn">保存昵称</button></div>';
+      document.getElementById('save-nickname-btn').onclick = async () => {
+        const nickname = document.getElementById('nickname-input').value.trim();
+        try {
+          state.me = await post('/api/v1/chat/profile', { nickname });
+          renderProfile();
+          showMessage('ok', '昵称已保存');
+        } catch (err) {
+          showMessage('err', '保存昵称失败: ' + err.message);
+        }
+      };
+    }
+
+    function renderNetwork() {
+      const data = state.network;
+      document.getElementById('network-card').innerHTML =
+        '<h2>网络状态</h2>' +
+        (!data ? '<p class="empty">加载中…</p>' :
+        '<dl class="kv">' +
+          '<dt>本机 Peer</dt><dd><code>' + escapeHtml(data.local_peer_id || '-') + '</code></dd>' +
+          '<dt>连接数</dt><dd>' + escapeHtml(String(data.connected_peers ?? '-')) + '</dd>' +
+        '</dl>');
+    }
+
+    function renderRequestSend() {
+      document.getElementById('request-send-card').innerHTML =
+        '<h2>发起聊天请求</h2>' +
+        '<div class="form-row"><label>目标 Peer ID</label><input id="request-peer-id" type="text" placeholder="12D3KooW..."></div>' +
+        '<div class="form-row"><label>附言</label><textarea id="request-intro" placeholder="输入一段简短的自我介绍"></textarea></div>' +
+        '<div class="actions">' +
+          '<button class="btn btn-secondary" id="connect-peer-btn">先尝试连接</button>' +
+          '<button class="btn btn-primary" id="send-request-btn">发送请求</button>' +
+        '</div>';
+      document.getElementById('connect-peer-btn').onclick = async () => {
+        const peerID = document.getElementById('request-peer-id').value.trim();
+        if (!peerID) return;
+        try {
+          await post('/api/v1/chat/peers/' + encodeURIComponent(peerID) + '/connect');
+          showMessage('ok', '已尝试连接目标 peer');
+        } catch (err) {
+          showMessage('err', '连接失败: ' + err.message);
+        }
+      };
+      document.getElementById('send-request-btn').onclick = async () => {
+        const toPeerID = document.getElementById('request-peer-id').value.trim();
+        const introText = document.getElementById('request-intro').value.trim();
+        if (!toPeerID) return;
+        try {
+          await post('/api/v1/chat/requests', { to_peer_id: toPeerID, intro_text: introText });
+          showMessage('ok', '聊天请求已发送');
+          document.getElementById('request-intro').value = '';
+          await refreshRequests();
+        } catch (err) {
+          showMessage('err', '发送请求失败: ' + err.message);
+        }
+      };
+    }
+
+    function renderContacts() {
+      const list = state.contacts || [];
+      let html = '<h2>联系人</h2>';
+      if (!list.length) {
+        html += '<p class="empty">暂无联系人</p>';
+      } else {
+        html += '<div class="list">';
+        html += list.map(contact => (
+          '<div class="item">' +
+            '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
+            '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
+            '<div class="muted">最后活跃：' + escapeHtml(formatTime(contact.last_seen_at)) + '</div>' +
+            '<div class="muted">状态：' + (contact.blocked ? '已拉黑' : '正常') + '</div>' +
+            '<div class="contact-actions">' +
+              '<input type="text" data-contact-nickname="' + escapeHtml(contact.peer_id) + '" value="' + escapeHtml((state.contactNicknameDrafts[contact.peer_id] != null ? state.contactNicknameDrafts[contact.peer_id] : (contact.nickname || ''))) + '" placeholder="修改备注名">' +
+              '<div class="actions">' +
+                '<button type="button" class="btn btn-primary" data-open-contact="' + escapeHtml(contact.peer_id) + '">发起会话</button>' +
+                '<button type="button" class="btn btn-secondary" data-save-contact="' + escapeHtml(contact.peer_id) + '">保存备注</button>' +
+                '<button type="button" class="btn ' + (contact.blocked ? 'btn-secondary' : 'btn-danger') + '" data-block-contact="' + escapeHtml(contact.peer_id) + '" data-blocked="' + (contact.blocked ? '1' : '0') + '">' + (contact.blocked ? '取消拉黑' : '拉黑') + '</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>'
+        )).join('');
+        html += '</div>';
+      }
+      const existing = document.getElementById('contact-list-card');
+      if (existing) {
+        existing.innerHTML = html;
+      } else {
+        const card = document.createElement('section');
+        card.className = 'card';
+        card.id = 'contact-list-card';
+        card.innerHTML = html;
+        document.querySelector('.stack').appendChild(card);
+      }
+      document.querySelectorAll('[data-contact-nickname]').forEach(input => {
+        input.addEventListener('input', () => {
+          state.contactNicknameDrafts[input.dataset.contactNickname] = input.value;
+        });
+      });
+      document.querySelectorAll('[data-save-contact]').forEach(btn => {
+        btn.onclick = async () => {
+          const peerID = btn.dataset.saveContact;
+          const input = Array.from(document.querySelectorAll('[data-contact-nickname]')).find(el => el.dataset.contactNickname === peerID);
+          const nickname = input ? input.value.trim() : '';
+          try {
+            const saved = await post('/api/v1/chat/contacts/' + encodeURIComponent(peerID) + '/nickname', { nickname });
+            state.contactNicknameDrafts[peerID] = saved && typeof saved.nickname === 'string' ? saved.nickname : nickname;
+            showMessage('ok', '备注名已保存');
+            await refreshContacts();
+            renderConversations();
+            renderMessages();
+          } catch (err) {
+            showMessage('err', '保存备注失败: ' + err.message);
+          }
+        };
+      });
+      document.querySelectorAll('[data-block-contact]').forEach(btn => {
+        btn.onclick = async () => {
+          const peerID = btn.dataset.blockContact;
+          const blocked = btn.dataset.blocked !== '1';
+          try {
+            await post('/api/v1/chat/contacts/' + encodeURIComponent(peerID) + '/block', { blocked });
+            showMessage('ok', blocked ? '联系人已拉黑' : '已取消拉黑');
+            await refreshContacts();
+            renderConversations();
+            renderMessages();
+          } catch (err) {
+            showMessage('err', '更新拉黑状态失败: ' + err.message);
+          }
+        };
+      });
+      document.querySelectorAll('[data-open-contact]').forEach(btn => {
+        btn.onclick = async () => {
+          const peerID = btn.dataset.openContact;
+          await openConversationByPeer(peerID);
+        };
+      });
+    }
+
+    async function openConversationByPeer(peerID) {
+      const conv = (state.conversations || []).find(item => item.peer_id === peerID);
+      if (conv) {
+        state.selectedConversationId = conv.conversation_id;
+        renderConversations();
+        await refreshMessages();
+        showMessage('ok', '已打开会话');
+        const composer = document.getElementById('composer-text');
+        if (composer) composer.focus();
+        const chatCard = document.getElementById('conversation-header');
+        if (chatCard) chatCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      const requestInput = document.getElementById('request-peer-id');
+      const introInput = document.getElementById('request-intro');
+      if (requestInput) requestInput.value = peerID;
+      if (introInput && !introInput.value.trim()) {
+        introInput.value = '你好，我想和你开始聊天。';
+      }
+      try {
+        await post('/api/v1/chat/peers/' + encodeURIComponent(peerID) + '/connect');
+        showMessage('ok', '未找到现成会话，已填入联系人并尝试连接，请发送聊天请求');
+      } catch (err) {
+        showMessage('info', '未找到现成会话，已填入联系人，但连接尚未建立: ' + err.message);
+      }
+      const requestCard = document.getElementById('request-send-card');
+      if (requestCard) requestCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (introInput) introInput.focus();
+    }
+
+    function renderRequests() {
+      const list = state.requests || [];
+      let html = '<h2>请求箱</h2>';
+      if (!list.length) {
+        html += '<p class="empty">暂无请求</p>';
+      } else {
+        html += '<div class="list">';
+        html += list.map(req => {
+          const inbound = req.to_peer_id === state.me?.peer_id;
+          return '<div class="item">' +
+            '<h3>' + escapeHtml(inbound ? displayName(req.from_peer_id, req.nickname || req.from_peer_id) : displayName(req.to_peer_id, req.to_peer_id)) + '</h3>' +
+            '<div class="muted">状态：' + escapeHtml(req.state) + '</div>' +
+            '<div class="muted">时间：' + escapeHtml(formatTime(req.created_at)) + '</div>' +
+            '<p>' + escapeHtml(req.intro_text || '') + '</p>' +
+            (inbound && req.state === 'pending'
+              ? '<div class="actions"><button class="btn btn-primary" data-accept="' + escapeHtml(req.request_id) + '">接受</button><button class="btn btn-danger" data-reject="' + escapeHtml(req.request_id) + '">拒绝</button></div>'
+              : '') +
+          '</div>';
+        }).join('');
+        html += '</div>';
+      }
+      document.getElementById('request-list-card').innerHTML = html;
+      document.querySelectorAll('[data-accept]').forEach(btn => {
+        btn.onclick = async () => {
+          try {
+            await post('/api/v1/chat/requests/' + encodeURIComponent(btn.dataset.accept) + '/accept');
+            showMessage('ok', '请求已接受');
+            await refreshAll();
+          } catch (err) {
+            showMessage('err', '接受失败: ' + err.message);
+          }
+        };
+      });
+      document.querySelectorAll('[data-reject]').forEach(btn => {
+        btn.onclick = async () => {
+          try {
+            await post('/api/v1/chat/requests/' + encodeURIComponent(btn.dataset.reject) + '/reject');
+            showMessage('ok', '请求已拒绝');
+            await refreshRequests();
+          } catch (err) {
+            showMessage('err', '拒绝失败: ' + err.message);
+          }
+        };
+      });
+    }
+
+    function renderConversations() {
+      const list = state.conversations || [];
+      let html = '<h2>会话列表</h2>';
+      if (!list.length) {
+        html += '<p class="empty">暂无会话</p>';
+      } else {
+        html += '<div class="list">';
+        html += list.map(conv => (
+          '<div class="item' + (conv.conversation_id === state.selectedConversationId ? ' active' : '') + '" data-conv="' + escapeHtml(conv.conversation_id) + '">' +
+            '<h3>' + escapeHtml(displayName(conv.peer_id, shortPeer(conv.peer_id))) + '</h3>' +
+            '<div class="muted">模式：' + escapeHtml(conv.last_transport_mode || '-') + '</div>' +
+            '<div class="muted">更新时间：' + escapeHtml(formatTime(conv.updated_at)) + '</div>' +
+          '</div>'
+        )).join('');
+        html += '</div>';
+      }
+      document.getElementById('conversation-list-card').innerHTML = html;
+      document.querySelectorAll('[data-conv]').forEach(item => {
+        item.onclick = async () => {
+          state.selectedConversationId = item.dataset.conv;
+          renderConversations();
+          await refreshMessages();
+        };
+      });
+    }
+
+    function renderMessages() {
+      const conv = (state.conversations || []).find(c => c.conversation_id === state.selectedConversationId);
+      const peerStatus = state.peerStatus;
+      const transportMode = conv?.last_transport_mode || '-';
+      const connectedness = peerStatus?.connectedness || 'unknown';
+      const transportBadgeClass = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'offline';
+      const transportLabel = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'unknown';
+      const connLabel = connectedness === 'Connected' || connectedness === 'connected' ? '已连接' : connectedness === 'NotConnected' || connectedness === 'not connected' ? '未连接' : connectedness;
+      document.getElementById('conversation-header').innerHTML = conv
+        ? '<h2>当前会话</h2><div class="muted">联系人：' + escapeHtml(displayName(conv.peer_id, shortPeer(conv.peer_id))) + '</div><div class="muted">Peer：<code>' + escapeHtml(conv.peer_id) + '</code></div>' +
+          '<div class="status-row">' +
+            '<span class="badge ' + escapeHtml(transportBadgeClass) + '">transport: ' + escapeHtml(transportLabel) + '</span>' +
+            '<span class="badge ' + escapeHtml((connectedness === 'Connected' || connectedness === 'connected') ? 'direct' : 'offline') + '">连接: ' + escapeHtml(connLabel) + '</span>' +
+          '</div>'
+        : '<h2>当前会话</h2><p class="empty">请选择一个会话</p>';
+
+      const wrap = document.getElementById('messages');
+      if (!conv) {
+        wrap.innerHTML = '<p class="empty">未选择会话</p>';
+      } else if (!(state.messages || []).length) {
+        wrap.innerHTML = '<p class="empty">该会话还没有消息</p>';
+      } else {
+        wrap.innerHTML = state.messages.map(msg => (
+          '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
+            '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + messageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
+            '<div>' + escapeHtml(msg.plaintext || '') + '</div>' +
+          '</div>'
+        )).join('');
+      }
+      renderComposer(conv);
+    }
+
+    function renderComposer(conv) {
+      const composer = document.getElementById('composer');
+      if (!composer) return;
+      if (!conv) {
+        composer.innerHTML = '';
+        state.composerConversationId = '';
+        return;
+      }
+      const draft = state.composerDrafts[conv.conversation_id] || '';
+      const shouldRebuild = state.composerConversationId !== conv.conversation_id || !document.getElementById('composer-text');
+      if (shouldRebuild) {
+        composer.innerHTML = '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div><div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button></div>';
+        state.composerConversationId = conv.conversation_id;
+        const input = document.getElementById('composer-text');
+        if (input) {
+          input.value = draft;
+          input.addEventListener('input', () => {
+            state.composerDrafts[conv.conversation_id] = input.value;
+          });
+        }
+        const btn = document.getElementById('send-message-btn');
+        if (btn) {
+          btn.onclick = async () => {
+            const input = document.getElementById('composer-text');
+            const text = (input ? input.value : '').trim();
+            if (!text) return;
+            try {
+              await post('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/messages', { text });
+              state.composerDrafts[conv.conversation_id] = '';
+              if (input) input.value = '';
+              await refreshMessages();
+              await refreshConversations();
+            } catch (err) {
+              showMessage('err', '发送失败: ' + err.message);
+            }
+          };
+        }
+        return;
+      }
+      const input = document.getElementById('composer-text');
+      if (input && input.value !== draft) {
+        const hadFocus = document.activeElement === input;
+        input.value = draft;
+        if (hadFocus) {
+          const pos = input.value.length;
+          input.focus();
+          input.setSelectionRange(pos, pos);
+        }
+      }
+    }
+
+    async function refreshProfile() {
+      state.me = await get('/api/v1/chat/me');
+      renderProfile();
+    }
+    async function refreshNetwork() {
+      state.network = await get('/api/v1/chat/network/status');
+      renderNetwork();
+    }
+    async function refreshRequests() {
+      const prev = Array.isArray(state.requests) ? state.requests.length : 0;
+      state.requests = await get('/api/v1/chat/requests');
+      if (!Array.isArray(state.requests)) state.requests = [];
+      if (prev && state.requests.length > prev) {
+        flashRefreshHint('检测到新的聊天请求');
+      }
+      state.previousRequestCount = state.requests.length;
+      renderRequests();
+    }
+    async function refreshContacts() {
+      state.contacts = await get('/api/v1/chat/contacts');
+      if (!Array.isArray(state.contacts)) state.contacts = [];
+      renderContacts();
+    }
+    async function refreshConversations() {
+      state.conversations = await get('/api/v1/chat/conversations');
+      if (!Array.isArray(state.conversations)) state.conversations = [];
+      if (!state.selectedConversationId && state.conversations.length) {
+        state.selectedConversationId = state.conversations[0].conversation_id;
+      }
+      if (state.selectedConversationId && !state.conversations.find(c => c.conversation_id === state.selectedConversationId)) {
+        state.selectedConversationId = state.conversations.length ? state.conversations[0].conversation_id : '';
+      }
+      renderConversations();
+    }
+    async function refreshMessages() {
+      if (!state.selectedConversationId) {
+        state.messages = [];
+        state.peerStatus = null;
+        renderMessages();
+        return;
+      }
+      const conv = state.conversations.find(c => c.conversation_id === state.selectedConversationId);
+      const prev = Array.isArray(state.messages) ? state.messages.length : 0;
+      state.messages = await get('/api/v1/chat/conversations/' + encodeURIComponent(state.selectedConversationId) + '/messages');
+      if (!Array.isArray(state.messages)) state.messages = [];
+      if (conv) {
+        state.peerStatus = await get('/api/v1/chat/peers/' + encodeURIComponent(conv.peer_id) + '/status').catch(() => null);
+      }
+      if (prev && state.messages.length > prev) {
+        const newest = state.messages[state.messages.length - 1];
+        flashRefreshHint(newest && newest.direction === 'inbound' ? '检测到新消息' : '消息列表已更新');
+      }
+      state.previousMessageCount = state.messages.length;
+      renderMessages();
+    }
+    async function refreshAll() {
+      await Promise.all([refreshProfile(), refreshNetwork(), refreshContacts(), refreshRequests(), refreshConversations()]);
+      await refreshMessages();
+      state.lastRefreshAt = new Date().toISOString();
+      renderRefreshStatus();
+      renderRequestSend();
+    }
+
+    window.addEventListener('load', async () => {
+      renderRequestSend();
+      try {
+        await refreshAll();
+      } catch (err) {
+        showMessage('err', '初始化失败: ' + err.message);
+      }
+      setInterval(async () => {
+        try {
+          await refreshContacts();
+          await refreshRequests();
+          await refreshConversations();
+          await refreshMessages();
+        } catch (_) {}
+      }, 5000);
+    });
+  </script>
+</body>
+</html>
