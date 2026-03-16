@@ -497,9 +497,25 @@
           '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
             '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + messageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
             '<div>' + escapeHtml(msg.plaintext || '') + '</div>' +
+            (msg.direction === 'outbound'
+              ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+              : '') +
           '</div>'
         )).join('');
       }
+      document.querySelectorAll('[data-revoke-msg]').forEach(btn => {
+        btn.onclick = async () => {
+          if (!conv) return;
+          try {
+            await post('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/messages/' + encodeURIComponent(btn.dataset.revokeMsg) + '/revoke');
+            showMessage('ok', '消息已撤回');
+            await refreshMessages();
+            await refreshConversations();
+          } catch (err) {
+            showMessage('err', '撤回失败: ' + err.message);
+          }
+        };
+      });
       renderComposer(conv);
     }
 

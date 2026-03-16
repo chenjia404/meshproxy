@@ -172,6 +172,7 @@ type ChatProvider interface {
 	ListConversations() ([]chat.Conversation, error)
 	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
+	RevokeMessage(conversationID, msgID string) error
 	SendText(conversationID, text string) (chat.Message, error)
 	ConnectPeer(peerID string) error
 	PeerStatus(peerID string) (map[string]any, error)
@@ -954,13 +955,30 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 {
+	if len(parts) < 2 {
 		http.NotFound(w, r)
 		return
 	}
 	conversationID, action := parts[0], parts[1]
 	switch action {
 	case "messages":
+		if len(parts) == 4 && parts[3] == "revoke" {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			msgID := parts[2]
+			if err := a.opts.ChatService.RevokeMessage(conversationID, msgID); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]string{"status": "revoked"})
+			return
+		}
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			msgs, err := a.opts.ChatService.ListMessages(conversationID)

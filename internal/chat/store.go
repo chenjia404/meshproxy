@@ -487,6 +487,29 @@ func (s *Store) MarkMessageDelivered(msgID string, deliveredAt time.Time) error 
 	return err
 }
 
+func (s *Store) GetMessage(msgID string) (Message, error) {
+	var m Message
+	var createdAt, deliveredAt string
+	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
+		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
+	if err != nil {
+		return Message{}, err
+	}
+	m.CreatedAt = parseDBTime(createdAt)
+	m.DeliveredAt = parseDBTime(deliveredAt)
+	return m, nil
+}
+
+func (s *Store) DeleteMessage(conversationID, msgID string) error {
+	if conversationID == "" || msgID == "" {
+		return nil
+	}
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE conversation_id=? AND msg_id=?`, conversationID, msgID); err != nil {
+		return err
+	}
+	return s.refreshConversationMessageSummary(conversationID)
+}
+
 func (s *Store) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
 	if minutes != 0 && (minutes < MinRetentionMinutes || minutes > MaxRetentionMinutes) {
 		return Conversation{}, fmt.Errorf("retention_minutes must be 0 or between %d and %d", MinRetentionMinutes, MaxRetentionMinutes)

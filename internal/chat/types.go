@@ -8,6 +8,7 @@ const (
 	MessageTypeSessionReject  = "session_reject"
 	MessageTypeChatText       = "chat_text"
 	MessageTypeDeliveryAck    = "delivery_ack"
+	MessageTypeMessageRevoke  = "message_revoke"
 )
 
 const (
@@ -136,4 +137,13 @@ type DeliveryAck struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	AckedAtUnix    int64  `json:"acked_at_unix"`
+}
+
+type MessageRevoke struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	MsgID          string `json:"msg_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	RevokedAtUnix  int64  `json:"revoked_at_unix"`
 }

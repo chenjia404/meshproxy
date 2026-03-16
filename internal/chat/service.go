@@ -104,6 +104,31 @@ func (s *Service) ListMessages(conversationID string) ([]Message, error) {
 	return s.store.ListMessages(conversationID)
 }
 
+func (s *Service) RevokeMessage(conversationID, msgID string) error {
+	msg, err := s.store.GetMessage(msgID)
+	if err != nil {
+		return err
+	}
+	if msg.ConversationID != conversationID {
+		return errors.New("message does not belong to conversation")
+	}
+	if msg.Direction != "outbound" || msg.SenderPeerID != s.localPeer {
+		return errors.New("only outbound local messages can be revoked")
+	}
+	revoke := MessageRevoke{
+		Type:           MessageTypeMessageRevoke,
+		ConversationID: conversationID,
+		MsgID:          msgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       msg.ReceiverPeerID,
+		RevokedAtUnix:  time.Now().UnixMilli(),
+	}
+	if err := s.sendEnvelope(msg.ReceiverPeerID, revoke); err != nil {
+		return err
+	}
+	return s.store.DeleteMessage(conversationID, msgID)
+}
+
 func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	if contact, err := s.store.GetPeer(toPeerID); err == nil && contact.Blocked {
 		return Request{}, errors.New("peer is blocked")
@@ -397,56 +422,12 @@ func (s *Service) serveRequestStream(str network.Stream) {
 
 func (s *Service) serveMessageStream(str network.Stream) {
 	defer str.Close()
-	var msg ChatText
-	if err := tunnel.ReadJSONFrame(str, &msg); err != nil {
+	var env map[string]any
+	if err := tunnel.ReadJSONFrame(str, &env); err != nil {
 		return
 	}
-	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
-		return
-	}
-	conv, err := s.store.GetConversation(msg.ConversationID)
-	if err != nil {
-		return
-	}
-	sess, err := s.store.GetSessionState(msg.ConversationID)
-	if err != nil {
-		return
-	}
-	nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-	aad := []byte(msg.ConversationID + "\x00chat_text")
-	plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-	if err != nil {
-		return
-	}
-	incoming := Message{
-		MsgID:          msg.MsgID,
-		ConversationID: msg.ConversationID,
-		SenderPeerID:   msg.FromPeerID,
-		ReceiverPeerID: s.localPeer,
-		Direction:      "inbound",
-		MsgType:        MessageTypeChatText,
-		Plaintext:      string(plain),
-		TransportMode:  TransportModeDirect,
-		State:          MessageStateReceived,
-		Counter:        msg.Counter,
-		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
-	}
-	if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
-		log.Printf("[chat] save incoming message failed: %v", err)
-		return
-	}
-	_ = s.store.UpsertPeer(msg.FromPeerID, "")
-	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-	ack := DeliveryAck{
-		Type:           MessageTypeDeliveryAck,
-		ConversationID: msg.ConversationID,
-		MsgID:          msg.MsgID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       msg.FromPeerID,
-		AckedAtUnix:    time.Now().UnixMilli(),
-	}
-	if err := s.sendEnvelope(conv.PeerID, ack); err != nil {
-		log.Printf("[chat] send delivery ack failed: %v", err)
+	if err := s.processDirectEnvelope(env); err != nil {
+		log.Printf("[chat] process direct envelope failed: %v", err)
 	}
 }
 
@@ -752,6 +733,80 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			AckedAtUnix:    time.Now().UnixMilli(),
 		}
 		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeDeliveryAck:
+		var ack DeliveryAck
+		if err := remarshal(env, &ack); err != nil {
+			return err
+		}
+		return s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
+	case MessageTypeMessageRevoke:
+		var revoke MessageRevoke
+		if err := remarshal(env, &revoke); err != nil {
+			return err
+		}
+		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+	default:
+		return nil
+	}
+}
+
+func (s *Service) processDirectEnvelope(env map[string]any) error {
+	switch env["type"] {
+	case MessageTypeChatText:
+		var msg ChatText
+		if err := remarshal(env, &msg); err != nil {
+			return err
+		}
+		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
+			return nil
+		}
+		conv, err := s.store.GetConversation(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		sess, err := s.store.GetSessionState(msg.ConversationID)
+		if err != nil {
+			return err
+		}
+		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+		aad := []byte(msg.ConversationID + "\x00chat_text")
+		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+		if err != nil {
+			return err
+		}
+		incoming := Message{
+			MsgID:          msg.MsgID,
+			ConversationID: msg.ConversationID,
+			SenderPeerID:   msg.FromPeerID,
+			ReceiverPeerID: s.localPeer,
+			Direction:      "inbound",
+			MsgType:        MessageTypeChatText,
+			Plaintext:      string(plain),
+			TransportMode:  TransportModeDirect,
+			State:          MessageStateReceived,
+			Counter:        msg.Counter,
+			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
+		}
+		if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
+			return err
+		}
+		_ = s.store.UpsertPeer(msg.FromPeerID, "")
+		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
+		ack := DeliveryAck{
+			Type:           MessageTypeDeliveryAck,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       msg.FromPeerID,
+			AckedAtUnix:    time.Now().UnixMilli(),
+		}
+		return s.sendEnvelope(conv.PeerID, ack)
+	case MessageTypeMessageRevoke:
+		var revoke MessageRevoke
+		if err := remarshal(env, &revoke); err != nil {
+			return err
+		}
+		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
