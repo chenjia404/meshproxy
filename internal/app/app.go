@@ -720,6 +720,9 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	if a == nil || a.host == nil || pid == "" || pid == a.Host().ID() {
 		return
 	}
+	if a.chat != nil {
+		a.chat.OnPeerConnected(pid.String())
+	}
 	if _, loaded := a.peerExchangeOnce.LoadOrStore(pid.String(), struct{}{}); loaded {
 		return
 	}

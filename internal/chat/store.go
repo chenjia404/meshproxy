@@ -25,6 +25,45 @@ type sessionState struct {
 	RecvCounter    uint64
 }
 
+type outboxRetryItem struct {
+	JobID          string
+	PeerID         string
+	MsgID          string
+	ConversationID string
+	SenderPeerID   string
+	ReceiverPeerID string
+	MsgType        string
+	FileName       string
+	MIMEType       string
+	FileSize       int64
+	Counter        uint64
+	CiphertextBlob []byte
+	SentAtUnix     int64
+	RetryCount     int
+}
+
+type chatSyncItem struct {
+	MsgID          string
+	ConversationID string
+	SenderPeerID   string
+	ReceiverPeerID string
+	MsgType        string
+	FileName       string
+	MIMEType       string
+	FileSize       int64
+	Counter        uint64
+	CiphertextBlob []byte
+	SentAtUnix     int64
+}
+
+type outboxRecoveryItem struct {
+	MsgID          string
+	ConversationID string
+	ReceiverPeerID string
+	State          string
+	CreatedAt      time.Time
+}
+
 type Store struct {
 	db *sql.DB
 }
@@ -615,6 +654,156 @@ func (s *Store) MarkMessageDelivered(msgID string, deliveredAt time.Time) error 
 	return err
 }
 
+func (s *Store) UpdateMessageState(msgID, state string) error {
+	if msgID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE messages SET state=? WHERE msg_id=?`, state, msgID)
+	return err
+}
+
+func (s *Store) UpsertOutboxJob(msgID, peerID, status string, retryCount int, nextRetryAt, lastTransportAttempt time.Time) error {
+	if msgID == "" || peerID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO outbox_jobs(job_id,peer_id,msg_id,status,retry_count,next_retry_at,last_transport_attempt)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(job_id) DO UPDATE SET
+			peer_id=excluded.peer_id,
+			msg_id=excluded.msg_id,
+			status=excluded.status,
+			retry_count=excluded.retry_count,
+			next_retry_at=excluded.next_retry_at,
+			last_transport_attempt=excluded.last_transport_attempt
+	`, msgID, peerID, msgID, status, retryCount, formatDBTime(nextRetryAt), formatDBTime(lastTransportAttempt))
+	return err
+}
+
+func (s *Store) DeleteOutboxJob(msgID string) error {
+	if msgID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM outbox_jobs WHERE job_id=? OR msg_id=?`, msgID, msgID)
+	return err
+}
+
+func (s *Store) ListOutboxJobsForRetry(now time.Time, limit int) ([]outboxRetryItem, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			o.job_id,
+			o.peer_id,
+			o.msg_id,
+			m.conversation_id,
+			m.sender_peer_id,
+			m.receiver_peer_id,
+			m.msg_type,
+			m.file_name,
+			m.mime_type,
+			m.file_size,
+			m.counter,
+			m.ciphertext_blob,
+			m.created_at,
+			o.retry_count
+		FROM outbox_jobs o
+		INNER JOIN messages m ON m.msg_id = o.msg_id
+		WHERE o.status IN (?, ?) AND o.next_retry_at != '' AND o.next_retry_at <= ?
+		ORDER BY o.next_retry_at ASC, o.last_transport_attempt ASC
+		LIMIT ?
+	`, MessageStateQueuedForRetry, MessageStateSentToTransport, formatDBTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []outboxRetryItem
+	for rows.Next() {
+		var item outboxRetryItem
+		var createdAt string
+		if err := rows.Scan(
+			&item.JobID,
+			&item.PeerID,
+			&item.MsgID,
+			&item.ConversationID,
+			&item.SenderPeerID,
+			&item.ReceiverPeerID,
+			&item.MsgType,
+			&item.FileName,
+			&item.MIMEType,
+			&item.FileSize,
+			&item.Counter,
+			&item.CiphertextBlob,
+			&createdAt,
+			&item.RetryCount,
+		); err != nil {
+			return nil, err
+		}
+		item.SentAtUnix = parseDBTime(createdAt).UnixMilli()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListOutboxJobsForPeer(peerID string, limit int) ([]outboxRetryItem, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			o.job_id,
+			o.peer_id,
+			o.msg_id,
+			m.conversation_id,
+			m.sender_peer_id,
+			m.receiver_peer_id,
+			m.msg_type,
+			m.file_name,
+			m.mime_type,
+			m.file_size,
+			m.counter,
+			m.ciphertext_blob,
+			m.created_at,
+			o.retry_count
+		FROM outbox_jobs o
+		INNER JOIN messages m ON m.msg_id = o.msg_id
+		WHERE o.peer_id=? AND o.status IN (?, ?)
+		ORDER BY m.created_at ASC
+		LIMIT ?
+	`, peerID, MessageStateQueuedForRetry, MessageStateSentToTransport, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []outboxRetryItem
+	for rows.Next() {
+		var item outboxRetryItem
+		var createdAt string
+		if err := rows.Scan(
+			&item.JobID,
+			&item.PeerID,
+			&item.MsgID,
+			&item.ConversationID,
+			&item.SenderPeerID,
+			&item.ReceiverPeerID,
+			&item.MsgType,
+			&item.FileName,
+			&item.MIMEType,
+			&item.FileSize,
+			&item.Counter,
+			&item.CiphertextBlob,
+			&createdAt,
+			&item.RetryCount,
+		); err != nil {
+			return nil, err
+		}
+		item.SentAtUnix = parseDBTime(createdAt).UnixMilli()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetMessage(msgID string) (Message, error) {
 	var m Message
 	var createdAt, deliveredAt string
@@ -634,6 +823,95 @@ func (s *Store) GetMessageBlob(msgID string) ([]byte, error) {
 		return nil, err
 	}
 	return blob, nil
+}
+
+func (s *Store) ListOutgoingMessagesForSync(conversationID, senderPeerID string, nextCounter uint64, limit int) ([]chatSyncItem, error) {
+	if limit <= 0 {
+		limit = 128
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			msg_id,
+			conversation_id,
+			sender_peer_id,
+			receiver_peer_id,
+			msg_type,
+			file_name,
+			mime_type,
+			file_size,
+			counter,
+			ciphertext_blob,
+			created_at
+		FROM messages
+		WHERE conversation_id=? AND sender_peer_id=? AND direction='outbound' AND counter >= ?
+		ORDER BY counter ASC
+		LIMIT ?
+	`, conversationID, senderPeerID, nextCounter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []chatSyncItem
+	for rows.Next() {
+		var item chatSyncItem
+		var createdAt string
+		if err := rows.Scan(
+			&item.MsgID,
+			&item.ConversationID,
+			&item.SenderPeerID,
+			&item.ReceiverPeerID,
+			&item.MsgType,
+			&item.FileName,
+			&item.MIMEType,
+			&item.FileSize,
+			&item.Counter,
+			&item.CiphertextBlob,
+			&createdAt,
+		); err != nil {
+			return nil, err
+		}
+		item.SentAtUnix = parseDBTime(createdAt).UnixMilli()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListMessagesMissingOutbox(limit int) ([]outboxRecoveryItem, error) {
+	if limit <= 0 {
+		limit = 256
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			m.msg_id,
+			m.conversation_id,
+			m.receiver_peer_id,
+			m.state,
+			m.created_at
+		FROM messages m
+		LEFT JOIN outbox_jobs o ON o.msg_id = m.msg_id
+		WHERE m.direction='outbound'
+			AND m.transport_mode=?
+			AND m.state IN (?, ?, ?)
+			AND m.msg_type IN (?, ?, ?)
+			AND o.msg_id IS NULL
+		ORDER BY m.created_at ASC
+		LIMIT ?
+	`, TransportModeDirect, MessageStateLocalOnly, MessageStateQueuedForRetry, MessageStateSentToTransport, MessageTypeChatText, MessageTypeChatFile, MessageTypeGroupInviteNote, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []outboxRecoveryItem
+	for rows.Next() {
+		var item outboxRecoveryItem
+		var createdAt string
+		if err := rows.Scan(&item.MsgID, &item.ConversationID, &item.ReceiverPeerID, &item.State, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseDBTime(createdAt)
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) DeleteMessage(conversationID, msgID string) error {

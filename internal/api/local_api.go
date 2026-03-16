@@ -174,6 +174,7 @@ type ChatProvider interface {
 	ListConversations() ([]chat.Conversation, error)
 	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
+	SyncConversation(conversationID string) error
 	RevokeMessage(conversationID, msgID string) error
 	SendFile(conversationID, fileName, mimeType string, data []byte) (chat.Message, error)
 	GetMessageFile(conversationID, msgID string) (chat.Message, []byte, error)
@@ -999,6 +1000,20 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 	}
 	conversationID, action := parts[0], parts[1]
 	switch action {
+	case "sync":
+		if len(parts) != 2 || r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.opts.ChatService.SyncConversation(conversationID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"conversation_id": conversationID,
+			"status":          "sync_requested",
+		})
+		return
 	case "messages":
 		if len(parts) == 4 && parts[3] == "revoke" {
 			if r.Method != http.MethodPost {

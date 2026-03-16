@@ -33,6 +33,12 @@ type Service struct {
 	localPeer string
 }
 
+const (
+	directRetryBatchSize = 64
+	directAckWait        = 20 * time.Second
+	directSyncBatchSize  = 256
+)
+
 func NewService(ctx context.Context, dbPath string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
 	s := &Service{
 		ctx:       ctx,
@@ -49,10 +55,12 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 	h.SetStreamHandler(p2p.ProtocolChatRequest, s.handleRequestStream)
 	h.SetStreamHandler(p2p.ProtocolChatMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolChatAck, s.handleAckStream)
+	h.SetStreamHandler(p2p.ProtocolChatSync, s.handleChatSyncStream)
 	h.SetStreamHandler(p2p.ProtocolGroupControl, s.handleGroupControlStream)
 	h.SetStreamHandler(p2p.ProtocolGroupMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolGroupSync, s.handleGroupSyncStream)
 	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
+	safe.Go("chat.recoverOutboxLoop", func() { s.recoverMissingOutboxJobs() })
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
 	return s, nil
 }
@@ -146,9 +154,6 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if contact, err := s.store.GetPeer(conv.PeerID); err == nil && contact.Blocked {
 		return Message{}, errors.New("peer is blocked")
 	}
-	if err := s.ensurePeerConnected(conv.PeerID); err != nil {
-		return Message{}, err
-	}
 	sess, err := s.store.GetSessionState(conversationID)
 	if err != nil {
 		return Message{}, err
@@ -173,33 +178,36 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 		TransportMode:  TransportModeDirect,
 		State:          MessageStateLocalOnly,
 		Counter:        counter,
-		CreatedAt:      time.Now(),
+		CreatedAt:      time.Now().UTC(),
 	}
 	msg, err = s.store.AddMessage(msg, data)
 	if err != nil {
 		return Message{}, err
 	}
-	wire := ChatFile{
-		Type:           MessageTypeChatFile,
-		ConversationID: conversationID,
-		MsgID:          msg.MsgID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       conv.PeerID,
-		FileName:       fileName,
-		MIMEType:       mimeType,
-		FileSize:       int64(len(data)),
-		Ciphertext:     ciphertext,
-		Counter:        counter,
-		SentAtUnix:     msg.CreatedAt.UnixMilli(),
-	}
-	if err := s.sendEnvelope(conv.PeerID, wire); err != nil {
-		return Message{}, err
-	}
 	if err := s.store.UpdateSendCounter(conversationID, counter+1); err != nil {
 		return Message{}, err
 	}
+	if err := s.store.UpsertOutboxJob(msg.MsgID, conv.PeerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
+		return Message{}, err
+	}
+	if err := s.sendStoredDirectMessage(msg, data, ciphertext); err != nil {
+		msg.State = MessageStateQueuedForRetry
+		if _, updateErr := s.store.AddMessage(msg, data); updateErr != nil {
+			return Message{}, updateErr
+		}
+		if retryErr := s.scheduleOutboxRetry(msg.MsgID, conv.PeerID, 1); retryErr != nil {
+			return Message{}, retryErr
+		}
+		return msg, nil
+	}
 	msg.State = MessageStateSentToTransport
-	return s.store.AddMessage(msg, data)
+	if _, err := s.store.AddMessage(msg, data); err != nil {
+		return Message{}, err
+	}
+	if err := s.markOutboxSentToTransport(msg.MsgID, conv.PeerID, 0, time.Now().UTC()); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
 }
 
 func (s *Service) RevokeMessage(conversationID, msgID string) error {
@@ -378,9 +386,6 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 	if contact, err := s.store.GetPeer(conv.PeerID); err == nil && contact.Blocked {
 		return Message{}, errors.New("peer is blocked")
 	}
-	if err := s.ensurePeerConnected(conv.PeerID); err != nil {
-		return Message{}, err
-	}
 	sess, err := s.store.GetSessionState(conversationID)
 	if err != nil {
 		return Message{}, err
@@ -403,30 +408,70 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 		TransportMode:  TransportModeDirect,
 		State:          MessageStateLocalOnly,
 		Counter:        counter,
-		CreatedAt:      time.Now(),
+		CreatedAt:      time.Now().UTC(),
 	}
 	msg, err = s.store.AddMessage(msg, ciphertext)
 	if err != nil {
 		return Message{}, err
 	}
-	wire := ChatText{
-		Type:           MessageTypeChatText,
-		ConversationID: conversationID,
-		MsgID:          msg.MsgID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       conv.PeerID,
-		Ciphertext:     ciphertext,
-		Counter:        counter,
-		SentAtUnix:     msg.CreatedAt.UnixMilli(),
-	}
-	if err := s.sendEnvelope(conv.PeerID, wire); err != nil {
-		return Message{}, err
-	}
 	if err := s.store.UpdateSendCounter(conversationID, counter+1); err != nil {
 		return Message{}, err
 	}
+	if err := s.store.UpsertOutboxJob(msg.MsgID, conv.PeerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
+		return Message{}, err
+	}
+	if err := s.sendStoredDirectMessage(msg, ciphertext, nil); err != nil {
+		msg.State = MessageStateQueuedForRetry
+		if _, updateErr := s.store.AddMessage(msg, ciphertext); updateErr != nil {
+			return Message{}, updateErr
+		}
+		if retryErr := s.scheduleOutboxRetry(msg.MsgID, conv.PeerID, 1); retryErr != nil {
+			return Message{}, retryErr
+		}
+		return msg, nil
+	}
 	msg.State = MessageStateSentToTransport
-	return s.store.AddMessage(msg, ciphertext)
+	if _, err := s.store.AddMessage(msg, ciphertext); err != nil {
+		return Message{}, err
+	}
+	if err := s.markOutboxSentToTransport(msg.MsgID, conv.PeerID, 0, time.Now().UTC()); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func (s *Service) SyncConversation(conversationID string) error {
+	conv, err := s.store.GetConversation(conversationID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSessionState(conversationID)
+	if err != nil {
+		return err
+	}
+	req := ChatSyncRequest{
+		Type:           MessageTypeChatSyncRequest,
+		ConversationID: conversationID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       conv.PeerID,
+		NextCounter:    sess.RecvCounter,
+		SentAtUnix:     time.Now().UTC().UnixMilli(),
+	}
+	resp, err := s.requestChatSync(conv.PeerID, req)
+	if err != nil {
+		return err
+	}
+	for _, msg := range resp.Messages {
+		if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
+			return err
+		}
+	}
+	for _, msg := range resp.Files {
+		if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) NetworkStatus() map[string]any {
@@ -454,7 +499,43 @@ func (s *Service) PeerStatus(peerID string) (map[string]any, error) {
 }
 
 func (s *Service) ConnectPeer(peerID string) error {
-	return s.ensurePeerConnected(peerID)
+	if err := s.ensurePeerConnected(peerID); err != nil {
+		return err
+	}
+	s.OnPeerConnected(peerID)
+	return nil
+}
+
+func (s *Service) OnPeerConnected(peerID string) {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" || peerID == s.localPeer {
+		return
+	}
+	safe.Go("chat.onPeerConnected", func() {
+		if err := s.recoverMissingOutboxJobs(); err != nil {
+			log.Printf("[chat] recover outbox on connect peer=%s failed: %v", peerID, err)
+			return
+		}
+		items, err := s.store.ListOutboxJobsForPeer(peerID, directRetryBatchSize)
+		if err != nil {
+			log.Printf("[chat] list outbox for peer=%s failed: %v", peerID, err)
+			return
+		}
+		for _, item := range items {
+			if item.SenderPeerID != s.localPeer {
+				continue
+			}
+			if err := s.retryOutboxJob(item); err != nil {
+				log.Printf("[chat] immediate retry on connect msg=%s peer=%s failed: %v", item.MsgID, item.PeerID, err)
+			}
+		}
+		conv, err := s.store.GetConversationByPeer(peerID)
+		if err == nil {
+			if err := s.SyncConversation(conv.ConversationID); err != nil {
+				log.Printf("[chat] sync on connect conversation=%s peer=%s failed: %v", conv.ConversationID, peerID, err)
+			}
+		}
+	})
 }
 
 func (s *Service) handleRequestStream(str network.Stream) {
@@ -467,6 +548,10 @@ func (s *Service) handleMessageStream(str network.Stream) {
 
 func (s *Service) handleAckStream(str network.Stream) {
 	safe.Go("chat.handleAckStream", func() { s.serveAckStream(str) })
+}
+
+func (s *Service) handleChatSyncStream(str network.Stream) {
+	safe.Go("chat.handleChatSyncStream", func() { s.serveChatSyncStream(str) })
 }
 
 func (s *Service) handleGroupControlStream(str network.Stream) {
@@ -561,7 +646,23 @@ func (s *Service) serveAckStream(str network.Stream) {
 	if err := tunnel.ReadJSONFrame(str, &ack); err != nil {
 		return
 	}
-	_ = s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
+	_ = s.handleIncomingDeliveryAck(ack)
+}
+
+func (s *Service) serveChatSyncStream(str network.Stream) {
+	defer str.Close()
+	var req ChatSyncRequest
+	if err := tunnel.ReadJSONFrame(str, &req); err != nil {
+		return
+	}
+	resp, err := s.handleChatSyncRequest(req, str.Conn().RemotePeer().String())
+	if err != nil {
+		log.Printf("[chat] handle sync request failed: %v", err)
+		return
+	}
+	if err := tunnel.WriteJSONFrame(str, resp); err != nil {
+		log.Printf("[chat] write sync response failed: %v", err)
+	}
 }
 
 func (s *Service) serveGroupControlStream(str network.Stream) {
@@ -856,58 +957,13 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
-			return nil
-		}
-		conv, err := s.store.GetConversation(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		sess, err := s.store.GetSessionState(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-		aad := []byte(msg.ConversationID + "\x00chat_file")
-		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-		if err != nil {
-			return err
-		}
-		incoming := Message{
-			MsgID:          msg.MsgID,
-			ConversationID: msg.ConversationID,
-			SenderPeerID:   msg.FromPeerID,
-			ReceiverPeerID: s.localPeer,
-			Direction:      "inbound",
-			MsgType:        MessageTypeChatFile,
-			FileName:       NormalizeChatFileName(msg.FileName),
-			MIMEType:       msg.MIMEType,
-			FileSize:       int64(len(plain)),
-			TransportMode:  "relay",
-			State:          MessageStateReceived,
-			Counter:        msg.Counter,
-			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
-		}
-		if _, err := s.store.AddMessage(incoming, plain); err != nil {
-			return err
-		}
-		_ = s.store.UpsertPeer(msg.FromPeerID, "")
-		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-		ack := DeliveryAck{
-			Type:           MessageTypeDeliveryAck,
-			ConversationID: msg.ConversationID,
-			MsgID:          msg.MsgID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       msg.FromPeerID,
-			AckedAtUnix:    time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingChatFile(msg, "relay")
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
 			return err
 		}
-		return s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
+		return s.handleIncomingDeliveryAck(ack)
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
@@ -961,52 +1017,7 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
-			return nil
-		}
-		conv, err := s.store.GetConversation(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		sess, err := s.store.GetSessionState(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-		aad := []byte(msg.ConversationID + "\x00chat_file")
-		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-		if err != nil {
-			return err
-		}
-		incoming := Message{
-			MsgID:          msg.MsgID,
-			ConversationID: msg.ConversationID,
-			SenderPeerID:   msg.FromPeerID,
-			ReceiverPeerID: s.localPeer,
-			Direction:      "inbound",
-			MsgType:        MessageTypeChatFile,
-			FileName:       NormalizeChatFileName(msg.FileName),
-			MIMEType:       msg.MIMEType,
-			FileSize:       int64(len(plain)),
-			TransportMode:  TransportModeDirect,
-			State:          MessageStateReceived,
-			Counter:        msg.Counter,
-			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
-		}
-		if _, err := s.store.AddMessage(incoming, plain); err != nil {
-			return err
-		}
-		_ = s.store.UpsertPeer(msg.FromPeerID, "")
-		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-		ack := DeliveryAck{
-			Type:           MessageTypeDeliveryAck,
-			ConversationID: msg.ConversationID,
-			MsgID:          msg.MsgID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       msg.FromPeerID,
-			AckedAtUnix:    time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingChatFile(msg, TransportModeDirect)
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
@@ -1045,7 +1056,7 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &ack); err != nil {
 			return err
 		}
-		return s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
+		return s.handleIncomingDeliveryAck(ack)
 	default:
 		return nil
 	}
@@ -1061,6 +1072,10 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	}
 	sess, err := s.store.GetSessionState(msg.ConversationID)
 	if err != nil {
+		return err
+	}
+	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
+	if err != nil || duplicate {
 		return err
 	}
 	msgType := msg.Type
@@ -1099,15 +1114,7 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	}
 	_ = s.store.UpsertPeer(msg.FromPeerID, "")
 	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-	ack := DeliveryAck{
-		Type:           MessageTypeDeliveryAck,
-		ConversationID: msg.ConversationID,
-		MsgID:          msg.MsgID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       msg.FromPeerID,
-		AckedAtUnix:    time.Now().UnixMilli(),
-	}
-	return s.sendEnvelope(conv.PeerID, ack)
+	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 
 func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) error {
@@ -1134,6 +1141,294 @@ func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) er
 		return err
 	}
 	return s.applyRemoteGroupInviteEnvelope(payload.InviteEnvelope, false)
+}
+
+func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) error {
+	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
+		return nil
+	}
+	conv, err := s.store.GetConversation(msg.ConversationID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSessionState(msg.ConversationID)
+	if err != nil {
+		return err
+	}
+	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
+	if err != nil || duplicate {
+		return err
+	}
+	nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+	aad := []byte(msg.ConversationID + "\x00chat_file")
+	plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+	if err != nil {
+		return err
+	}
+	incoming := Message{
+		MsgID:          msg.MsgID,
+		ConversationID: msg.ConversationID,
+		SenderPeerID:   msg.FromPeerID,
+		ReceiverPeerID: s.localPeer,
+		Direction:      "inbound",
+		MsgType:        MessageTypeChatFile,
+		FileName:       NormalizeChatFileName(msg.FileName),
+		MIMEType:       msg.MIMEType,
+		FileSize:       int64(len(plain)),
+		TransportMode:  transportMode,
+		State:          MessageStateReceived,
+		Counter:        msg.Counter,
+		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
+	}
+	if _, err := s.store.AddMessage(incoming, plain); err != nil {
+		return err
+	}
+	_ = s.store.UpsertPeer(msg.FromPeerID, "")
+	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
+	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
+}
+
+func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64) (bool, error) {
+	expected := sess.RecvCounter
+	switch {
+	case counter < expected:
+		return true, s.sendDeliveryAck(conv, msgID, conv.PeerID)
+	case counter > expected:
+		s.triggerConversationSync(conv.ConversationID, conv.PeerID, expected)
+		return false, fmt.Errorf("chat message counter gap: expected=%d got=%d", expected, counter)
+	default:
+		return false, nil
+	}
+}
+
+func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) error {
+	ack := DeliveryAck{
+		Type:           MessageTypeDeliveryAck,
+		ConversationID: conv.ConversationID,
+		MsgID:          msgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       toPeerID,
+		AckedAtUnix:    time.Now().UTC().UnixMilli(),
+	}
+	return s.sendEnvelope(conv.PeerID, ack)
+}
+
+func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck) error {
+	if err := s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix)); err != nil {
+		return err
+	}
+	return s.store.DeleteOutboxJob(ack.MsgID)
+}
+
+func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cachedCiphertext []byte) error {
+	wire, err := s.buildDirectEnvelope(msg, storedBlob, cachedCiphertext)
+	if err != nil {
+		return err
+	}
+	return s.sendEnvelope(msg.ReceiverPeerID, wire)
+}
+
+func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiphertext []byte) (any, error) {
+	switch msg.MsgType {
+	case MessageTypeChatText, MessageTypeGroupInviteNote:
+		ciphertext := cachedCiphertext
+		if len(ciphertext) == 0 {
+			ciphertext = storedBlob
+		}
+		return ChatText{
+			Type:           msg.MsgType,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     msg.SenderPeerID,
+			ToPeerID:       msg.ReceiverPeerID,
+			Ciphertext:     ciphertext,
+			Counter:        msg.Counter,
+			SentAtUnix:     msg.CreatedAt.UnixMilli(),
+		}, nil
+	case MessageTypeChatFile:
+		sess, err := s.store.GetSessionState(msg.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+		aad := []byte(msg.ConversationID + "\x00chat_file")
+		ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, storedBlob, aad)
+		if err != nil {
+			return nil, err
+		}
+		return ChatFile{
+			Type:           MessageTypeChatFile,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     msg.SenderPeerID,
+			ToPeerID:       msg.ReceiverPeerID,
+			FileName:       msg.FileName,
+			MIMEType:       msg.MIMEType,
+			FileSize:       msg.FileSize,
+			Ciphertext:     ciphertext,
+			Counter:        msg.Counter,
+			SentAtUnix:     msg.CreatedAt.UnixMilli(),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported direct msg_type %q", msg.MsgType)
+	}
+}
+
+func (s *Service) retryOutboxJob(item outboxRetryItem) error {
+	msg, err := s.store.GetMessage(item.MsgID)
+	if err != nil {
+		return err
+	}
+	if err := s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil); err != nil {
+		_ = s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry)
+		return s.scheduleOutboxRetry(item.MsgID, item.PeerID, item.RetryCount+1)
+	}
+	if err := s.store.UpdateMessageState(item.MsgID, MessageStateSentToTransport); err != nil {
+		return err
+	}
+	return s.markOutboxSentToTransport(item.MsgID, item.PeerID, item.RetryCount, time.Now().UTC())
+}
+
+func (s *Service) scheduleOutboxRetry(msgID, peerID string, retryCount int) error {
+	now := time.Now().UTC()
+	return s.store.UpsertOutboxJob(msgID, peerID, MessageStateQueuedForRetry, retryCount, now, now)
+}
+
+func (s *Service) markOutboxSentToTransport(msgID, peerID string, retryCount int, attemptedAt time.Time) error {
+	return s.store.UpsertOutboxJob(msgID, peerID, MessageStateSentToTransport, retryCount, attemptedAt.Add(directAckWait), attemptedAt)
+}
+
+func (s *Service) triggerConversationSync(conversationID, peerID string, nextCounter uint64) {
+	safe.Go("chat.syncOnGap", func() {
+		req := ChatSyncRequest{
+			Type:           MessageTypeChatSyncRequest,
+			ConversationID: conversationID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       peerID,
+			NextCounter:    nextCounter,
+			SentAtUnix:     time.Now().UTC().UnixMilli(),
+		}
+		resp, err := s.requestChatSync(peerID, req)
+		if err != nil {
+			log.Printf("[chat] sync on gap failed conversation=%s peer=%s: %v", conversationID, peerID, err)
+			return
+		}
+		for _, msg := range resp.Messages {
+			if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
+				log.Printf("[chat] apply synced text failed conversation=%s msg=%s: %v", conversationID, msg.MsgID, err)
+				return
+			}
+		}
+		for _, msg := range resp.Files {
+			if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
+				log.Printf("[chat] apply synced file failed conversation=%s msg=%s: %v", conversationID, msg.MsgID, err)
+				return
+			}
+		}
+	})
+}
+
+func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string) (ChatSyncResponse, error) {
+	if req.Type != MessageTypeChatSyncRequest {
+		return ChatSyncResponse{}, errors.New("invalid chat sync request type")
+	}
+	if req.FromPeerID != remotePeerID {
+		return ChatSyncResponse{}, errors.New("chat sync requester mismatch")
+	}
+	conv, err := s.store.GetConversation(req.ConversationID)
+	if err != nil {
+		return ChatSyncResponse{}, err
+	}
+	if conv.PeerID != remotePeerID || req.ToPeerID != s.localPeer {
+		return ChatSyncResponse{}, errors.New("chat sync conversation mismatch")
+	}
+	items, err := s.store.ListOutgoingMessagesForSync(req.ConversationID, s.localPeer, req.NextCounter, directSyncBatchSize)
+	if err != nil {
+		return ChatSyncResponse{}, err
+	}
+	resp := ChatSyncResponse{
+		Type:           MessageTypeChatSyncResponse,
+		ConversationID: req.ConversationID,
+	}
+	for _, item := range items {
+		msg := Message{
+			MsgID:          item.MsgID,
+			ConversationID: item.ConversationID,
+			SenderPeerID:   item.SenderPeerID,
+			ReceiverPeerID: item.ReceiverPeerID,
+			MsgType:        item.MsgType,
+			FileName:       item.FileName,
+			MIMEType:       item.MIMEType,
+			FileSize:       item.FileSize,
+			Counter:        item.Counter,
+			CreatedAt:      time.UnixMilli(item.SentAtUnix).UTC(),
+		}
+		wire, err := s.buildDirectEnvelope(msg, item.CiphertextBlob, nil)
+		if err != nil {
+			return ChatSyncResponse{}, err
+		}
+		switch typed := wire.(type) {
+		case ChatText:
+			resp.Messages = append(resp.Messages, typed)
+		case ChatFile:
+			resp.Files = append(resp.Files, typed)
+		default:
+			return ChatSyncResponse{}, fmt.Errorf("unsupported chat sync wire %T", wire)
+		}
+	}
+	return resp, nil
+}
+
+func (s *Service) requestChatSync(peerID string, req ChatSyncRequest) (ChatSyncResponse, error) {
+	if err := s.ensurePeerConnected(peerID); err != nil {
+		return ChatSyncResponse{}, err
+	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return ChatSyncResponse{}, err
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+	defer cancel()
+	str, err := s.host.NewStream(ctx, pid, p2p.ProtocolChatSync)
+	if err != nil {
+		return ChatSyncResponse{}, err
+	}
+	defer str.Close()
+	if err := tunnel.WriteJSONFrame(str, req); err != nil {
+		return ChatSyncResponse{}, err
+	}
+	var resp ChatSyncResponse
+	if err := tunnel.ReadJSONFrame(str, &resp); err != nil {
+		return ChatSyncResponse{}, err
+	}
+	return resp, nil
+}
+
+func (s *Service) recoverMissingOutboxJobs() error {
+	items, err := s.store.ListMessagesMissingOutbox(directRetryBatchSize)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		nextRetryAt := now
+		status := item.State
+		if status == "" || status == MessageStateLocalOnly {
+			status = MessageStateQueuedForRetry
+		}
+		if status == MessageStateSentToTransport {
+			nextRetryAt = now
+		}
+		if err := s.store.UpsertOutboxJob(item.MsgID, item.ReceiverPeerID, status, 0, nextRetryAt, time.Time{}); err != nil {
+			return err
+		}
+		if item.State == MessageStateLocalOnly {
+			if err := s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Service) runRetentionLoop() {

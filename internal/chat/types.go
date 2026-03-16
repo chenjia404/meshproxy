@@ -10,6 +10,8 @@ const (
 	MessageTypeChatFile          = "chat_file"
 	MessageTypeGroupInviteNote   = "group_invite_notice"
 	MessageTypeGroupInviteNotice = MessageTypeGroupInviteNote
+	MessageTypeChatSyncRequest   = "chat_sync_request"
+	MessageTypeChatSyncResponse  = "chat_sync_response"
 	MessageTypeDeliveryAck       = "delivery_ack"
 	MessageTypeMessageRevoke     = "message_revoke"
 	MessageTypeRetentionUpdate   = "retention_update"
@@ -161,6 +163,22 @@ type DeliveryAck struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	AckedAtUnix    int64  `json:"acked_at_unix"`
+}
+
+type ChatSyncRequest struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	NextCounter    uint64 `json:"next_counter"`
+	SentAtUnix     int64  `json:"sent_at_unix"`
+}
+
+type ChatSyncResponse struct {
+	Type           string     `json:"type"`
+	ConversationID string     `json:"conversation_id"`
+	Messages       []ChatText `json:"messages,omitempty"`
+	Files          []ChatFile `json:"files,omitempty"`
 }
 
 type MessageRevoke struct {
