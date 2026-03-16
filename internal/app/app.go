@@ -63,6 +63,7 @@ type App struct {
 	selfDesc       *discovery.NodeDescriptor
 
 	peerExchangeOnce sync.Map
+	peerExchangeDial sync.Map
 }
 
 const (
@@ -849,6 +850,8 @@ func (a *App) applyPeerExchange(msg *discovery.PeerExchangeMessage) {
 		if _, ok := a.discovery.Store().Get(desc.PeerID); ok {
 			continue
 		}
+		descCopy := *desc
+		a.discovery.Store().Upsert(&descCopy)
 
 		addrs := filterAddrStrings(entry.ObservedAddrs)
 		if len(addrs) == 0 {
@@ -872,6 +875,10 @@ func (a *App) tryConnectPeerExchangeRelay(peerID string, addrs []string) {
 	if a.host == nil || peerID == "" || len(addrs) == 0 {
 		return
 	}
+	if _, loaded := a.peerExchangeDial.LoadOrStore(peerID, struct{}{}); loaded {
+		return
+	}
+	defer a.peerExchangeDial.Delete(peerID)
 	pid, err := peer.Decode(peerID)
 	if err != nil {
 		return

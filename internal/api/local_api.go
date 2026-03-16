@@ -3,6 +3,7 @@ package api
 import (
 	"embed"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -180,6 +181,20 @@ type ChatProvider interface {
 	ConnectPeer(peerID string) error
 	PeerStatus(peerID string) (map[string]any, error)
 	NetworkStatus() map[string]any
+	ListGroups() ([]chat.Group, error)
+	GetGroupDetails(groupID string) (chat.GroupDetails, error)
+	CreateGroup(title string, members []string) (chat.Group, error)
+	InviteGroupMember(groupID, peerID, role, inviteText string) (chat.Group, error)
+	AcceptGroupInvite(groupID string) (chat.Group, error)
+	LeaveGroup(groupID, reason string) (chat.Group, error)
+	RemoveGroupMember(groupID, peerID, reason string) (chat.Group, error)
+	UpdateGroupTitle(groupID, title string) (chat.Group, error)
+	TransferGroupController(groupID, peerID string) (chat.Group, error)
+	ListGroupMessages(groupID string) ([]chat.GroupMessage, error)
+	SendGroupText(groupID, text string) (chat.GroupMessage, error)
+	SendGroupFile(groupID, fileName, mimeType string, data []byte) (chat.GroupMessage, error)
+	GetGroupMessageFile(groupID, msgID string) (chat.GroupMessage, []byte, error)
+	SyncGroup(groupID, fromPeerID string) error
 	Close() error
 }
 
@@ -236,6 +251,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/conversations/", api.handleChatConversationItem)
 	mux.HandleFunc("/api/v1/chat/network/status", api.handleChatNetworkStatus)
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
+	mux.HandleFunc("/api/v1/groups", api.handleGroups)
+	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
 	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
 		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
@@ -1075,6 +1092,251 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 			return
 		}
 		writeJSON(w, conv)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *LocalAPI) handleGroups(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		groups, err := a.opts.ChatService.ListGroups()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, groups)
+	case http.MethodPost:
+		var body struct {
+			Title   string   `json:"title"`
+			Members []string `json:"members"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.CreateGroup(body.Title, body.Members)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/groups/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	groupID := parts[0]
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		details, err := a.opts.ChatService.GetGroupDetails(groupID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, details)
+		return
+	}
+	action := parts[1]
+	switch action {
+	case "invite":
+		var body struct {
+			PeerID     string `json:"peer_id"`
+			Role       string `json:"role"`
+			InviteText string `json:"invite_text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.InviteGroupMember(groupID, body.PeerID, body.Role, body.InviteText)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "join":
+		group, err := a.opts.ChatService.AcceptGroupInvite(groupID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "leave":
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.LeaveGroup(groupID, body.Reason)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "remove":
+		var body struct {
+			PeerID string `json:"peer_id"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.RemoveGroupMember(groupID, body.PeerID, body.Reason)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "title":
+		var body struct {
+			Title string `json:"title"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.UpdateGroupTitle(groupID, body.Title)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "controller":
+		var body struct {
+			PeerID string `json:"peer_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.TransferGroupController(groupID, body.PeerID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "messages":
+		if len(parts) == 4 && parts[3] == "file" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			msgID := parts[2]
+			msg, blob, err := a.opts.ChatService.GetGroupMessageFile(groupID, msgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mimeType := msg.MIMEType
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", mimeType)
+			w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(msg.FileName)+`"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(blob)
+			return
+		}
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			msgs, err := a.opts.ChatService.ListGroupMessages(groupID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, msgs)
+		case http.MethodPost:
+			var body struct {
+				Text string `json:"text"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			msg, err := a.opts.ChatService.SendGroupText(groupID, body.Text)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, msg)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	case "files":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+			http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing file: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		data, err := chat.ValidateChatFileData(file)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		fileName := chat.NormalizeChatFileName(header.Filename)
+		mimeType := http.DetectContentType(data)
+		msg, err := a.opts.ChatService.SendGroupFile(groupID, fileName, mimeType, data)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, msg)
+	case "sync":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			FromPeerID string `json:"from_peer_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.opts.ChatService.SyncGroup(groupID, body.FromPeerID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"ok":           true,
+			"group_id":     groupID,
+			"from_peer_id": body.FromPeerID,
+		})
 	default:
 		http.NotFound(w, r)
 	}

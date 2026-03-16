@@ -43,6 +43,10 @@ func NewStore(path, localPeerID string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
+	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
@@ -155,6 +159,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureMessageFileColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureGroupTables(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -163,18 +170,29 @@ func (s *Store) ensureConversationRetentionColumn() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	hasRetention := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if name == "retention_minutes" {
-			return nil
+			hasRetention = true
+			break
 		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasRetention {
+		return nil
 	}
 	_, err = s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_minutes INTEGER NOT NULL DEFAULT 0`)
 	return err
@@ -185,7 +203,6 @@ func (s *Store) ensureConversationRetentionSyncColumns() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	hasState := false
 	hasAt := false
 	for rows.Next() {
@@ -194,6 +211,7 @@ func (s *Store) ensureConversationRetentionSyncColumns() error {
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if name == "retention_sync_state" {
@@ -202,6 +220,12 @@ func (s *Store) ensureConversationRetentionSyncColumns() error {
 		if name == "retention_synced_at" {
 			hasAt = true
 		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	if !hasState {
 		if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_sync_state TEXT NOT NULL DEFAULT 'synced'`); err != nil {
@@ -221,7 +245,6 @@ func (s *Store) ensureMessageFileColumns() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	hasFileName := false
 	hasMime := false
 	hasFileSize := false
@@ -231,6 +254,7 @@ func (s *Store) ensureMessageFileColumns() error {
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		switch name {
@@ -241,6 +265,12 @@ func (s *Store) ensureMessageFileColumns() error {
 		case "file_size":
 			hasFileSize = true
 		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	if !hasFileName {
 		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN file_name TEXT NOT NULL DEFAULT ''`); err != nil {

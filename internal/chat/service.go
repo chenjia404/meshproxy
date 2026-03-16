@@ -49,7 +49,11 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 	h.SetStreamHandler(p2p.ProtocolChatRequest, s.handleRequestStream)
 	h.SetStreamHandler(p2p.ProtocolChatMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolChatAck, s.handleAckStream)
+	h.SetStreamHandler(p2p.ProtocolGroupControl, s.handleGroupControlStream)
+	h.SetStreamHandler(p2p.ProtocolGroupMsg, s.handleMessageStream)
+	h.SetStreamHandler(p2p.ProtocolGroupSync, s.handleGroupSyncStream)
 	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
+	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
 	return s, nil
 }
 
@@ -465,6 +469,14 @@ func (s *Service) handleAckStream(str network.Stream) {
 	safe.Go("chat.handleAckStream", func() { s.serveAckStream(str) })
 }
 
+func (s *Service) handleGroupControlStream(str network.Stream) {
+	safe.Go("chat.handleGroupControlStream", func() { s.serveGroupControlStream(str) })
+}
+
+func (s *Service) handleGroupSyncStream(str network.Stream) {
+	safe.Go("chat.handleGroupSyncStream", func() { s.serveGroupSyncStream(str) })
+}
+
 func (s *Service) serveRequestStream(str network.Stream) {
 	defer str.Close()
 	var env map[string]any
@@ -550,6 +562,33 @@ func (s *Service) serveAckStream(str network.Stream) {
 		return
 	}
 	_ = s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
+}
+
+func (s *Service) serveGroupControlStream(str network.Stream) {
+	defer str.Close()
+	var env map[string]any
+	if err := tunnel.ReadJSONFrame(str, &env); err != nil {
+		return
+	}
+	if err := s.processGroupEnvelope(env); err != nil {
+		log.Printf("[group] process control envelope failed: %v", err)
+	}
+}
+
+func (s *Service) serveGroupSyncStream(str network.Stream) {
+	defer str.Close()
+	var req GroupSyncRequest
+	if err := tunnel.ReadJSONFrame(str, &req); err != nil {
+		return
+	}
+	resp, err := s.handleGroupSyncRequest(req, str.Conn().RemotePeer().String())
+	if err != nil {
+		log.Printf("[group] handle sync request failed: %v", err)
+		return
+	}
+	if err := tunnel.WriteJSONFrame(str, resp); err != nil {
+		log.Printf("[group] write sync response failed: %v", err)
+	}
 }
 
 func (s *Service) serveRelayE2EStream(str network.Stream) {
@@ -696,6 +735,10 @@ func protocolForEnvelope(v any) coreprotocol.ID {
 		return p2p.ProtocolChatAck
 	case RetentionUpdate, *RetentionUpdate:
 		return p2p.ProtocolChatMsg
+	case GroupControlEnvelope, *GroupControlEnvelope, GroupJoinRequest, *GroupJoinRequest, GroupLeaveRequest, *GroupLeaveRequest:
+		return p2p.ProtocolGroupControl
+	case GroupChatText, *GroupChatText, GroupChatFile, *GroupChatFile, GroupDeliveryAck, *GroupDeliveryAck:
+		return p2p.ProtocolGroupMsg
 	default:
 		return p2p.ProtocolChatMsg
 	}
@@ -746,6 +789,8 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		return err
 	}
 	switch env["type"] {
+	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
+		return s.processGroupEnvelope(env)
 	case MessageTypeSessionRequest:
 		var req SessionRequest
 		if err := remarshal(env, &req); err != nil {
@@ -946,6 +991,8 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 
 func (s *Service) processDirectEnvelope(env map[string]any) error {
 	switch env["type"] {
+	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
+		return s.processGroupEnvelope(env)
 	case MessageTypeChatText:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {

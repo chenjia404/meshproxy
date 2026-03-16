@@ -16,4 +16,7 @@ const (
 	ProtocolChatPresence protocol.ID = "/meshproxy/chat/presence/1.0.0"
 	ProtocolChatRelayE2E protocol.ID = "/meshproxy/chat/relay-e2e/1.0.0"
 	ProtocolChatVoiceSig protocol.ID = "/meshproxy/chat/voice-signal/1.0.0"
+	ProtocolGroupControl protocol.ID = "/meshproxy/group/control/1.0.0"
+	ProtocolGroupMsg     protocol.ID = "/meshproxy/group/msg/1.0.0"
+	ProtocolGroupSync    protocol.ID = "/meshproxy/group/sync/1.0.0"
 )
