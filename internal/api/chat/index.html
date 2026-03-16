@@ -139,6 +139,7 @@
       contactNicknameDrafts: {},
       retentionDrafts: {},
       fileSendStatus: null,
+      pendingFileUpload: null,
     };
 
     function api(path) { return path; }
@@ -252,7 +253,43 @@
         node.innerHTML = '';
         return;
       }
-      node.innerHTML = '<div class="send-status ' + escapeHtml(status.kind || 'info') + '">' + escapeHtml(status.text || '') + '</div>';
+      node.innerHTML = '<div class="send-status ' + escapeHtml(status.kind || 'info') + '">' + escapeHtml(status.text || '') + (status.retry ? ' <button type="button" class="btn btn-secondary" id="retry-file-send-btn">重试发送</button>' : '') + '</div>';
+      const retryBtn = document.getElementById('retry-file-send-btn');
+      if (retryBtn) {
+        retryBtn.onclick = async () => {
+          const job = state.pendingFileUpload;
+          if (!job) return;
+          await sendFileForConversation(job.conversationId, job.file);
+        };
+      }
+    }
+
+    async function sendFileForConversation(conversationId, file) {
+      if (!file) return;
+      state.pendingFileUpload = { conversationId, file };
+      setFileSendStatus({ kind: 'info', text: '准备上传：' + file.name });
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        setFileSendStatus({ kind: 'info', text: '上传中：' + file.name });
+        const resp = await fetch('/api/v1/chat/conversations/' + encodeURIComponent(conversationId) + '/files', {
+          method: 'POST',
+          body: form
+        });
+        setFileSendStatus({ kind: 'info', text: '发送中：' + file.name });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || resp.statusText);
+        showMessage('ok', '文件已发送');
+        state.pendingFileUpload = null;
+        setFileSendStatus(null);
+        const fileInput = document.getElementById('composer-file');
+        if (fileInput) fileInput.value = '';
+        await refreshMessages();
+        await refreshConversations();
+      } catch (err) {
+        setFileSendStatus({ kind: 'err', text: '发送文件失败：' + err.message, retry: true });
+        showMessage('err', '发送文件失败: ' + err.message);
+      }
     }
 
     function renderProfile() {
@@ -649,27 +686,7 @@
           fileInput.onchange = async () => {
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
-            setFileSendStatus({ kind: 'info', text: '准备上传：' + file.name });
-            const form = new FormData();
-            form.append('file', file);
-            try {
-              setFileSendStatus({ kind: 'info', text: '上传中：' + file.name });
-              const resp = await fetch('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/files', {
-                method: 'POST',
-                body: form
-              });
-              setFileSendStatus({ kind: 'info', text: '发送中：' + file.name });
-              const data = await resp.json().catch(() => ({}));
-              if (!resp.ok) throw new Error(data.error || resp.statusText);
-              showMessage('ok', '文件已发送');
-              setFileSendStatus(null);
-              fileInput.value = '';
-              await refreshMessages();
-              await refreshConversations();
-            } catch (err) {
-              setFileSendStatus({ kind: 'err', text: '发送文件失败：' + err.message });
-              showMessage('err', '发送文件失败: ' + err.message);
-            }
+            await sendFileForConversation(conv.conversation_id, file);
           };
         }
         setFileSendStatus(state.fileSendStatus);
