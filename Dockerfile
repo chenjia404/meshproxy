@@ -19,7 +19,7 @@ WORKDIR /app
 RUN addgroup -S mesh && adduser -S mesh -G mesh
 
 COPY --from=builder /app/meshproxy /usr/local/bin/meshproxy
-COPY configs/config.example.yaml /app/config.yaml
+COPY configs/config.docker.yaml /app/config.docker.yaml
 
 # 為非 root 用戶預先建立並授權數據目錄
 RUN mkdir -p /app/data && chown -R mesh:mesh /app
@@ -29,5 +29,5 @@ USER mesh
 EXPOSE 1080 4001 19080
 
 ENTRYPOINT ["/usr/local/bin/meshproxy"]
-CMD ["-config", "/app/config.yaml"]
+CMD ["-config", "/app/config.docker.yaml"]
 

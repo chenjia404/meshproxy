@@ -15,6 +15,7 @@ builds:
     hooks:
       pre:
         - cp -f configs/config.example.yaml "{{dir  .Path }}/config.yaml"
+        - cp -f configs/config.docker.yaml "{{dir  .Path }}/config.docker.yaml"
     
     ldflags:
       - -s -w -X main.gitRev="{{.ShortCommit}}" -X main.buildTime="{{.CommitDate}}"
@@ -70,3 +71,4 @@ dockers_v2:
     dockerfile: "goreleaser.dockefile"
     extra_files:
       - configs/config.example.yaml
+      - configs/config.docker.yaml

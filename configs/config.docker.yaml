@@ -1,0 +1,81 @@
+mode: relay
+
+data_dir: data
+
+identity_key_path: ""
+
+p2p:
+  listen_addrs:
+    - "/ip4/0.0.0.0/tcp/4001"
+    - "/ip6/::/tcp/4001"
+    - /ip4/0.0.0.0/udp/4001/quic-v1
+    - /ip6/::/udp/4001/quic-v1
+  bootstrap_peers: []
+  # nodisc: true               # 为 true 时禁用 DHT Advertise/FindPeers 节点发现，仅使用 bootstrap、已连接节点 gossip 和 peer exchange
+
+socks5:
+  listen: "0.0.0.0:1080"
+  # tunnel_to_exit: true        # 客户端启用后，本地 1080 收到的 TCP 原样转发到 exit 的 SOCKS5
+  # exit_upstream: "127.0.0.1:1081"   # exit 节点上的直连 SOCKS5，直接出网并受出口策略限制
+  # allow_udp_associate: true   # 啟用 SOCKS5 UDP ASSOCIATE（需出口策略 allow_udp 配合）
+
+api:
+  listen: "0.0.0.0:19080"
+
+# 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
+circuit_pool:
+  min_per_pool: 1
+  max_per_pool: 3
+  min_total: 3
+  max_total: 5
+  idle_timeout_seconds: 300
+  replenish_interval_seconds: 30
+
+# 自動重試與故障切換：建鏈失敗重試、relay/exit 失效換路、BEGIN_TCP 換出口重試
+# 出口選擇：控制每條電路最後一跳 Exit 的篩選與排序 (auto | country_only | country_preferred | fixed_peer)
+client:
+  build_retries: 1      # 建鏈失敗重試次數 (0/1/2)
+  begin_tcp_retries: 1  # exit 連線失敗換出口重試次數 (0/1/2)
+  begin_connect_timeout_seconds: 30
+  heartbeat_enabled: true
+  heartbeat_interval_seconds: 30
+  heartbeat_timeout_seconds: 8
+  heartbeat_failure_threshold: 5
+  skip_heartbeat_when_active_seconds: 30
+  exit_selection:
+    mode: auto                    # auto | country_only | country_preferred | fixed_peer
+    allowed_countries: []         # country_only 時僅允許這些國家 (e.g. ["SG","JP"])
+    preferred_countries: []       # country_preferred 時優先順序 (e.g. ["TH","SG","MY"])
+    fixed_exit_peer_id: ""        # fixed_peer 時指定 peer_id
+    exclude_countries: []         # 任意模式皆排除這些國家
+    exclude_peer_ids: []
+    require_remote_dns: false
+    require_tcp_support: true
+    fallback_to_any: true         # 找不到符合條件時是否退回任意出口
+    allow_direct_exit: true       # 是否允許 Local -> Exit（否則強制經 relay）
+  # 從出口節點 IP 解析國家（當 descriptor 無 exit_info.country 時）：用於 country_only / country_preferred 與 API 顯示
+  geoip:
+    provider: geolite2  # none | ip-api | geolite2（本地 mmdb，缺失時自動下載到 data_dir）
+    cache_ttl_minutes: 1440   # 緩存 24 小時
+
+# 出口節點策略（僅在 mode: relay+exit 時生效）：運營者控制允許代理的端口、域名、peer、私網/回環、維護模式等
+# exit:
+#   enabled: true
+#   policy:
+#     allow_tcp: true
+#     allow_udp: false
+#     remote_dns: true
+#     allowed_ports: [80, 443, 8080]
+#     denied_ports: [25, 465, 587, 22, 3389]
+#     allowed_domains: []
+#     denied_domains: []
+#     allowed_domain_suffixes: [".google.com", ".cloudflare.com"]
+#     denied_domain_suffixes: []
+#     peer_whitelist: []
+#     peer_blacklist: []
+#     allow_private_ip_targets: false
+#     allow_loopback_targets: false
+#     allow_link_local_targets: false
+#   runtime:
+#     drain_mode: false
+#     accept_new_streams: true
