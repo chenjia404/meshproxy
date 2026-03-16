@@ -5,6 +5,8 @@ meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地
 
 安卓客户端 https://github.com/chenjia404/meshproxy-android
 
+
+
 架构与模块
 --------
 
@@ -22,8 +24,15 @@ meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地
 - **`proto/meshproxy.proto`**：后续用于生成 Protobuf 类型。
 - **`configs/config.example.yaml`**：示例配置。
 
-加密聊天
+界面截图
 --------
+
+控制台：http://127.0.0.1:19080/console
+
+![alt text](image-1.png)
+
+
+加密聊天：http://127.0.0.1:19080/chat
 
 ![alt text](image.png)
 
