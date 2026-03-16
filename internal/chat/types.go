@@ -69,6 +69,7 @@ type Conversation struct {
 	LastMessageAt     time.Time `json:"last_message_at"`
 	LastTransportMode string    `json:"last_transport_mode"`
 	UnreadCount       int       `json:"unread_count"`
+	RetentionMinutes  int       `json:"retention_minutes"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

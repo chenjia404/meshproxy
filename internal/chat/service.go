@@ -48,6 +48,7 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 	h.SetStreamHandler(p2p.ProtocolChatRequest, s.handleRequestStream)
 	h.SetStreamHandler(p2p.ProtocolChatMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolChatAck, s.handleAckStream)
+	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
 	return s, nil
 }
 
@@ -81,6 +82,10 @@ func (s *Service) ListRequests() ([]Request, error) {
 
 func (s *Service) ListConversations() ([]Conversation, error) {
 	return s.store.ListConversations()
+}
+
+func (s *Service) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
+	return s.store.UpdateConversationRetention(conversationID, minutes)
 }
 
 func (s *Service) ListContacts() ([]Contact, error) {
@@ -755,5 +760,20 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		return s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix))
 	default:
 		return nil
+	}
+}
+
+func (s *Service) runRetentionLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := s.store.CleanupExpiredMessages(now.UTC()); err != nil {
+				log.Printf("[chat] retention cleanup failed: %v", err)
+			}
+		}
 	}
 }

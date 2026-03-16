@@ -68,6 +68,10 @@
     .contact-actions { margin-top: 0.6rem; display: grid; gap: 0.45rem; }
     .contact-actions input { width: 100%; padding: 0.4rem 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
     .contact-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
+    .retention-box { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+    .retention-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.45rem; }
+    .retention-row input { width: 180px; padding: 0.4rem 0.55rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .retention-unit { color: var(--muted); font-size: 0.88rem; }
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
       .chat-layout { min-height: auto; }
@@ -116,6 +120,7 @@
       composerDrafts: {},
       composerConversationId: '',
       contactNicknameDrafts: {},
+      retentionDrafts: {},
     };
 
     function api(path) { return path; }
@@ -453,6 +458,9 @@
       const peerStatus = state.peerStatus;
       const transportMode = conv?.last_transport_mode || '-';
       const connectedness = peerStatus?.connectedness || 'unknown';
+      const retentionDraft = Object.prototype.hasOwnProperty.call(state.retentionDrafts, conv?.conversation_id || '')
+        ? state.retentionDrafts[conv.conversation_id]
+        : (conv?.retention_minutes || 0);
       const transportBadgeClass = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'offline';
       const transportLabel = transportMode === 'direct' ? 'direct' : transportMode === 'relay' ? 'relay' : 'unknown';
       const connLabel = connectedness === 'Connected' || connectedness === 'connected' ? '已连接' : connectedness === 'NotConnected' || connectedness === 'not connected' ? '未连接' : connectedness;
@@ -461,8 +469,23 @@
           '<div class="status-row">' +
             '<span class="badge ' + escapeHtml(transportBadgeClass) + '">transport: ' + escapeHtml(transportLabel) + '</span>' +
             '<span class="badge ' + escapeHtml((connectedness === 'Connected' || connectedness === 'connected') ? 'direct' : 'offline') + '">连接: ' + escapeHtml(connLabel) + '</span>' +
+          '</div>' +
+          '<div class="retention-box">' +
+            '<div class="muted">自动删除：' + escapeHtml(conv.retention_minutes > 0 ? (conv.retention_minutes + ' 分钟') : '关闭') + '</div>' +
+            '<div class="retention-row">' +
+              '<input id="retention-minutes" type="number" min="0" max="525600" step="1" value="' + escapeHtml(String(retentionDraft)) + '" placeholder="0 表示关闭，1~525600 分钟">' +
+              '<span class="retention-unit">分钟</span>' +
+              '<button type="button" class="btn btn-secondary" id="save-retention-btn">保存自动删除</button>' +
+            '</div>' +
+            '<div class="muted">会话级别生效，历史消息也会立即按新期限清理。最短 1 分钟，最长 1 年。</div>' +
           '</div>'
         : '<h2>当前会话</h2><p class="empty">请选择一个会话</p>';
+      const retentionInput = document.getElementById('retention-minutes');
+      if (retentionInput && conv) {
+        retentionInput.addEventListener('input', () => {
+          state.retentionDrafts[conv.conversation_id] = retentionInput.value;
+        });
+      }
 
       const wrap = document.getElementById('messages');
       if (!conv) {
@@ -528,6 +551,29 @@
           input.focus();
           input.setSelectionRange(pos, pos);
         }
+      }
+      const retentionBtn = document.getElementById('save-retention-btn');
+      if (retentionBtn) {
+        retentionBtn.onclick = async () => {
+          const input = document.getElementById('retention-minutes');
+          const minutes = input ? Number(input.value) : 0;
+          if (!Number.isInteger(minutes) || minutes < 0 || minutes > 525600 || (minutes !== 0 && minutes < 1)) {
+            showMessage('err', '自动删除时间必须是 0 或 1~525600 分钟');
+            return;
+          }
+          try {
+            const updated = await post('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/retention', { retention_minutes: minutes });
+            const idx = state.conversations.findIndex(item => item.conversation_id === conv.conversation_id);
+            if (idx >= 0) state.conversations[idx] = updated;
+            state.retentionDrafts[conv.conversation_id] = String(updated.retention_minutes || 0);
+            showMessage('ok', minutes > 0 ? ('已设置自动删除为 ' + minutes + ' 分钟') : '已关闭自动删除');
+            await refreshMessages();
+            renderConversations();
+            renderMessages();
+          } catch (err) {
+            showMessage('err', '保存自动删除失败: ' + err.message);
+          }
+        };
       }
     }
 

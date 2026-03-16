@@ -170,6 +170,7 @@ type ChatProvider interface {
 	AcceptRequest(requestID string) (chat.Conversation, error)
 	RejectRequest(requestID string) error
 	ListConversations() ([]chat.Conversation, error)
+	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
 	SendText(conversationID, text string) (chat.Message, error)
 	ConnectPeer(peerID string) error
@@ -953,35 +954,58 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 || parts[1] != "messages" {
+	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
 	}
-	conversationID := parts[0]
-	switch r.Method {
-	case http.MethodGet:
-		msgs, err := a.opts.ChatService.ListMessages(conversationID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	conversationID, action := parts[0], parts[1]
+	switch action {
+	case "messages":
+		switch r.Method {
+		case http.MethodGet:
+			msgs, err := a.opts.ChatService.ListMessages(conversationID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, msgs)
+		case http.MethodPost:
+			var body struct {
+				Text string `json:"text"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			msg, err := a.opts.ChatService.SendText(conversationID, body.Text)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, msg)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	case "retention":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, msgs)
-	case http.MethodPost:
 		var body struct {
-			Text string `json:"text"`
+			RetentionMinutes int `json:"retention_minutes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		msg, err := a.opts.ChatService.SendText(conversationID, body.Text)
+		conv, err := a.opts.ChatService.UpdateConversationRetention(conversationID, body.RetentionMinutes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, msg)
+		writeJSON(w, conv)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.NotFound(w, r)
 	}
 }
 
