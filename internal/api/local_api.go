@@ -190,6 +190,7 @@ type ChatProvider interface {
 	LeaveGroup(groupID, reason string) (chat.Group, error)
 	RemoveGroupMember(groupID, peerID, reason string) (chat.Group, error)
 	UpdateGroupTitle(groupID, title string) (chat.Group, error)
+	UpdateGroupRetention(groupID string, minutes int) (chat.Group, error)
 	TransferGroupController(groupID, peerID string) (chat.Group, error)
 	ListGroupMessages(groupID string) ([]chat.GroupMessage, error)
 	SendGroupText(groupID, text string) (chat.GroupMessage, error)
@@ -1251,6 +1252,20 @@ func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		group, err := a.opts.ChatService.UpdateGroupTitle(groupID, body.Title)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, group)
+	case "retention":
+		var body struct {
+			RetentionMinutes int `json:"retention_minutes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		group, err := a.opts.ChatService.UpdateGroupRetention(groupID, body.RetentionMinutes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

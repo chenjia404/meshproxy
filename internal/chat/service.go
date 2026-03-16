@@ -1442,6 +1442,9 @@ func (s *Service) runRetentionLoop() {
 			if err := s.store.CleanupExpiredMessages(now.UTC()); err != nil {
 				log.Printf("[chat] retention cleanup failed: %v", err)
 			}
+			if err := s.store.CleanupExpiredGroupMessages(now.UTC()); err != nil {
+				log.Printf("[group] retention cleanup failed: %v", err)
+			}
 		}
 	}
 }

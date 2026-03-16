@@ -16,6 +16,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -53,6 +54,10 @@ func (s *Service) CreateGroup(title string, memberPeerIDs []string) (Group, erro
 	if err != nil {
 		return Group{}, err
 	}
+	initialInvitees, err := s.normalizeInitialInvitees(memberPeerIDs)
+	if err != nil {
+		return Group{}, err
+	}
 	now := time.Now().UTC()
 	groupID := uuid.NewString()
 	initialMembers := []string{s.localPeer}
@@ -64,27 +69,6 @@ func (s *Service) CreateGroup(title string, memberPeerIDs []string) (Group, erro
 		JoinedEpoch: 1,
 		UpdatedAt:   now,
 	}}
-	seen := map[string]struct{}{s.localPeer: {}}
-	for _, peerID := range memberPeerIDs {
-		peerID = strings.TrimSpace(peerID)
-		if peerID == "" {
-			continue
-		}
-		if _, ok := seen[peerID]; ok {
-			continue
-		}
-		seen[peerID] = struct{}{}
-		initialMembers = append(initialMembers, peerID)
-		groupMembers = append(groupMembers, GroupMember{
-			GroupID:   groupID,
-			PeerID:    peerID,
-			Role:      GroupRoleMember,
-			State:     GroupMemberStateInvited,
-			InvitedBy: s.localPeer,
-			UpdatedAt: now,
-		})
-		_ = s.store.UpsertPeer(peerID, "")
-	}
 	payload := GroupCreatePayload{
 		Title:            title,
 		ControllerPeerID: s.localPeer,
@@ -124,6 +108,12 @@ func (s *Service) CreateGroup(title string, memberPeerIDs []string) (Group, erro
 		return Group{}, err
 	}
 	s.broadcastGroupEvent(created.GroupID, event, peersFromMembers(groupMembers, s.localPeer)...)
+	for _, peerID := range initialInvitees {
+		created, err = s.InviteGroupMember(created.GroupID, peerID, GroupRoleMember, "")
+		if err != nil {
+			return Group{}, err
+		}
+	}
 	return created, nil
 }
 
@@ -233,7 +223,7 @@ func (s *Service) AcceptGroupInvite(groupID string) (Group, error) {
 		if err := s.sendEnvelope(group.ControllerPeerID, req); err != nil {
 			return Group{}, err
 		}
-		return s.store.GetGroup(groupID)
+		return s.syncAcceptedInviteState(groupID, group.ControllerPeerID)
 	}
 	payload := GroupJoinPayload{
 		JoinerPeerID:  s.localPeer,
@@ -413,6 +403,42 @@ func (s *Service) UpdateGroupTitle(groupID, title string) (Group, error) {
 		return Group{}, err
 	}
 	updated, err := s.store.UpdateGroupTitle(groupID, title, event)
+	if err != nil {
+		return Group{}, err
+	}
+	members, _ := s.store.ListGroupMembers(groupID)
+	s.broadcastGroupEvent(groupID, event, peersFromMembers(members, s.localPeer)...)
+	return updated, nil
+}
+
+func (s *Service) UpdateGroupRetention(groupID string, minutes int) (Group, error) {
+	group, err := s.store.GetGroup(groupID)
+	if err != nil {
+		return Group{}, err
+	}
+	member, err := s.store.GetGroupMember(groupID, s.localPeer)
+	if err != nil {
+		return Group{}, err
+	}
+	if member.State != GroupMemberStateActive {
+		return Group{}, errors.New("local peer is not an active group member")
+	}
+	if member.Role != GroupRoleController && member.Role != GroupRoleAdmin {
+		return Group{}, errors.New("only controller or admin can update group retention")
+	}
+	if minutes != 0 && (minutes < MinRetentionMinutes || minutes > MaxRetentionMinutes) {
+		return Group{}, fmt.Errorf("retention_minutes must be 0 or between %d and %d", MinRetentionMinutes, MaxRetentionMinutes)
+	}
+	now := time.Now().UTC()
+	payload := GroupRetentionUpdatePayload{RetentionMinutes: minutes}
+	event, err := newGroupEvent(groupID, group.LastEventSeq+1, GroupEventRetentionUpdate, s.localPeer, s.localPeer, now, payload)
+	if err != nil {
+		return Group{}, err
+	}
+	if err := s.signGroupEvent(&event); err != nil {
+		return Group{}, err
+	}
+	updated, err := s.store.UpdateGroupRetention(groupID, minutes, event)
 	if err != nil {
 		return Group{}, err
 	}
@@ -723,8 +749,8 @@ func (s *Service) SyncGroup(groupID, fromPeerID string) error {
 	if err != nil {
 		return err
 	}
-	if member.State != GroupMemberStateActive {
-		return errors.New("local peer is not an active group member")
+	if member.State != GroupMemberStateActive && member.State != GroupMemberStateInvited {
+		return errors.New("local peer is not an active or invited group member")
 	}
 	remoteMember, err := s.store.GetGroupMember(groupID, fromPeerID)
 	if err != nil {
@@ -772,6 +798,30 @@ func (s *Service) SyncGroup(groupID, fromPeerID string) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) syncAcceptedInviteState(groupID, controllerPeerID string) (Group, error) {
+	delays := []time.Duration{150 * time.Millisecond, 400 * time.Millisecond, time.Second}
+	var lastErr error
+	for _, delay := range delays {
+		time.Sleep(delay)
+		if err := s.SyncGroup(groupID, controllerPeerID); err != nil {
+			lastErr = err
+		}
+		member, err := s.store.GetGroupMember(groupID, s.localPeer)
+		if err == nil && member.State == GroupMemberStateActive {
+			return s.store.GetGroup(groupID)
+		}
+	}
+	if lastErr != nil {
+		safe.Go("chat.followupGroupJoinSync", func() {
+			time.Sleep(2 * time.Second)
+			if err := s.SyncGroup(groupID, controllerPeerID); err != nil {
+				log.Printf("[group] follow-up sync after accept failed group=%s controller=%s: %v", groupID, controllerPeerID, err)
+			}
+		})
+	}
+	return s.store.GetGroup(groupID)
 }
 
 func (s *Service) runGroupRetryLoop() {
@@ -999,7 +1049,7 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			return errors.New("invalid group_create signer or actor")
 		}
 		return nil
-	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
+	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
 		group, err := s.store.GetGroup(env.GroupID)
 		if err != nil {
 			if env.EventType == GroupEventInvite && errors.Is(err, sql.ErrNoRows) {
@@ -1015,10 +1065,22 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			return err
 		}
 		if group.ControllerPeerID != env.SignerPeerID {
-			return errors.New("group control signer is not current controller")
+			if env.EventType != GroupEventRetentionUpdate {
+				return errors.New("group control signer is not current controller")
+			}
+			member, memberErr := s.store.GetGroupMember(env.GroupID, env.SignerPeerID)
+			if memberErr != nil {
+				return memberErr
+			}
+			if member.State != GroupMemberStateActive {
+				return errors.New("group retention signer is not an active group member")
+			}
+			if member.Role != GroupRoleController && member.Role != GroupRoleAdmin {
+				return errors.New("group retention signer is not controller or admin")
+			}
 		}
 		switch env.EventType {
-		case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventControllerTransfer:
+		case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventControllerTransfer:
 			if env.ActorPeerID != env.SignerPeerID {
 				return errors.New("group control actor must match signer")
 			}
@@ -1415,6 +1477,8 @@ func (s *Service) applyGroupControlEnvelope(env GroupControlEnvelope) error {
 		return s.applyRemoteGroupRemove(env)
 	case GroupEventTitleUpdate:
 		return s.applyRemoteGroupTitleUpdate(env)
+	case GroupEventRetentionUpdate:
+		return s.applyRemoteGroupRetentionUpdate(env)
 	case GroupEventControllerTransfer:
 		return s.applyRemoteGroupControllerTransfer(env)
 	default:
@@ -1695,6 +1759,23 @@ func (s *Service) applyRemoteGroupTitleUpdate(env GroupControlEnvelope) error {
 	return err
 }
 
+func (s *Service) applyRemoteGroupRetentionUpdate(env GroupControlEnvelope) error {
+	group, err := s.store.GetGroup(env.GroupID)
+	if err != nil {
+		return err
+	}
+	shouldApply, err := shouldApplyGroupEvent(group.LastEventSeq, env.EventSeq)
+	if err != nil || !shouldApply {
+		return err
+	}
+	var payload GroupRetentionUpdatePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return err
+	}
+	_, err = s.store.UpdateGroupRetention(env.GroupID, payload.RetentionMinutes, groupEventFromEnvelope(env))
+	return err
+}
+
 func (s *Service) applyRemoteGroupControllerTransfer(env GroupControlEnvelope) error {
 	group, err := s.store.GetGroup(env.GroupID)
 	if err != nil {
@@ -1945,25 +2026,24 @@ func (s *Service) sendDirectGroupInviteNotice(peerID string, group Group, payloa
 	if _, err := s.store.AddMessage(localMsg, ciphertext); err != nil {
 		return err
 	}
-	wire := ChatText{
-		Type:           MessageTypeGroupInviteNotice,
-		ConversationID: conv.ConversationID,
-		MsgID:          msgID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       peerID,
-		Ciphertext:     ciphertext,
-		Counter:        counter,
-		SentAtUnix:     now.UnixMilli(),
-	}
-	if err := s.sendEnvelope(peerID, wire); err != nil {
-		return err
-	}
 	if err := s.store.UpdateSendCounter(conv.ConversationID, counter+1); err != nil {
 		return err
 	}
+	if err := s.store.UpsertOutboxJob(msgID, peerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
+		return err
+	}
+	if err := s.sendStoredDirectMessage(localMsg, ciphertext, nil); err != nil {
+		localMsg.State = MessageStateQueuedForRetry
+		if _, updateErr := s.store.AddMessage(localMsg, ciphertext); updateErr != nil {
+			return updateErr
+		}
+		return s.scheduleOutboxRetry(localMsg.MsgID, peerID, 1)
+	}
 	localMsg.State = MessageStateSentToTransport
-	_, err = s.store.AddMessage(localMsg, ciphertext)
-	return err
+	if _, err := s.store.AddMessage(localMsg, ciphertext); err != nil {
+		return err
+	}
+	return s.markOutboxSentToTransport(localMsg.MsgID, peerID, 0, time.Now().UTC())
 }
 
 func buildGroupInviteNoticePayload(group Group, payload GroupInvitePayload, env GroupControlEnvelope, localMemberState string) GroupInviteNoticePayload {
@@ -1979,6 +2059,29 @@ func buildGroupInviteNoticePayload(group Group, payload GroupInvitePayload, env 
 		LocalMemberState: localMemberState,
 		InviteEnvelope:   env,
 	}
+}
+
+func (s *Service) normalizeInitialInvitees(memberPeerIDs []string) ([]string, error) {
+	seen := map[string]struct{}{s.localPeer: {}}
+	out := make([]string, 0, len(memberPeerIDs))
+	for _, peerID := range memberPeerIDs {
+		peerID = strings.TrimSpace(peerID)
+		if peerID == "" {
+			continue
+		}
+		if _, ok := seen[peerID]; ok {
+			continue
+		}
+		if _, err := s.store.GetConversationByPeer(peerID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("group invites require an existing direct conversation: %s", peerID)
+			}
+			return nil, err
+		}
+		seen[peerID] = struct{}{}
+		out = append(out, peerID)
+	}
+	return out, nil
 }
 
 func ignoreDuplicateCreate(err error) error {

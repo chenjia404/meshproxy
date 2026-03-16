@@ -282,7 +282,8 @@
           invitePeerId: '',
           inviteRole: 'member',
           transferPeerId: '',
-          syncPeerId: ''
+          syncPeerId: '',
+          retentionMinutes: ''
         };
       }
       return state.groupDrafts[groupID];
@@ -1136,6 +1137,7 @@
       const drafts = groupDraft(selectedGroup.group_id);
       const memberStats = groupMemberStats(details);
       if (!drafts.title) drafts.title = selectedGroup.title || '';
+      if (drafts.retentionMinutes === '') drafts.retentionMinutes = String(selectedGroup.retention_minutes || 0);
       if (!drafts.syncPeerId) {
         const syncCandidate = (details.members || []).find(member => member.peer_id !== state.me?.peer_id && member.state === 'active');
         drafts.syncPeerId = syncCandidate ? syncCandidate.peer_id : selectedGroup.controller_peer_id || '';
@@ -1155,6 +1157,7 @@
           '<span class="badge ' + escapeHtml(selectedGroup.state === 'active' ? 'direct' : 'offline') + '">状态: ' + escapeHtml(groupStateLabel(selectedGroup.state || '-')) + '</span>' +
           '<span class="badge relay">epoch: ' + escapeHtml(String(selectedGroup.current_epoch || 0)) + '</span>' +
           '<span class="badge warn">成员: ' + escapeHtml(String((details.members || []).length)) + '</span>' +
+          '<span class="badge msg-local">自动删除: ' + escapeHtml(selectedGroup.retention_minutes > 0 ? (selectedGroup.retention_minutes + ' 分钟') : '关闭') + '</span>' +
           (localMember ? '<span class="badge direct">我的角色: ' + escapeHtml(groupRoleLabel(localMember.role || '-')) + '</span>' : '<span class="badge offline">未入群</span>') +
           (localMember ? '<span class="badge ' + escapeHtml(localMember.state === 'active' ? 'direct' : 'warn') + '">成员状态: ' + escapeHtml(groupMemberStateLabel(localMember.state)) + '</span>' : '') +
         '</div>' +
@@ -1200,11 +1203,14 @@
             '</div>' +
             '<div>' +
               '<div class="muted">群管理</div>' +
-              (localMember && localMember.role === 'controller'
-                ? '<div class="form-row"><label>修改群标题</label><div class="inline-form"><input id="group-title-input" type="text" value="' + escapeHtml(drafts.title || selectedGroup.title || '') + '" placeholder="输入新群标题"><button type="button" class="btn btn-secondary" id="group-title-save-btn">保存</button></div></div>' +
+              (localMember && (localMember.role === 'controller' || localMember.role === 'admin')
+                ? '<div class="form-row"><label>自动删除</label><div class="inline-form"><input id="group-retention-input" type="number" min="0" max="525600" value="' + escapeHtml(drafts.retentionMinutes || String(selectedGroup.retention_minutes || 0)) + '" placeholder="分钟，0 为关闭"><button type="button" class="btn btn-secondary" id="group-retention-save-btn">保存</button></div><div class="muted">单位分钟，最短 1 分钟，最长 525600 分钟（1 年），0 表示关闭。</div></div>' +
+                  (localMember.role === 'controller'
+                    ? '<div class="form-row"><label>修改群标题</label><div class="inline-form"><input id="group-title-input" type="text" value="' + escapeHtml(drafts.title || selectedGroup.title || '') + '" placeholder="输入新群标题"><button type="button" class="btn btn-secondary" id="group-title-save-btn">保存</button></div></div>' +
                   '<div class="form-row"><label>邀请成员</label><div class="inline-form"><input id="group-invite-peer" type="text" value="' + escapeHtml(drafts.invitePeerId || '') + '" placeholder="Peer ID"><select id="group-invite-role"><option value="member"' + ((drafts.inviteRole || 'member') === 'member' ? ' selected' : '') + '>member</option><option value="admin"' + ((drafts.inviteRole || 'member') === 'admin' ? ' selected' : '') + '>admin</option></select><button type="button" class="btn btn-secondary" id="group-invite-btn">邀请</button></div></div>' +
                   '<div class="form-row"><label>转移 controller</label><div class="inline-form"><input id="group-transfer-peer" type="text" value="' + escapeHtml(drafts.transferPeerId || '') + '" placeholder="目标 Peer ID"><button type="button" class="btn btn-secondary" id="group-transfer-btn">转移</button></div></div>'
-                : '<div class="muted">当前节点不是 controller，可查看成员和收发群消息。</div>') +
+                    : '<div class="muted">当前节点是 admin，可修改群消息自动删除时间。</div>')
+                : '<div class="muted">当前节点不是 controller/admin，可查看成员和收发群消息。</div>') +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -1316,6 +1322,37 @@
       }
 
       const titleInput = document.getElementById('group-title-input');
+      const retentionInput = document.getElementById('group-retention-input');
+      if (retentionInput) {
+        retentionInput.addEventListener('input', () => {
+          groupDraft(selectedGroup.group_id).retentionMinutes = retentionInput.value;
+        });
+      }
+      const retentionBtn = document.getElementById('group-retention-save-btn');
+      if (retentionBtn) {
+        retentionBtn.onclick = async () => {
+          const raw = (document.getElementById('group-retention-input')?.value || '').trim();
+          const minutes = Number(raw);
+          if (!Number.isFinite(minutes) || !Number.isInteger(minutes) || minutes < 0) {
+            showMessage('err', '自动删除时间必须是非负整数分钟');
+            return;
+          }
+          if (minutes !== 0 && (minutes < 1 || minutes > 525600)) {
+            showMessage('err', '自动删除时间需为 1 到 525600 分钟，或 0 关闭');
+            return;
+          }
+          try {
+            const updated = await post('/api/v1/groups/' + encodeURIComponent(selectedGroup.group_id) + '/retention', { retention_minutes: minutes });
+            showMessage('ok', '群自动删除时间已更新');
+            groupDraft(selectedGroup.group_id).retentionMinutes = String(updated.retention_minutes || 0);
+            await refreshGroups();
+            await refreshCurrentThread();
+            renderThreadLists();
+          } catch (err) {
+            showMessage('err', '更新群自动删除时间失败: ' + err.message);
+          }
+        };
+      }
       if (titleInput) {
         titleInput.addEventListener('input', () => {
           groupDraft(selectedGroup.group_id).title = titleInput.value;
@@ -1452,6 +1489,9 @@
       }
       if (event.event_type === 'group_title_update') {
         return '修改群标题为“' + ((payload && payload.title) || '') + '”';
+      }
+      if (event.event_type === 'group_retention_update') {
+        return '将自动删除时间设置为 ' + (((payload && payload.retention_minutes) || 0) > 0 ? ((payload && payload.retention_minutes) + ' 分钟') : '关闭');
       }
       if (event.event_type === 'group_controller_transfer') {
         return 'controller 转移给 ' + displayName(payload && payload.to_peer_id, shortPeer(payload && payload.to_peer_id));

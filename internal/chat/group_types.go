@@ -41,6 +41,7 @@ const (
 	GroupEventLeave              = "group_leave"
 	GroupEventRemove             = "group_remove"
 	GroupEventTitleUpdate        = "group_title_update"
+	GroupEventRetentionUpdate    = "group_retention_update"
 	GroupEventControllerTransfer = "group_controller_transfer"
 	GroupEventEpochRotate        = "group_epoch_rotate"
 )
@@ -72,6 +73,7 @@ type Group struct {
 	Avatar           string    `json:"avatar"`
 	ControllerPeerID string    `json:"controller_peer_id"`
 	CurrentEpoch     uint64    `json:"current_epoch"`
+	RetentionMinutes int       `json:"retention_minutes"`
 	State            string    `json:"state"`
 	LastEventSeq     uint64    `json:"last_event_seq"`
 	LastMessageAt    time.Time `json:"last_message_at"`
@@ -240,6 +242,10 @@ type GroupRemovePayload struct {
 
 type GroupTitleUpdatePayload struct {
 	Title string `json:"title"`
+}
+
+type GroupRetentionUpdatePayload struct {
+	RetentionMinutes int `json:"retention_minutes"`
 }
 
 type GroupControllerTransferPayload struct {

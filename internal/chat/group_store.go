@@ -62,6 +62,7 @@ func (s *Store) ensureGroupTables() error {
 			avatar TEXT NOT NULL DEFAULT '',
 			controller_peer_id TEXT NOT NULL,
 			current_epoch INTEGER NOT NULL,
+			retention_minutes INTEGER NOT NULL DEFAULT 0,
 			state TEXT NOT NULL,
 			last_event_seq INTEGER NOT NULL DEFAULT 0,
 			last_message_at TEXT NOT NULL DEFAULT '',
@@ -158,6 +159,9 @@ func (s *Store) ensureGroupTables() error {
 	if err := s.ensureGroupEventSignerColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureGroupRetentionColumn(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -196,6 +200,39 @@ func (s *Store) ensureGroupEventSignerColumn() error {
 	return err
 }
 
+func (s *Store) ensureGroupRetentionColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(groups)`)
+	if err != nil {
+		return err
+	}
+	hasRetention := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "retention_minutes" {
+			hasRetention = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasRetention {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE groups ADD COLUMN retention_minutes INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
 func (s *Store) ListGroups() ([]Group, error) {
 	rows, err := s.db.Query(`
 		SELECT
@@ -204,6 +241,7 @@ func (s *Store) ListGroups() ([]Group, error) {
 			g.avatar,
 			g.controller_peer_id,
 			g.current_epoch,
+			g.retention_minutes,
 			g.state,
 			g.last_event_seq,
 			g.last_message_at,
@@ -255,6 +293,7 @@ func (s *Store) GetGroup(groupID string) (Group, error) {
 			g.avatar,
 			g.controller_peer_id,
 			g.current_epoch,
+			g.retention_minutes,
 			g.state,
 			g.last_event_seq,
 			g.last_message_at,
@@ -882,9 +921,9 @@ func (s *Store) CreateGroup(group Group, epoch GroupEpoch, members []GroupMember
 	}
 	defer rollbackTx(tx)
 	if _, err := tx.Exec(`
-		INSERT INTO groups(group_id,title,avatar,controller_peer_id,current_epoch,state,last_event_seq,last_message_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
-	`, group.GroupID, group.Title, group.Avatar, group.ControllerPeerID, group.CurrentEpoch, group.State, group.LastEventSeq, formatDBTime(group.LastMessageAt), formatDBTime(group.CreatedAt), formatDBTime(group.UpdatedAt)); err != nil {
+		INSERT INTO groups(group_id,title,avatar,controller_peer_id,current_epoch,retention_minutes,state,last_event_seq,last_message_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	`, group.GroupID, group.Title, group.Avatar, group.ControllerPeerID, group.CurrentEpoch, group.RetentionMinutes, group.State, group.LastEventSeq, formatDBTime(group.LastMessageAt), formatDBTime(group.CreatedAt), formatDBTime(group.UpdatedAt)); err != nil {
 		return Group{}, err
 	}
 	for _, member := range members {
@@ -993,6 +1032,33 @@ func (s *Store) UpdateGroupTitle(groupID, title string, event GroupEvent) (Group
 	return s.GetGroup(groupID)
 }
 
+func (s *Store) UpdateGroupRetention(groupID string, minutes int, event GroupEvent) (Group, error) {
+	if minutes != 0 && (minutes < MinRetentionMinutes || minutes > MaxRetentionMinutes) {
+		return Group{}, fmt.Errorf("retention_minutes must be 0 or between %d and %d", MinRetentionMinutes, MaxRetentionMinutes)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Group{}, err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`UPDATE groups SET retention_minutes=?, updated_at=?, last_event_seq=? WHERE group_id=?`,
+		minutes, formatDBTime(event.CreatedAt), event.EventSeq, groupID); err != nil {
+		return Group{}, err
+	}
+	if err := insertGroupEventTx(tx, event); err != nil {
+		return Group{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Group{}, err
+	}
+	if minutes > 0 {
+		if err := s.cleanupExpiredGroupMessages(groupID, minutes, time.Now().UTC()); err != nil {
+			return Group{}, err
+		}
+	}
+	return s.GetGroup(groupID)
+}
+
 func (s *Store) TransferGroupController(groupID, fromPeerID, toPeerID string, nextEpoch GroupEpoch, event GroupEvent) (Group, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1096,6 +1162,56 @@ func updateGroupMetaTx(tx *sql.Tx, groupID string, eventSeq uint64, controllerPe
 	return err
 }
 
+func (s *Store) CleanupExpiredGroupMessages(now time.Time) error {
+	rows, err := s.db.Query(`SELECT group_id, retention_minutes FROM groups WHERE retention_minutes > 0`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var groupID string
+		var minutes int
+		if err := rows.Scan(&groupID, &minutes); err != nil {
+			return err
+		}
+		if err := s.cleanupExpiredGroupMessages(groupID, minutes, now); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) cleanupExpiredGroupMessages(groupID string, minutes int, now time.Time) error {
+	cutoff := formatDBTime(now.Add(-time.Duration(minutes) * time.Minute).UTC())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`
+		DELETE FROM group_message_deliveries
+		WHERE msg_id IN (
+			SELECT msg_id
+			FROM group_messages
+			WHERE group_id=? AND sent_at <= ?
+		)
+	`, groupID, cutoff); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_messages WHERE group_id=? AND sent_at <= ?`, groupID, cutoff); err != nil {
+		return err
+	}
+	var lastMessageAt sql.NullString
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sent_at), '') FROM group_messages WHERE group_id=?`, groupID).Scan(&lastMessageAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE groups SET last_message_at=?, updated_at=? WHERE group_id=?`,
+		lastMessageAt.String, formatDBTime(now.UTC()), groupID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func rollbackTx(tx *sql.Tx) {
 	if tx != nil {
 		_ = tx.Rollback()
@@ -1115,6 +1231,7 @@ func scanGroup(scan func(dest ...any) error) (Group, error) {
 		&group.Avatar,
 		&group.ControllerPeerID,
 		&group.CurrentEpoch,
+		&group.RetentionMinutes,
 		&group.State,
 		&group.LastEventSeq,
 		&lastMessageAt,
