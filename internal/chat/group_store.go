@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const archivedGroupPurgeAfter = 24 * time.Hour
+
 type groupRetryDelivery struct {
 	MsgID          string
 	GroupID        string
@@ -1059,6 +1061,28 @@ func (s *Store) UpdateGroupRetention(groupID string, minutes int, event GroupEve
 	return s.GetGroup(groupID)
 }
 
+func (s *Store) DissolveGroup(groupID string, event GroupEvent) (Group, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Group{}, err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`UPDATE groups SET state=?, last_message_at='', updated_at=?, last_event_seq=? WHERE group_id=?`,
+		GroupStateArchived, formatDBTime(event.CreatedAt), event.EventSeq, groupID); err != nil {
+		return Group{}, err
+	}
+	if err := purgeGroupMessagesTx(tx, groupID, event.CreatedAt); err != nil {
+		return Group{}, err
+	}
+	if err := insertGroupEventTx(tx, event); err != nil {
+		return Group{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Group{}, err
+	}
+	return s.GetGroup(groupID)
+}
+
 func (s *Store) TransferGroupController(groupID, fromPeerID, toPeerID string, nextEpoch GroupEpoch, event GroupEvent) (Group, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1181,6 +1205,32 @@ func (s *Store) CleanupExpiredGroupMessages(now time.Time) error {
 	return rows.Err()
 }
 
+func (s *Store) CleanupArchivedGroups(now time.Time) error {
+	cutoff := formatDBTime(now.Add(-archivedGroupPurgeAfter).UTC())
+	rows, err := s.db.Query(`SELECT group_id FROM groups WHERE state=? AND updated_at != '' AND updated_at <= ?`, GroupStateArchived, cutoff)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var groupIDs []string
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			return err
+		}
+		groupIDs = append(groupIDs, groupID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, groupID := range groupIDs {
+		if err := s.deleteGroupRecords(groupID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) cleanupExpiredGroupMessages(groupID string, minutes int, now time.Time) error {
 	cutoff := formatDBTime(now.Add(-time.Duration(minutes) * time.Minute).UTC())
 	tx, err := s.db.Begin()
@@ -1201,15 +1251,60 @@ func (s *Store) cleanupExpiredGroupMessages(groupID string, minutes int, now tim
 	if _, err := tx.Exec(`DELETE FROM group_messages WHERE group_id=? AND sent_at <= ?`, groupID, cutoff); err != nil {
 		return err
 	}
+	if err := refreshGroupMessageSummaryTx(tx, groupID, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) deleteGroupRecords(groupID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`DELETE FROM group_event_deliveries WHERE event_id IN (SELECT event_id FROM group_events WHERE group_id=?)`, groupID); err != nil {
+		return err
+	}
+	if err := purgeGroupMessagesTx(tx, groupID, time.Now().UTC()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_events WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_sync_cursors WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_epochs WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_members WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM groups WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func purgeGroupMessagesTx(tx *sql.Tx, groupID string, updatedAt time.Time) error {
+	if _, err := tx.Exec(`DELETE FROM group_message_deliveries WHERE msg_id IN (SELECT msg_id FROM group_messages WHERE group_id=?)`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_messages WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	return refreshGroupMessageSummaryTx(tx, groupID, updatedAt)
+}
+
+func refreshGroupMessageSummaryTx(tx *sql.Tx, groupID string, updatedAt time.Time) error {
 	var lastMessageAt sql.NullString
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(sent_at), '') FROM group_messages WHERE group_id=?`, groupID).Scan(&lastMessageAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE groups SET last_message_at=?, updated_at=? WHERE group_id=?`,
-		lastMessageAt.String, formatDBTime(now.UTC()), groupID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := tx.Exec(`UPDATE groups SET last_message_at=?, updated_at=? WHERE group_id=?`,
+		lastMessageAt.String, formatDBTime(updatedAt.UTC()), groupID)
+	return err
 }
 
 func rollbackTx(tx *sql.Tx) {

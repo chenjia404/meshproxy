@@ -42,6 +42,7 @@ const (
 	GroupEventRemove             = "group_remove"
 	GroupEventTitleUpdate        = "group_title_update"
 	GroupEventRetentionUpdate    = "group_retention_update"
+	GroupEventDissolve           = "group_dissolve"
 	GroupEventControllerTransfer = "group_controller_transfer"
 	GroupEventEpochRotate        = "group_epoch_rotate"
 )
@@ -246,6 +247,10 @@ type GroupTitleUpdatePayload struct {
 
 type GroupRetentionUpdatePayload struct {
 	RetentionMinutes int `json:"retention_minutes"`
+}
+
+type GroupDissolvePayload struct {
+	Reason string `json:"reason"`
 }
 
 type GroupControllerTransferPayload struct {

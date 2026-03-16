@@ -122,6 +122,9 @@ func (s *Service) InviteGroupMember(groupID, peerID, role, inviteText string) (G
 	if err != nil {
 		return Group{}, err
 	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
+	}
 	if group.ControllerPeerID != s.localPeer {
 		return Group{}, errors.New("only controller can invite members")
 	}
@@ -201,6 +204,9 @@ func (s *Service) AcceptGroupInvite(groupID string) (Group, error) {
 	if err != nil {
 		return Group{}, err
 	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
+	}
 	member, err := s.store.GetGroupMember(groupID, s.localPeer)
 	if err != nil {
 		return Group{}, err
@@ -249,6 +255,9 @@ func (s *Service) LeaveGroup(groupID, reason string) (Group, error) {
 	group, err := s.store.GetGroup(groupID)
 	if err != nil {
 		return Group{}, err
+	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
 	}
 	member, err := s.store.GetGroupMember(groupID, s.localPeer)
 	if err != nil {
@@ -327,6 +336,9 @@ func (s *Service) RemoveGroupMember(groupID, peerID, reason string) (Group, erro
 	if err != nil {
 		return Group{}, err
 	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
+	}
 	if group.ControllerPeerID != s.localPeer {
 		return Group{}, errors.New("only controller can remove members")
 	}
@@ -386,6 +398,9 @@ func (s *Service) UpdateGroupTitle(groupID, title string) (Group, error) {
 	if err != nil {
 		return Group{}, err
 	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
+	}
 	if group.ControllerPeerID != s.localPeer {
 		return Group{}, errors.New("only controller can update the group title")
 	}
@@ -415,6 +430,9 @@ func (s *Service) UpdateGroupRetention(groupID string, minutes int) (Group, erro
 	group, err := s.store.GetGroup(groupID)
 	if err != nil {
 		return Group{}, err
+	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
 	}
 	member, err := s.store.GetGroupMember(groupID, s.localPeer)
 	if err != nil {
@@ -447,10 +465,45 @@ func (s *Service) UpdateGroupRetention(groupID string, minutes int) (Group, erro
 	return updated, nil
 }
 
+func (s *Service) DissolveGroup(groupID, reason string) (Group, error) {
+	group, err := s.store.GetGroup(groupID)
+	if err != nil {
+		return Group{}, err
+	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is already archived")
+	}
+	if group.ControllerPeerID != s.localPeer {
+		return Group{}, errors.New("only controller can dissolve the group")
+	}
+	now := time.Now().UTC()
+	payload := GroupDissolvePayload{Reason: strings.TrimSpace(reason)}
+	event, err := newGroupEvent(groupID, group.LastEventSeq+1, GroupEventDissolve, s.localPeer, s.localPeer, now, payload)
+	if err != nil {
+		return Group{}, err
+	}
+	if err := s.signGroupEvent(&event); err != nil {
+		return Group{}, err
+	}
+	members, err := s.store.ListGroupMembers(groupID)
+	if err != nil {
+		return Group{}, err
+	}
+	updated, err := s.store.DissolveGroup(groupID, event)
+	if err != nil {
+		return Group{}, err
+	}
+	s.broadcastGroupEvent(groupID, event, peersFromMembers(members, s.localPeer)...)
+	return updated, nil
+}
+
 func (s *Service) TransferGroupController(groupID, peerID string) (Group, error) {
 	group, err := s.store.GetGroup(groupID)
 	if err != nil {
 		return Group{}, err
+	}
+	if group.State != GroupStateActive {
+		return Group{}, errors.New("group is archived")
 	}
 	if group.ControllerPeerID != s.localPeer {
 		return Group{}, errors.New("only controller can transfer control")
@@ -519,6 +572,9 @@ func (s *Service) SendGroupText(groupID, text string) (GroupMessage, error) {
 	group, err := s.store.GetGroup(groupID)
 	if err != nil {
 		return GroupMessage{}, err
+	}
+	if group.State != GroupStateActive {
+		return GroupMessage{}, errors.New("group is archived")
 	}
 	member, err := s.store.GetGroupMember(groupID, s.localPeer)
 	if err != nil {
@@ -622,6 +678,9 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 	group, err := s.store.GetGroup(groupID)
 	if err != nil {
 		return GroupMessage{}, err
+	}
+	if group.State != GroupStateActive {
+		return GroupMessage{}, errors.New("group is archived")
 	}
 	member, err := s.store.GetGroupMember(groupID, s.localPeer)
 	if err != nil {
@@ -1049,7 +1108,7 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			return errors.New("invalid group_create signer or actor")
 		}
 		return nil
-	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
+	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventDissolve, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
 		group, err := s.store.GetGroup(env.GroupID)
 		if err != nil {
 			if env.EventType == GroupEventInvite && errors.Is(err, sql.ErrNoRows) {
@@ -1080,7 +1139,7 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			}
 		}
 		switch env.EventType {
-		case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventControllerTransfer:
+		case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventDissolve, GroupEventControllerTransfer:
 			if env.ActorPeerID != env.SignerPeerID {
 				return errors.New("group control actor must match signer")
 			}
@@ -1464,6 +1523,15 @@ func (s *Service) processGroupEnvelope(env map[string]any) error {
 }
 
 func (s *Service) applyGroupControlEnvelope(env GroupControlEnvelope) error {
+	if env.EventType != GroupEventCreate && env.EventType != GroupEventDissolve {
+		group, err := s.store.GetGroup(env.GroupID)
+		if err == nil && group.State == GroupStateArchived {
+			return nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	switch env.EventType {
 	case GroupEventCreate:
 		return s.applyRemoteGroupCreate(env)
@@ -1479,6 +1547,8 @@ func (s *Service) applyGroupControlEnvelope(env GroupControlEnvelope) error {
 		return s.applyRemoteGroupTitleUpdate(env)
 	case GroupEventRetentionUpdate:
 		return s.applyRemoteGroupRetentionUpdate(env)
+	case GroupEventDissolve:
+		return s.applyRemoteGroupDissolve(env)
 	case GroupEventControllerTransfer:
 		return s.applyRemoteGroupControllerTransfer(env)
 	default:
@@ -1490,6 +1560,9 @@ func (s *Service) handleRemoteGroupJoinRequest(req GroupJoinRequest) error {
 	group, err := s.store.GetGroup(req.GroupID)
 	if err != nil {
 		return err
+	}
+	if group.State != GroupStateActive {
+		return nil
 	}
 	if group.ControllerPeerID != s.localPeer {
 		return nil
@@ -1528,6 +1601,9 @@ func (s *Service) handleRemoteGroupLeaveRequest(req GroupLeaveRequest) error {
 	group, err := s.store.GetGroup(req.GroupID)
 	if err != nil {
 		return err
+	}
+	if group.State != GroupStateActive {
+		return nil
 	}
 	if group.ControllerPeerID != s.localPeer {
 		return nil
@@ -1773,6 +1849,19 @@ func (s *Service) applyRemoteGroupRetentionUpdate(env GroupControlEnvelope) erro
 		return err
 	}
 	_, err = s.store.UpdateGroupRetention(env.GroupID, payload.RetentionMinutes, groupEventFromEnvelope(env))
+	return err
+}
+
+func (s *Service) applyRemoteGroupDissolve(env GroupControlEnvelope) error {
+	group, err := s.store.GetGroup(env.GroupID)
+	if err != nil {
+		return err
+	}
+	shouldApply, err := shouldApplyGroupEvent(group.LastEventSeq, env.EventSeq)
+	if err != nil || !shouldApply {
+		return err
+	}
+	_, err = s.store.DissolveGroup(env.GroupID, groupEventFromEnvelope(env))
 	return err
 }
 
