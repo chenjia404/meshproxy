@@ -22,6 +22,11 @@ meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地
 - **`proto/meshproxy.proto`**：后续用于生成 Protobuf 类型。
 - **`configs/config.example.yaml`**：示例配置。
 
+加密聊天
+--------
+
+![alt text](image.png)
+
 编译与运行
 --------
 
