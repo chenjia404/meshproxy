@@ -77,6 +77,14 @@
     .file-preview video { max-width: min(100%, 420px); border-radius: 8px; display: block; background: #000; }
     .file-link { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.03); color: var(--text); text-decoration: none; max-width: 100%; }
     .file-link .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+    .send-status { margin-top: 0.6rem; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.85rem; }
+    .send-status.info { background: rgba(88,166,255,0.10); color: var(--accent); }
+    .send-status.err { background: rgba(248,81,73,0.10); color: var(--err); }
+    .zoomable-image { cursor: zoom-in; }
+    .lightbox { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 1.5rem; background: rgba(0,0,0,0.82); z-index: 9999; }
+    .lightbox.open { display: flex; }
+    .lightbox img { max-width: min(92vw, 1400px); max-height: 88vh; border-radius: 10px; box-shadow: 0 24px 80px rgba(0,0,0,0.45); }
+    .lightbox-close { position: absolute; top: 1rem; right: 1rem; border: none; border-radius: 999px; width: 40px; height: 40px; cursor: pointer; background: rgba(255,255,255,0.12); color: #fff; font-size: 1.2rem; }
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
       .chat-layout { min-height: auto; }
@@ -109,6 +117,10 @@
       </div>
     </div>
   </div>
+  <div id="image-lightbox" class="lightbox" aria-hidden="true">
+    <button type="button" class="lightbox-close" id="lightbox-close">×</button>
+    <img id="lightbox-image" alt="">
+  </div>
   <script>
     const state = {
       me: null,
@@ -126,6 +138,7 @@
       composerConversationId: '',
       contactNicknameDrafts: {},
       retentionDrafts: {},
+      fileSendStatus: null,
     };
 
     function api(path) { return path; }
@@ -201,7 +214,7 @@
       const url = fileUrl(msg);
       const fileName = escapeHtml(msg.file_name || 'file');
       if (isImageMessage(msg)) {
-        return '<div class="file-preview"><img src="' + url + '" alt="' + fileName + '"></div>';
+        return '<div class="file-preview"><img class="zoomable-image" data-preview-src="' + url + '" data-preview-name="' + fileName + '" src="' + url + '" alt="' + fileName + '"></div>';
       }
       if (isVideoMessage(msg)) {
         return '<div class="file-preview"><video src="' + url + '" controls autoplay muted playsinline preload="metadata"></video></div>';
@@ -229,6 +242,17 @@
           hintEl.textContent = '每 5 秒同步请求箱、会话和消息';
         }
       }, 3000);
+    }
+
+    function setFileSendStatus(status) {
+      state.fileSendStatus = status;
+      const node = document.getElementById('composer-send-status');
+      if (!node) return;
+      if (!status) {
+        node.innerHTML = '';
+        return;
+      }
+      node.innerHTML = '<div class="send-status ' + escapeHtml(status.kind || 'info') + '">' + escapeHtml(status.text || '') + '</div>';
     }
 
     function renderProfile() {
@@ -555,7 +579,30 @@
           }
         };
       });
+      document.querySelectorAll('[data-preview-src]').forEach(img => {
+        img.onclick = () => openImageLightbox(img.dataset.previewSrc, img.dataset.previewName || '');
+      });
       renderComposer(conv);
+    }
+
+    function openImageLightbox(src, alt) {
+      const box = document.getElementById('image-lightbox');
+      const img = document.getElementById('lightbox-image');
+      if (!box || !img) return;
+      img.src = src;
+      img.alt = alt || '';
+      box.classList.add('open');
+      box.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeImageLightbox() {
+      const box = document.getElementById('image-lightbox');
+      const img = document.getElementById('lightbox-image');
+      if (!box || !img) return;
+      box.classList.remove('open');
+      box.setAttribute('aria-hidden', 'true');
+      img.removeAttribute('src');
+      img.removeAttribute('alt');
     }
 
     function renderComposer(conv) {
@@ -569,7 +616,7 @@
       const draft = state.composerDrafts[conv.conversation_id] || '';
       const shouldRebuild = state.composerConversationId !== conv.conversation_id || !document.getElementById('composer-text');
       if (shouldRebuild) {
-        composer.innerHTML = '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div><input id="composer-file" type="file" hidden><div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送文件</button></div>';
+        composer.innerHTML = '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div><input id="composer-file" type="file" hidden><div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送文件</button></div><div id="composer-send-status"></div>';
         state.composerConversationId = conv.conversation_id;
         const input = document.getElementById('composer-text');
         if (input) {
@@ -602,24 +649,30 @@
           fileInput.onchange = async () => {
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
+            setFileSendStatus({ kind: 'info', text: '准备上传：' + file.name });
             const form = new FormData();
             form.append('file', file);
             try {
+              setFileSendStatus({ kind: 'info', text: '上传中：' + file.name });
               const resp = await fetch('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/files', {
                 method: 'POST',
                 body: form
               });
+              setFileSendStatus({ kind: 'info', text: '发送中：' + file.name });
               const data = await resp.json().catch(() => ({}));
               if (!resp.ok) throw new Error(data.error || resp.statusText);
               showMessage('ok', '文件已发送');
+              setFileSendStatus(null);
               fileInput.value = '';
               await refreshMessages();
               await refreshConversations();
             } catch (err) {
+              setFileSendStatus({ kind: 'err', text: '发送文件失败：' + err.message });
               showMessage('err', '发送文件失败: ' + err.message);
             }
           };
         }
+        setFileSendStatus(state.fileSendStatus);
         return;
       }
       const input = document.getElementById('composer-text');
@@ -632,6 +685,7 @@
           input.setSelectionRange(pos, pos);
         }
       }
+      setFileSendStatus(state.fileSendStatus);
       const retentionBtn = document.getElementById('save-retention-btn');
       if (retentionBtn) {
         retentionBtn.onclick = async () => {
@@ -721,6 +775,17 @@
     }
 
     window.addEventListener('load', async () => {
+      const lightbox = document.getElementById('image-lightbox');
+      const lightboxClose = document.getElementById('lightbox-close');
+      if (lightbox) {
+        lightbox.addEventListener('click', (e) => {
+          if (e.target === lightbox) closeImageLightbox();
+        });
+      }
+      if (lightboxClose) lightboxClose.addEventListener('click', closeImageLightbox);
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeImageLightbox();
+      });
       renderRequestSend();
       try {
         await refreshAll();
