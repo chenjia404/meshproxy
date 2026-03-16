@@ -506,6 +506,9 @@
       document.querySelectorAll('[data-revoke-msg]').forEach(btn => {
         btn.onclick = async () => {
           if (!conv) return;
+          if (!window.confirm('确认撤回这条消息吗？撤回后双方都会删除这条消息。')) {
+            return;
+          }
           try {
             await post('/api/v1/chat/conversations/' + encodeURIComponent(conv.conversation_id) + '/messages/' + encodeURIComponent(btn.dataset.revokeMsg) + '/revoke');
             showMessage('ok', '消息已撤回');
