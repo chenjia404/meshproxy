@@ -223,6 +223,28 @@
       return '<div class="file-preview"><a class="file-link" href="' + url + '" download="' + fileName + '"><span>文件</span><span class="name">' + fileName + '</span></a></div>';
     }
 
+    function fileExtForMime(mimeType) {
+      if (!mimeType) return 'bin';
+      if (mimeType === 'image/png') return 'png';
+      if (mimeType === 'image/jpeg') return 'jpg';
+      if (mimeType === 'image/webp') return 'webp';
+      if (mimeType === 'image/gif') return 'gif';
+      return 'bin';
+    }
+
+    async function handleComposerPaste(e, conversationId) {
+      const clipboard = e.clipboardData;
+      if (!clipboard || !clipboard.items || !clipboard.items.length) return;
+      const imageItem = Array.from(clipboard.items).find(item => item.kind === 'file' && /^image\//.test(item.type || ''));
+      if (!imageItem) return;
+      const blob = imageItem.getAsFile();
+      if (!blob) return;
+      e.preventDefault();
+      const ext = fileExtForMime(blob.type);
+      const file = new File([blob], 'pasted-image-' + Date.now() + '.' + ext, { type: blob.type || 'application/octet-stream' });
+      await sendFileForConversation(conversationId, file);
+    }
+
     function renderRefreshStatus() {
       const statusEl = document.getElementById('refresh-status');
       const hintEl = document.getElementById('refresh-hint');
@@ -660,6 +682,13 @@
           input.value = draft;
           input.addEventListener('input', () => {
             state.composerDrafts[conv.conversation_id] = input.value;
+          });
+          input.addEventListener('paste', async (e) => {
+            try {
+              await handleComposerPaste(e, conv.conversation_id);
+            } catch (err) {
+              showMessage('err', '粘贴图片发送失败: ' + err.message);
+            }
           });
         }
         const btn = document.getElementById('send-message-btn');
