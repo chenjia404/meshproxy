@@ -3,6 +3,8 @@ meshproxy
 
 meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地 SOCKS5 Agent”原型实现，目前处于早期 MVP 阶段。
 
+安卓客户端 https://github.com/chenjia404/meshproxy-android
+
 架构与模块
 --------
 
