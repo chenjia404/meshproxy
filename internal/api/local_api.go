@@ -14,6 +14,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
+//go:generate go run ../tools/syncconsole
 //go:embed console/*
 var consoleFS embed.FS
 

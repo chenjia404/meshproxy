@@ -158,22 +158,23 @@
           <option value="en">English</option>
         </select>
       </div>
-      <a href="#status" data-page="status" class="active"><span class="nav-label" data-i18n="nav_status">節點狀態</span></a>
+      <a href="#status" data-page="status" class="active"><span class="nav-label" data-i18n="nav_status">节点状态</span></a>
       <a href="#relays" data-page="relays"><span class="nav-label" data-i18n="nav_relays">Relay / Exit</span></a>
       <a href="#circuits" data-page="circuits"><span class="nav-label" data-i18n="nav_circuits">Circuit 列表</span></a>
       <a href="#streams" data-page="streams"><span class="nav-label" data-i18n="nav_streams">Stream 列表</span></a>
-      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label" data-i18n="nav_pool">電路池</span></a>
-      <a href="#traffic" data-page="traffic"><span class="nav-label" data-i18n="nav_traffic">即時流量</span></a>
-      <a href="#routing" data-page="routing"><span class="nav-label" data-i18n="nav_routing">路由規則</span></a>
+      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label" data-i18n="nav_pool">电路池</span></a>
+      <a href="#traffic" data-page="traffic"><span class="nav-label" data-i18n="nav_traffic">实时流量</span></a>
+      <a href="#routing" data-page="routing"><span class="nav-label" data-i18n="nav_routing">路由规则</span></a>
       <a href="#exit-policy" data-page="exit-policy"><span class="nav-label" data-i18n="nav_exit">出口选择</span></a>
-      <a href="#logs" data-page="logs"><span class="nav-label" data-i18n="nav_logs">日誌面板</span></a>
+      <a href="#exit-operator-policy" data-page="exit-operator-policy"><span class="nav-label" data-i18n="nav_exit_operator">出口政策</span></a>
+      <a href="#logs" data-page="logs"><span class="nav-label" data-i18n="nav_logs">日志面板</span></a>
     </nav>
     <main class="main">
       <div id="content"></div>
     </main>
   </div>
   <script>
-    const API = ''; // same origin
+    const API = '';
     const LOCALE_KEY = 'meshproxy-console-locale';
     const STATIC_I18N = {
       zh: {
@@ -187,6 +188,7 @@
         nav_traffic: '实时流量',
         nav_routing: '路由规则',
         nav_exit: '出口选择',
+        nav_exit_operator: '出口政策',
         nav_logs: '日志面板',
         loading: '加载中…',
         load_failed: '加载失败: '
@@ -202,6 +204,7 @@
         nav_traffic: 'Traffic',
         nav_routing: 'Routing',
         nav_exit: 'Exit Selection',
+        nav_exit_operator: 'Exit Policy',
         nav_logs: 'Logs',
         loading: 'Loading…',
         load_failed: 'Load failed: '
@@ -209,90 +212,117 @@
     };
     const EN_REPLACEMENTS = {
       '控制台': 'Console',
-      '節點狀態': 'Node Status',
-      '節點': 'Node',
-      '基本資訊': 'Basic Info',
+      '节点状态': 'Node Status',
+      '基本信息': 'Basic Info',
       '模式': 'Mode',
-      '運行時長': 'Uptime',
+      '运行时长': 'Uptime',
       '已知 Relay': 'Known Relays',
       '已知 Exit': 'Known Exits',
-      'P2P 監聽': 'P2P Listen',
-      '電路池': 'Circuit Pool',
-      '尚無節點': 'No nodes yet',
+      'P2P 监听': 'P2P Listen',
+      '电路池': 'Circuit Pool',
+      '尚无节点': 'No nodes yet',
       '版本': 'Version',
       '角色': 'Role',
-      '國家/地區': 'Country/Region',
+      '国家/地区': 'Country/Region',
       'Circuit 列表': 'Circuits',
-      '目前無電路': 'No circuits',
-      '狀態': 'State',
+      '目前无电路': 'No circuits',
+      '状态': 'State',
       '心跳': 'Heartbeat',
-      '路徑': 'Path',
-      '發送': 'Sent',
+      '路径': 'Path',
+      '发送': 'Sent',
       '接收': 'Received',
-      '建立時間': 'Created At',
+      '建立时间': 'Created At',
       'Stream 列表': 'Streams',
-      '目前無 stream': 'No streams',
-      '目標': 'Target',
-      '即時流量': 'Traffic',
-      '無法取得指標': 'Unable to load metrics',
-      '彙總': 'Summary',
-      '電路總數': 'Circuits',
-      '活躍 Stream': 'Active Streams',
-      '最近錯誤數': 'Recent Errors',
-      '路由規則': 'Routing',
-      '路由規則介面尚未開放，請透過設定檔或 API 設定。': 'Routing UI is not available yet. Please use the config file or API.',
-      '總量控制': 'Total Limits',
-      '最小總數': 'Min Total',
-      '最大總數': 'Max Total',
-      '預設只維持 1 條 circuit。儲存後會立即更新運行中的池子，並寫回配置文件。': 'By default only 1 circuit is kept. Saving applies to the running pool and persists to config.',
-      '每池最小 / 最大（唯讀）': 'Per-pool Min / Max (read-only)',
-      '儲存設定': 'Save',
-      '請輸入正整數。': 'Please enter positive integers.',
-      '儲存失敗: ': 'Save failed: ',
-      '已儲存電路池設定。': 'Circuit pool settings saved.',
-      '出口節點管理': 'Exit Selection',
-      '出口選擇': 'Exit Selection',
-      '自動選擇': 'Auto',
-      '僅使用指定國家/地區': 'Only selected countries/regions',
-      '優先使用指定國家/地區': 'Prefer selected countries/regions',
-      '固定指定出口節點': 'Fixed exit peer',
-      '固定出口 Peer ID（fixed_peer 時必填）': 'Fixed Exit Peer ID (required for fixed_peer)',
-      '排除指定國家/地區': 'Excluded countries/regions',
-      '找不到符合條件時允許退回任意出口': 'Fallback to any exit when no match',
-      '允許直連出口（Local → Exit）': 'Allow direct exit (Local → Exit)',
-      '本地 SOCKS5 原樣轉發到 Exit 的 SOCKS5': 'Tunnel local SOCKS5 to exit SOCKS5',
-      '僅選支援 Remote DNS 的出口': 'Require Remote DNS support',
-      '僅選支援 TCP 的出口': 'Require TCP support',
-      '目前可選出口': 'Available exits',
-      '暫無符合目前規則的出口節點，或尚未發現任何 Exit。': 'No exits match the current rules, or no exits have been discovered yet.',
-      '已儲存出口選擇設定。': 'Exit selection saved.',
-      '日誌面板': 'Logs',
-      '尚無最近錯誤紀錄': 'No recent errors',
-      '最近錯誤': 'Recent Errors',
-      '載入失敗: ': 'Load failed: ',
-      '載入中…': 'Loading…',
+      '目前无 stream': 'No streams',
+      '目标': 'Target',
+      '实时流量': 'Traffic',
+      '无法取得指标': 'Unable to load metrics',
+      '汇总': 'Summary',
+      '电路总数': 'Circuits',
+      '活跃 Stream': 'Active Streams',
+      '最近错误数': 'Recent Errors',
+      '路由规则': 'Routing',
+      '路由规则界面尚未开放，请通过配置文件或 API 设置。': 'Routing UI is not available yet. Please use the config file or API.',
+      '总量控制': 'Total Limits',
+      '最小总数': 'Min Total',
+      '最大总数': 'Max Total',
+      '默认只维持 1 条 circuit。保存后会立即更新运行中的池子，并写回配置文件。': 'By default only 1 circuit is kept. Saving applies to the running pool and persists to config.',
+      '每池最小 / 最大（只读）': 'Per-pool Min / Max (read-only)',
+      '保存设置': 'Save',
+      '请输入正整数。': 'Please enter positive integers.',
+      '保存失败: ': 'Save failed: ',
+      '已保存电路池设置。': 'Circuit pool settings saved.',
+      '出口节点管理': 'Exit Selection',
+      '出口选择': 'Exit Selection',
+      '自动选择': 'Auto',
+      '仅使用指定国家/地区': 'Only selected countries/regions',
+      '优先使用指定国家/地区': 'Prefer selected countries/regions',
+      '固定指定出口节点': 'Fixed exit peer',
+      '固定出口 Peer ID（fixed_peer 时必填）': 'Fixed Exit Peer ID (required for fixed_peer)',
+      '排除指定国家/地区': 'Excluded countries/regions',
+      '找不到符合条件时允许退回任意出口': 'Fallback to any exit when no match',
+      '允许直连出口（Local → Exit）': 'Allow direct exit (Local → Exit)',
+      '本地 SOCKS5 原样转发到 Exit 的 SOCKS5': 'Tunnel local SOCKS5 to exit SOCKS5',
+      '仅选支持 Remote DNS 的出口': 'Require Remote DNS support',
+      '仅选支持 TCP 的出口': 'Require TCP support',
+      '当前可选出口': 'Available exits',
+      '暂无符合当前规则的出口节点，或尚未发现任何 Exit。': 'No exits match the current rules, or no exits have been discovered yet.',
+      '已保存出口选择设置。': 'Exit selection saved.',
+      '出口政策': 'Exit Policy',
+      '运行状态': 'Runtime Status',
+      '维护模式 (drain)': 'Drain Mode',
+      '接受新连接': 'Accept New Streams',
+      '当前出口连接数': 'Open Exit Connections',
+      '进入维护模式': 'Enter Drain Mode',
+      '结束维护模式': 'Leave Drain Mode',
+      '策略配置': 'Policy',
+      '允许 TCP': 'Allow TCP',
+      '允许 UDP': 'Allow UDP',
+      '出口端解析 DNS (Remote DNS)': 'Resolve DNS on exit (Remote DNS)',
+      '允许的端口（空则仅受拒绝列表限制）': 'Allowed ports (empty means only denied list applies)',
+      '拒绝的端口': 'Denied ports',
+      '允许的域名（精确）': 'Allowed domains (exact)',
+      '允许的域名后缀（如 .google.com）': 'Allowed domain suffixes (e.g. .google.com)',
+      '拒绝的域名（精确）': 'Denied domains (exact)',
+      '拒绝的域名后缀': 'Denied domain suffixes',
+      'Peer 白名单（空则不做白名单限制）': 'Peer whitelist (empty = disabled)',
+      'Peer 黑名单': 'Peer blacklist',
+      '允许访问私网目标 IP': 'Allow private IP targets',
+      '允许回环目标': 'Allow loopback targets',
+      '允许链路本地目标': 'Allow link-local targets',
+      '保存策略': 'Save Policy',
+      '最近拒绝记录': 'Recent Rejects',
+      '时间': 'Time',
+      '原因': 'Reason',
+      '策略已保存并已写回配置文件。': 'Policy saved and written back to the config file.',
+      '已进入维护模式，配置已写回文件。': 'Drain mode enabled and saved to config.',
+      '已结束维护模式，配置已写回文件。': 'Drain mode disabled and saved to config.',
+      '操作失败: ': 'Operation failed: ',
+      '日志面板': 'Logs',
+      '尚无最近错误记录': 'No recent errors',
+      '最近错误': 'Recent Errors',
+      '加载失败: ': 'Load failed: ',
+      '加载中…': 'Loading…',
       '正常': 'Healthy',
       '失联': 'Offline',
-      '失聯': 'Offline',
       '心跳状态': 'Heartbeat status',
-      '心跳狀態': 'Heartbeat status',
       '是': 'Yes',
       '否': 'No'
     };
     let currentLocale = readLocale();
     function readLocale() {
-      try { return localStorage.getItem(LOCALE_KEY) || 'zh'; } catch { return 'zh'; }
+      try { return localStorage.getItem(LOCALE_KEY) || 'zh'; } catch (e) { return 'zh'; }
     }
     function writeLocale(value) {
-      try { localStorage.setItem(LOCALE_KEY, value); } catch {}
+      try { localStorage.setItem(LOCALE_KEY, value); } catch (e) {}
     }
     function ts(key) {
       return (STATIC_I18N[currentLocale] && STATIC_I18N[currentLocale][key]) || STATIC_I18N.zh[key] || key;
     }
     function translateHtml(html) {
       if (currentLocale !== 'en') return html;
-      let out = html;
-      Object.keys(EN_REPLACEMENTS).sort((a, b) => b.length - a.length).forEach(from => {
+      var out = html;
+      Object.keys(EN_REPLACEMENTS).sort(function(a, b){ return b.length - a.length; }).forEach(function(from) {
         out = out.split(from).join(EN_REPLACEMENTS[from]);
       });
       return out;
@@ -300,237 +330,426 @@
     function applyStaticI18n() {
       document.documentElement.lang = currentLocale === 'en' ? 'en' : 'zh-CN';
       document.title = 'meshproxy ' + ts('console_title');
-      document.querySelectorAll('[data-i18n]').forEach(el => {
+      document.querySelectorAll('[data-i18n]').forEach(function(el) {
         el.textContent = ts(el.dataset.i18n);
       });
-      const langSelect = document.getElementById('lang-select');
+      var langSelect = document.getElementById('lang-select');
       if (langSelect) langSelect.value = currentLocale;
     }
     function api(path) { return (API || '') + path; }
     function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
     function post(path, body) {
-      return fetch(api(path), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-      }).then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(new Error(d.error || r.statusText))));
+      return fetch(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || r.statusText); });
+        return r.json();
+      });
     }
 
     function renderStatus(data) {
       const pool = data.circuit_pool || {};
       const poolHtml = Object.keys(pool.kinds || {}).length
-        ? '<dl class="kv"><dt>電路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(pool.kinds, null, 2) + '</pre></dd></dl>'
+        ? '<dl class="kv"><dt>电路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(pool.kinds, null, 2) + '</pre></dd></dl>'
         : '';
-      return `
-        <h1>節點狀態</h1>
-        <div class="card">
-          <h3>基本資訊</h3>
-          <dl class="kv">
-            <dt>Peer ID</dt><dd><code>${escapeHtml(data.peer_id || '-')}</code></dd>
-            <dt>模式</dt><dd><span class="badge ok">${escapeHtml(data.mode || '-')}</span></dd>
-            <dt>SOCKS5</dt><dd>${escapeHtml(data.socks5_listen || '-')}</dd>
-            <dt>運行時長</dt><dd>${formatUptime(data.uptime_seconds)}</dd>
-            <dt>已知 Relay</dt><dd>${data.relays_known ?? '-'}</dd>
-            <dt>已知 Exit</dt><dd>${data.exits_known ?? '-'}</dd>
-            <dt>P2P 監聽</dt><dd><pre style="margin:0;font-size:0.8rem">${(data.p2p_listen_addrs || []).map(escapeHtml).join('\n') || '-'}</pre></dd>
-          </dl>
-          ${poolHtml}
-        </div>
-      `;
+      return '<h1>节点状态</h1><div class="card"><h3>基本信息</h3><dl class="kv">' +
+        '<dt>Peer ID</dt><dd><code>' + escapeHtml(data.peer_id || '-') + '</code></dd>' +
+        '<dt>模式</dt><dd><span class="badge ok">' + escapeHtml(data.mode || '-') + '</span></dd>' +
+        '<dt>SOCKS5</dt><dd>' + escapeHtml(data.socks5_listen || '-') + '</dd>' +
+        '<dt>运行时长</dt><dd>' + formatUptime(data.uptime_seconds) + '</dd>' +
+        '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
+        '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
+        '<dt>P2P 监听</dt><dd><pre style="margin:0;font-size:0.8rem">' + (data.p2p_listen_addrs || []).map(escapeHtml).join('\n') + '</pre></dd></dl>' + poolHtml + '</div>';
     }
     function renderNodeTable(list, title) {
-      if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚無節點</p></div>';
-      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th><th>國家/地區</th></tr></thead><tbody>' +
-        list.map(n => '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td><td>' + escapeHtml(n.country || '-') + '</td></tr>').join('') + '</tbody></table></div>';
+      if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚无节点</p></div>';
+      return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th><th>国家/地区</th></tr></thead><tbody>' +
+        list.map(function(n){ return '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td><td>' + escapeHtml(n.country || '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
     function renderRelaysExits(relays, exits) {
-      const r = Array.isArray(relays) ? relays : [];
-      const e = Array.isArray(exits) ? exits : [];
+      var r = Array.isArray(relays) ? relays : [];
+      var e = Array.isArray(exits) ? exits : [];
       return '<h1>Relay / Exit</h1>' + renderNodeTable(r, '已知 Relay') + renderNodeTable(e, '已知 Exit');
     }
     function renderCircuits(data) {
-      const list = Array.isArray(data) ? data : [];
-      if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前無電路</p></div>';
-      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>狀態</th><th>心跳</th><th>路徑</th><th>發送</th><th>接收</th><th>建立時間</th></tr></thead><tbody>' +
-        list.map(c => {
-          const path = (c.plan && c.plan.hops) ? c.plan.hops.map(h => '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>').join(' → ') : '-';
-          const heartbeatInfo = formatHealth(c.alive, c.smoothed_rtt_ms, c.consecutive_failures, c.last_ping_at, c.last_pong_at);
-          return '<tr><td><code>' + escapeHtml(c.id?.slice(0,8) || '-') + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + heartbeatInfo + '</td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>';
-        }).join('') + '</tbody></table></div>';
+      var list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>Circuit 列表</h1><div class="card"><p class="empty">目前无电路</p></div>';
+      return '<h1>Circuit 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>状态</th><th>心跳</th><th>路径</th><th>发送</th><th>接收</th><th>建立时间</th></tr></thead><tbody>' +
+        list.map(function(c){ var path = (c.plan && c.plan.hops) ? c.plan.hops.map(function(h){ return '<span class="path-hop">' + (h.is_exit ? 'exit' : 'relay') + '</span>'; }).join(' → ') : '-'; return '<tr><td><code>' + escapeHtml((c.id||'').slice(0,8)) + '</code></td><td><span class="badge ok">' + escapeHtml(c.state || '-') + '</span></td><td>' + formatHealth(c.alive, c.smoothed_rtt_ms, c.consecutive_failures, c.last_ping_at, c.last_pong_at) + '</td><td>' + path + '</td><td>' + formatBytes(c.bytes_sent) + '</td><td>' + formatBytes(c.bytes_received) + '</td><td>' + (c.created_at ? new Date(c.created_at).toLocaleString() : '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
+
     function renderStreams(data) {
-      const list = Array.isArray(data) ? data : [];
-      if (!list.length) return '<h1>Stream 列表</h1><div class="card"><p class="empty">目前無 stream</p></div>';
-      return '<h1>Stream 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>Circuit</th><th>目標</th><th>狀態</th></tr></thead><tbody>' +
-        list.map(s => '<tr><td><code>' + escapeHtml(s.id?.slice(0,8) || '-') + '</code></td><td><code>' + escapeHtml(s.circuit_id?.slice(0,8) || '-') + '</code></td><td>' + escapeHtml(s.target_host || '-') + ':' + (s.target_port || '-') + '</td><td>' + escapeHtml(s.state || '-') + '</td></tr>').join('') + '</tbody></table></div>';
+      var list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>Stream 列表</h1><div class="card"><p class="empty">目前无 stream</p></div>';
+      return '<h1>Stream 列表</h1><div class="card"><table><thead><tr><th>ID</th><th>Circuit</th><th>目标</th><th>状态</th></tr></thead><tbody>' +
+        list.map(function(s){ return '<tr><td><code>' + escapeHtml((s.id||'').slice(0,8)) + '</code></td><td><code>' + escapeHtml((s.circuit_id||'').slice(0,8)) + '</code></td><td>' + escapeHtml(s.target_host || '-') + ':' + (s.target_port || '-') + '</td><td>' + escapeHtml(s.state || '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
     function renderTraffic(data) {
-      if (!data || typeof data !== 'object') return '<h1>即時流量</h1><div class="card"><p class="empty">無法取得指標</p></div>';
-      return '<h1>即時流量</h1><div class="card"><h3>彙總</h3><dl class="kv">' +
-        '<dt>電路總數</dt><dd>' + (data.circuits_total ?? '-') + '</dd>' +
-        '<dt>活躍 Stream</dt><dd>' + (data.streams_active ?? '-') + '</dd>' +
+      if (!data || typeof data !== 'object') return '<h1>实时流量</h1><div class="card"><p class="empty">无法取得指标</p></div>';
+      var pool = (data.pool_status && data.pool_status.kinds) ? '<dt>电路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(data.pool_status.kinds, null, 2) + '</pre></dd>' : '';
+      return '<h1>实时流量</h1><div class="card"><h3>汇总</h3><dl class="kv">' +
+        '<dt>电路总数</dt><dd>' + (data.circuits_total ?? '-') + '</dd>' +
+        '<dt>活跃 Stream</dt><dd>' + (data.streams_active ?? '-') + '</dd>' +
         '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
         '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
-        '<dt>最近錯誤數</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' +
-        (data.pool_status && data.pool_status.kinds ? '<dt>電路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(data.pool_status.kinds, null, 2) + '</pre></dd>' : '') +
-        '</dl></div>';
+        '<dt>最近错误数</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' + pool + '</dl></div>';
     }
-    function renderRouting() {
-      return '<h1>路由規則</h1><div class="card"><p class="empty">路由規則介面尚未開放，請透過設定檔或 API 設定。</p></div>';
-    }
+    function renderRouting() { return '<h1>路由规则</h1><div class="card"><p class="empty">路由规则界面尚未开放，请通过配置文件或 API 设置。</p></div>'; }
     function renderCircuitPoolConfig() {
-      return get('/api/v1/client/circuit-pool').then(cfg => {
+      return get('/api/v1/client/circuit-pool').then(function(cfg) {
         cfg = cfg || {};
-        let html = '<h1>電路池</h1><div id="pool-msg"></div><div class="card"><h3>總量控制</h3>';
-        html += '<div class="form-row"><label>最小總數 `min_total`</label><input type="text" id="pool-min-total" value="' + escapeHtml(String(cfg.min_total ?? 1)) + '" inputmode="numeric"></div>';
-        html += '<div class="form-row"><label>最大總數 `max_total`</label><input type="text" id="pool-max-total" value="' + escapeHtml(String(cfg.max_total ?? 1)) + '" inputmode="numeric"></div>';
-        html += '<div class="form-row"><div class="hint">預設只維持 1 條 circuit。儲存後會立即更新運行中的池子，並寫回配置文件。</div></div>';
-        html += '<div class="form-row"><label>每池最小 / 最大（唯讀）</label><div class="hint">min_per_pool=' + escapeHtml(String(cfg.min_per_pool ?? '-')) + '，max_per_pool=' + escapeHtml(String(cfg.max_per_pool ?? '-')) + '</div></div>';
-        html += '<div class="form-row"><button class="btn btn-primary" id="pool-save">儲存設定</button></div></div>';
-        setTimeout(() => {
-          const saveBtn = document.getElementById('pool-save');
+        var html = '<h1>电路池</h1><div id="pool-msg"></div><div class="card"><h3>总量控制</h3>';
+        html += '<div class="form-row"><label>最小总数 `min_total`</label><input type="text" id="pool-min-total" value="' + escapeHtml(String(cfg.min_total == null ? 1 : cfg.min_total)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><label>最大总数 `max_total`</label><input type="text" id="pool-max-total" value="' + escapeHtml(String(cfg.max_total == null ? 1 : cfg.max_total)) + '" inputmode="numeric"></div>';
+        html += '<div class="form-row"><div class="hint">默认只维持 1 条 circuit。保存后会立即更新运行中的池子，并写回配置文件。</div></div>';
+        html += '<div class="form-row"><label>每池最小 / 最大（只读）</label><div class="hint">min_per_pool=' + escapeHtml(String(cfg.min_per_pool == null ? '-' : cfg.min_per_pool)) + '，max_per_pool=' + escapeHtml(String(cfg.max_per_pool == null ? '-' : cfg.max_per_pool)) + '</div></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="pool-save">保存设置</button></div></div>';
+        setTimeout(function bindPool() {
+          var saveBtn = document.getElementById('pool-save');
           if (!saveBtn) return;
-          saveBtn.onclick = () => {
-            const minTotal = Number((document.getElementById('pool-min-total')?.value || '').trim());
-            const maxTotal = Number((document.getElementById('pool-max-total')?.value || '').trim());
+          saveBtn.addEventListener('click', function() {
+            var minTotal = Number((document.getElementById('pool-min-total').value || '').trim());
+            var maxTotal = Number((document.getElementById('pool-max-total').value || '').trim());
             if (!Number.isInteger(minTotal) || !Number.isInteger(maxTotal) || minTotal <= 0 || maxTotal <= 0) {
-              document.getElementById('pool-msg').innerHTML = '<div class="msg err">請輸入正整數。</div>';
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">请输入正整数。</div>';
               return;
             }
             if (maxTotal < minTotal) {
-              document.getElementById('pool-msg').innerHTML = '<div class="msg err">`max_total` 不能小於 `min_total`。</div>';
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">`max_total` 不能小于 `min_total`。</div>';
               return;
             }
             saveBtn.disabled = true;
-            post('/api/v1/client/circuit-pool', { min_total: minTotal, max_total: maxTotal })
-              .then(() => {
-                document.getElementById('pool-msg').innerHTML = '<div class="msg ok">已儲存電路池設定。</div>';
-                setTimeout(() => show('circuit-pool'), 600);
-              })
-              .catch(err => {
-                document.getElementById('pool-msg').innerHTML = '<div class="msg err">儲存失敗: ' + escapeHtml(err.message) + '</div>';
-              })
-              .finally(() => { if (document.getElementById('pool-save')) document.getElementById('pool-save').disabled = false; });
-          };
+            post('/api/v1/client/circuit-pool', { min_total: minTotal, max_total: maxTotal }).then(function() {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg ok">已保存电路池设置。</div>';
+              setTimeout(function(){ show('circuit-pool'); }, 600);
+            }).catch(function(err) {
+              document.getElementById('pool-msg').innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+            }).finally(function() {
+              if (document.getElementById('pool-save')) document.getElementById('pool-save').disabled = false;
+            });
+          });
         }, 0);
         return html;
-      }).catch(err => '<h1>電路池</h1><div class="card"><p class="empty">載入失敗: ' + escapeHtml(err.message) + '</p></div>');
+      }).catch(function(err){ return '<h1>电路池</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
     }
+
     function renderExitPolicy() {
       return Promise.all([
-        get('/api/v1/client/exit-selection').catch(() => ({})),
-        get('/api/v1/client/exit-candidates').catch(() => ({ candidates: [] })),
-      ]).then(([cfg, cand]) => {
-        cfg = cfg || {};
-        const candidates = Array.isArray(cand?.candidates) ? cand.candidates : [];
-        const allowed = (cfg.allowed_countries || []).slice();
-        const preferred = (cfg.preferred_countries || []).slice();
-        const excluded = (cfg.exclude_countries || []).slice();
-        const mode = cfg.mode || 'auto';
-        const fallback = cfg.fallback_to_any !== false;
-        const allowDirect = cfg.allow_direct_exit !== false;
-        const requireDNS = !!cfg.require_remote_dns;
-        const requireTCP = cfg.require_tcp_support !== false;
-        const tunnelToExit = !!cfg.tunnel_to_exit;
-        const tagsHtml = (id, list, placeholder) => {
-          const tags = list.map(c => '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>').join('');
-          return '<div class="tag-input" data-list="' + id + '">' + tags + '<input type="text" placeholder="' + (placeholder || '輸入國家代碼如 SG 按 Enter 新增') + '" maxlength="8" data-add="' + id + '"></div>';
+        get('/api/v1/client/exit-selection').catch(function(){ return {}; }),
+        get('/api/v1/client/exit-candidates').catch(function(){ return { candidates: [] }; })
+      ]).then(function(res) {
+        var cfg = res[0] || {};
+        var cand = res[1];
+        var candidates = (cand && Array.isArray(cand.candidates)) ? cand.candidates : [];
+        var allowed = (cfg.allowed_countries || []).slice();
+        var preferred = (cfg.preferred_countries || []).slice();
+        var excluded = (cfg.exclude_countries || []).slice();
+        var mode = cfg.mode || 'auto';
+        var fallback = cfg.fallback_to_any !== false;
+        var allowDirect = cfg.allow_direct_exit !== false;
+        var requireDNS = !!cfg.require_remote_dns;
+        var requireTCP = cfg.require_tcp_support !== false;
+        var tunnelToExit = !!cfg.tunnel_to_exit;
+
+        var tagsHtml = function(id, list, placeholder) {
+          var tags = list.map(function(c){ return '<span class="tag" data-id="' + id + '">' + escapeHtml(c) + '<span class="rm" data-remove="' + escapeHtml(c) + '">&times;</span></span>'; }).join('');
+          return '<div class="tag-input" data-list="' + id + '" data-store="' + escapeHtml(JSON.stringify(list)) + '">' + tags + '<input type="text" placeholder="' + (placeholder || '输入国家代码如 SG 回车添加') + '" maxlength="8" data-add="' + id + '"> </div>';
         };
-        let html = '<h1>出口節點管理</h1><div id="exit-msg"></div><div class="card"><h3>出口選擇</h3>';
+
+        var html = '<h1>出口节点管理</h1>';
+        html += '<div id="exit-msg"></div>';
+        html += '<div class="card"><h3>出口选择</h3>';
         html += '<div class="form-row"><label>模式</label><select id="exit-mode">';
-        html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自動選擇</option>';
-        html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>僅使用指定國家/地區</option>';
-        html += '<option value="country_preferred"' + (mode === 'country_preferred' ? ' selected' : '') + '>優先使用指定國家/地區</option>';
-        html += '<option value="fixed_peer"' + (mode === 'fixed_peer' ? ' selected' : '') + '>固定指定出口節點</option></select>';
-        html += '<div class="hint">控制每條電路最後一跳出口的篩選方式。</div></div>';
-        html += '<div class="form-row"><label>固定出口 Peer ID（fixed_peer 時必填）</label><input type="text" id="exit-fixed-peer" value="' + escapeHtml(cfg.fixed_exit_peer_id || '') + '" placeholder="12D3KooW..."></div>';
-        html += '<div class="form-row"><label>僅允許的國家/地區（country_only 時生效）</label>' + tagsHtml('allowed_countries', allowed, '如 SG、JP、TH') + '</div>';
-        html += '<div class="form-row"><label>優先國家/地區順序（country_preferred 時生效）</label>' + tagsHtml('preferred_countries', preferred, '如 TH、SG、MY') + '</div>';
-        html += '<div class="form-row"><label>排除指定國家/地區</label>' + tagsHtml('exclude_countries', excluded, '如 CN、US，Enter 新增') + '<div class="hint">任意模式生效：這些國家的出口將不會被選。</div></div>';
-        html += '<div class="form-row"><label><input type="checkbox" id="exit-fallback"' + (fallback ? ' checked' : '') + '> 找不到符合條件時允許退回任意出口</label></div>';
-        html += '<div class="form-row"><label><input type="checkbox" id="exit-allow-direct"' + (allowDirect ? ' checked' : '') + '> 允許直連出口（Local → Exit）</label></div>';
-        html += '<div class="form-row"><label><input type="checkbox" id="exit-tunnel-to-exit"' + (tunnelToExit ? ' checked' : '') + '> 本地 SOCKS5 原樣轉發到 Exit 的 SOCKS5</label><div class="hint">開啟後，本地 1080 不再解析 SOCKS5，請求會通過 raw libp2p stream 直接轉給 exit 節點上的 SOCKS5。</div></div>';
-        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-dns"' + (requireDNS ? ' checked' : '') + '> 僅選支援 Remote DNS 的出口</label></div>';
-        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-tcp"' + (requireTCP ? ' checked' : '') + '> 僅選支援 TCP 的出口</label></div>';
-        html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">儲存設定</button></div></div>';
-        html += '<div class="card exit-candidates"><h3>目前可選出口（' + candidates.length + '）</h3>';
-        if (!candidates.length) html += '<p class="empty">暫無符合目前規則的出口節點，或尚未發現任何 Exit。</p>';
-        else html += '<table><thead><tr><th>Peer ID</th><th>版本</th><th>國家/地區</th></tr></thead><tbody>' +
-          candidates.map(c => '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.version || '-') + '</td><td>' + escapeHtml(c.country || '-') + '</td></tr>').join('') + '</tbody></table>';
+        html += '<option value="auto"' + (mode === 'auto' ? ' selected' : '') + '>自动选择</option>';
+        html += '<option value="country_only"' + (mode === 'country_only' ? ' selected' : '') + '>仅使用指定国家/地区</option>';
+        html += '<option value="country_preferred"' + (mode === 'country_preferred' ? ' selected' : '') + '>优先使用指定国家/地区</option>';
+        html += '<option value="fixed_peer"' + (mode === 'fixed_peer' ? ' selected' : '') + '>固定指定出口节点</option>';
+        html += '</select><div class="hint">控制每条电路最后一跳出口的筛选方式。</div></div>';
+
+        html += '<div class="form-row" id="row-fixed"><label>固定出口 Peer ID（fixed_peer 时必填）</label><input type="text" id="exit-fixed-peer" value="' + escapeHtml(cfg.fixed_exit_peer_id || '') + '" placeholder="12D3KooW..."><div class="hint">指定每条电路最后一跳必须使用的出口节点。</div></div>';
+        html += '<div class="form-row" id="row-allowed"><label>仅允许的国家/地区（country_only 时生效）</label>' + tagsHtml('allowed_countries', allowed, '如 SG、JP、TH') + '<div class="hint">仅从这些国家的出口中选择，多个用回车添加。</div></div>';
+        html += '<div class="form-row" id="row-preferred"><label>优先国家/地区顺序（country_preferred 时生效）</label>' + tagsHtml('preferred_countries', preferred, '如 TH、SG、MY') + '<div class="hint">按顺序优先选择，前面的优先。</div></div>';
+        html += '<div class="form-row"><label>排除指定国家/地区</label>' + tagsHtml('exclude_countries', excluded, '如 CN、US，回车添加') + '<div class="hint">任意模式生效：这些国家的出口将不会被选。</div></div>';
+
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-fallback"' + (fallback ? ' checked' : '') + '> 找不到符合条件时允许退回任意出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-allow-direct"' + (allowDirect ? ' checked' : '') + '> 允许直连出口（Local → Exit）</label><div class="hint">关闭则必须经至少一个 Relay。</div></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-tunnel-to-exit"' + (tunnelToExit ? ' checked' : '') + '> 本地 SOCKS5 原样转发到 Exit 的 SOCKS5</label><div class="hint">开启后，本地 1080 不再解析 SOCKS5，请求会通过 raw libp2p stream 直接转给 exit 节点上的 SOCKS5。</div></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-dns"' + (requireDNS ? ' checked' : '') + '> 仅选支持 Remote DNS 的出口</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-require-tcp"' + (requireTCP ? ' checked' : '') + '> 仅选支持 TCP 的出口</label></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="exit-save">保存设置</button></div>';
         html += '</div>';
-        setTimeout(() => {
-          const store = { allowed_countries: allowed, preferred_countries: preferred, exclude_countries: excluded };
-          document.querySelectorAll('.tag-input').forEach(div => {
-            const listId = div.dataset.list;
-            const input = div.querySelector('input[data-add]');
+
+        html += '<div class="card exit-candidates"><h3>当前可选出口（' + candidates.length + '）</h3>';
+        if (!candidates.length) html += '<p class="empty">暂无符合当前规则的出口节点，或尚未发现任何 Exit。</p>';
+        else html += '<table><thead><tr><th>Peer ID</th><th>版本</th><th>国家/地区</th></tr></thead><tbody>' +
+          candidates.map(function(c){ return '<tr><td><code>' + escapeHtml((c.peer_id||'').slice(0,16)) + '</code></td><td>' + escapeHtml(c.version || '-') + '</td><td>' + escapeHtml(c.country || '-') + '</td></tr>'; }).join('') + '</tbody></table>';
+        html += '</div>';
+
+        setTimeout(function bindExitPolicy() {
+          var store = { allowed_countries: allowed, preferred_countries: preferred, exclude_countries: excluded };
+          document.querySelectorAll('.tag-input').forEach(function(div) {
+            var listId = div.dataset.list;
+            var input = div.querySelector('input[data-add]');
             if (!input) return;
-            input.addEventListener('keydown', e => {
+            input.addEventListener('keydown', function(e) {
               if (e.key !== 'Enter') return;
               e.preventDefault();
-              const v = (input.value || '').trim().toUpperCase();
+              var v = (input.value || '').trim().toUpperCase();
               if (!v || store[listId].indexOf(v) >= 0) { input.value = ''; return; }
               store[listId].push(v);
-              const tag = document.createElement('span');
+              var tag = document.createElement('span');
               tag.className = 'tag';
               tag.setAttribute('data-id', listId);
               tag.innerHTML = escapeHtml(v) + '<span class="rm" data-remove="' + escapeHtml(v) + '">&times;</span>';
-              tag.querySelector('.rm').onclick = () => { store[listId] = store[listId].filter(x => x !== v); tag.remove(); };
+              tag.querySelector('.rm').addEventListener('click', function(){ store[listId] = store[listId].filter(function(x){ return x !== v; }); tag.remove(); });
               div.insertBefore(tag, input);
               input.value = '';
             });
-            div.querySelectorAll('.rm').forEach(rm => {
-              rm.onclick = () => { const v = rm.dataset.remove; store[listId] = store[listId].filter(x => x !== v); rm.closest('.tag').remove(); };
+            div.querySelectorAll('.rm').forEach(function(rm) {
+              rm.addEventListener('click', function(){ var v = rm.dataset.remove; store[listId] = store[listId].filter(function(x){ return x !== v; }); rm.closest('.tag').remove(); });
             });
           });
-          const saveBtn = document.getElementById('exit-save');
-          if (saveBtn) saveBtn.onclick = () => {
-            const payload = {
+          document.getElementById('exit-save').addEventListener('click', function() {
+            var payload = {
               mode: document.getElementById('exit-mode').value,
               allowed_countries: store.allowed_countries,
               preferred_countries: store.preferred_countries,
               exclude_countries: store.exclude_countries,
               exclude_peer_ids: cfg.exclude_peer_ids || [],
-              fixed_exit_peer_id: (document.getElementById('exit-fixed-peer')?.value || '').trim(),
+              fixed_exit_peer_id: (document.getElementById('exit-fixed-peer') && document.getElementById('exit-fixed-peer').value) ? document.getElementById('exit-fixed-peer').value.trim() : '',
               require_remote_dns: document.getElementById('exit-require-dns').checked,
               require_tcp_support: document.getElementById('exit-require-tcp').checked,
               fallback_to_any: document.getElementById('exit-fallback').checked,
               allow_direct_exit: document.getElementById('exit-allow-direct').checked,
-              tunnel_to_exit: document.getElementById('exit-tunnel-to-exit').checked,
+              tunnel_to_exit: document.getElementById('exit-tunnel-to-exit').checked
             };
-            saveBtn.disabled = true;
-            post('/api/v1/client/exit-selection', payload)
-              .then(() => {
-                document.getElementById('exit-msg').innerHTML = '<div class="msg ok">已儲存出口選擇設定。</div>';
-                setTimeout(() => show('exit-policy'), 600);
+            var btn = document.getElementById('exit-save');
+            btn.disabled = true;
+            fetch(api('/api/v1/client/exit-selection'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+              .then(function(r){ return r.json().then(function(d){ if (!r.ok) throw new Error(d.error || r.statusText); return d; }); })
+              .then(function() {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg ok">已保存出口选择设置。</div>';
+                setTimeout(function(){ show('exit-policy'); }, 600);
               })
-              .catch(err => {
-                document.getElementById('exit-msg').innerHTML = '<div class="msg err">儲存失敗: ' + escapeHtml(err.message) + '</div>';
+              .catch(function(err) {
+                document.getElementById('exit-msg').innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+                btn.disabled = false;
               })
-              .finally(() => { if (document.getElementById('exit-save')) document.getElementById('exit-save').disabled = false; });
-          };
+              .then(function(){ if (document.getElementById('exit-save')) document.getElementById('exit-save').disabled = false; });
+          });
         }, 0);
         return html;
-      }).catch(err => '<h1>出口節點管理</h1><div class="card"><p class="empty">載入失敗: ' + escapeHtml(err.message) + '</p></div>');
+      }).catch(function(err){ return '<h1>出口节点管理</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
     }
+
+    function renderExitOperatorPolicy() {
+      return Promise.all([
+        get('/api/v1/exit/policy').catch(function(e){ return null; }),
+        get('/api/v1/exit/status').catch(function(e){ return null; })
+      ]).then(function(res) {
+        var policyRes = res[0];
+        var statusRes = res[1];
+        if (!policyRes && !statusRes) {
+          return '<h1>出口政策</h1><div class="card"><p class="empty">本节点非 relay+exit 或未启用出口策略，无法使用出口政策配置。仅 relay+exit 节点会显示此页。</p></div>';
+        }
+        var policy = (policyRes && policyRes.policy) ? policyRes.policy : {};
+        var runtime = (policyRes && policyRes.runtime) ? policyRes.runtime : {};
+        var status = statusRes || {};
+        var drainMode = !!status.drain_mode;
+        var acceptNew = status.accept_new_streams !== false;
+        var openConns = status.open_connections != null ? status.open_connections : 0;
+        var recentRejects = Array.isArray(status.recent_rejects) ? status.recent_rejects : [];
+
+        var html = '<h1>出口政策</h1><div id="exit-op-msg"></div>';
+        html += '<div class="card"><h3>运行状态</h3><dl class="kv">';
+        html += '<dt>维护模式 (drain)</dt><dd><span class="badge ' + (drainMode ? 'warn' : 'ok') + '">' + (drainMode ? '是' : '否') + '</span></dd>';
+        html += '<dt>接受新连接</dt><dd>' + (acceptNew ? '是' : '否') + '</dd>';
+        html += '<dt>当前出口连接数</dt><dd>' + openConns + '</dd></dl>';
+        html += '<div class="form-row">';
+        if (drainMode) {
+          html += '<button class="btn btn-primary" id="exit-op-resume">结束维护模式</button>';
+        } else {
+          html += '<button class="btn btn-primary" id="exit-op-drain">进入维护模式</button>';
+        }
+        html += '</div></div>';
+
+        var arr = function(x){ return Array.isArray(x) ? x.slice() : []; };
+        var allowedPorts = arr(policy.allowed_ports);
+        var deniedPorts = arr(policy.denied_ports);
+        var allowedDomains = arr(policy.allowed_domains);
+        var deniedDomains = arr(policy.denied_domains);
+        var allowedSuffixes = arr(policy.allowed_domain_suffixes);
+        var deniedSuffixes = arr(policy.denied_domain_suffixes);
+        var peerWhitelist = arr(policy.peer_whitelist);
+        var peerBlacklist = arr(policy.peer_blacklist);
+
+        function tagList(id, list, placeholder, isNum) {
+          var displayList = list.map(function(v){ return isNum ? Number(v) : v; });
+          var tags = displayList.map(function(v){ return '<span class="tag" data-list="' + id + '">' + escapeHtml(String(v)) + '<span class="rm" data-remove="' + escapeHtml(String(v)) + '">&times;</span></span>'; }).join('');
+          return '<div class="tag-input" data-list="' + id + '" data-num="' + (isNum ? '1' : '0') + '">' + tags + '<input type="text" placeholder="' + (placeholder || '') + '" maxlength="200" data-add="' + id + '"></div>';
+        }
+
+        html += '<div class="card"><h3>策略配置</h3>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-tcp"' + (policy.allow_tcp ? ' checked' : '') + '> 允许 TCP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-udp"' + (policy.allow_udp ? ' checked' : '') + '> 允许 UDP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-remote-dns"' + (policy.remote_dns ? ' checked' : '') + '> 出口端解析 DNS (Remote DNS)</label></div>';
+        html += '<div class="form-row"><label>允许的端口（空则仅受拒绝列表限制）</label>' + tagList('allowed_ports', allowedPorts, '端口号回车添加', true) + '</div>';
+        html += '<div class="form-row"><label>拒绝的端口</label>' + tagList('denied_ports', deniedPorts, '端口号回车添加', true) + '</div>';
+        html += '<div class="form-row"><label>允许的域名（精确）</label>' + tagList('allowed_domains', allowedDomains, '域名回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>允许的域名后缀（如 .google.com）</label>' + tagList('allowed_domain_suffixes', allowedSuffixes, '后缀回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>拒绝的域名（精确）</label>' + tagList('denied_domains', deniedDomains, '域名回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>拒绝的域名后缀</label>' + tagList('denied_domain_suffixes', deniedSuffixes, '后缀回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>Peer 白名单（空则不做白名单限制）</label>' + tagList('peer_whitelist', peerWhitelist, 'Peer ID 回车添加', false) + '</div>';
+        html += '<div class="form-row"><label>Peer 黑名单</label>' + tagList('peer_blacklist', peerBlacklist, 'Peer ID 回车添加', false) + '</div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-private"' + (policy.allow_private_ip_targets ? ' checked' : '') + '> 允许访问私网目标 IP</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-loopback"' + (policy.allow_loopback_targets ? ' checked' : '') + '> 允许回环目标</label></div>';
+        html += '<div class="form-row"><label><input type="checkbox" id="exit-op-allow-linklocal"' + (policy.allow_link_local_targets ? ' checked' : '') + '> 允许链路本地目标</label></div>';
+        html += '<div class="form-row"><button class="btn btn-primary" id="exit-op-save-policy">保存策略</button></div>';
+        html += '</div>';
+
+        if (recentRejects.length) {
+          html += '<div class="card"><h3>最近拒绝记录</h3><table><thead><tr><th>时间</th><th>原因</th></tr></thead><tbody>';
+          html += recentRejects.slice(-20).reverse().map(function(r) {
+            return '<tr><td>' + (r.at ? new Date(r.at).toLocaleString() : '-') + '</td><td><code>' + escapeHtml(r.reason || '') + '</code></td></tr>';
+          }).join('') + '</tbody></table></div>';
+        }
+
+        setTimeout(function bindExitOp() {
+          var drainBtn = document.getElementById('exit-op-drain');
+          var resumeBtn = document.getElementById('exit-op-resume');
+          var msgEl = document.getElementById('exit-op-msg');
+          var store = {
+            allowed_ports: allowedPorts.slice(),
+            denied_ports: deniedPorts.slice(),
+            allowed_domains: allowedDomains.slice(),
+            denied_domains: deniedDomains.slice(),
+            allowed_domain_suffixes: allowedSuffixes.slice(),
+            denied_domain_suffixes: deniedSuffixes.slice(),
+            peer_whitelist: peerWhitelist.slice(),
+            peer_blacklist: peerBlacklist.slice()
+          };
+          function post(path, body) {
+            return fetch(api(path), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(function(r) {
+              if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || r.statusText); });
+              return r.json();
+            });
+          }
+          document.querySelectorAll('.tag-input[data-list]').forEach(function(div) {
+            var listId = div.dataset.list;
+            var isNum = div.dataset.num === '1';
+            var input = div.querySelector('input[data-add]');
+            if (!input) return;
+            input.addEventListener('keydown', function(e) {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              var v = (input.value || '').trim();
+              if (isNum) { var n = parseInt(v, 10); if (isNaN(n) || n < 0 || n > 65535) { input.value = ''; return; } v = n; if (store[listId].indexOf(v) >= 0) { input.value = ''; return; } }
+              else { if (!v || store[listId].indexOf(v) >= 0) { input.value = ''; return; } }
+              store[listId].push(v);
+              var tag = document.createElement('span');
+              tag.className = 'tag';
+              tag.setAttribute('data-list', listId);
+              tag.innerHTML = escapeHtml(String(v)) + '<span class="rm" data-remove="' + escapeHtml(String(v)) + '">&times;</span>';
+              tag.querySelector('.rm').addEventListener('click', function(){ store[listId] = store[listId].filter(function(x){ return String(x) !== String(v); }); tag.remove(); });
+              div.insertBefore(tag, input);
+              input.value = '';
+            });
+            div.querySelectorAll('.rm').forEach(function(rm) {
+              rm.addEventListener('click', function() {
+                var v = rm.dataset.remove;
+                store[listId] = store[listId].filter(function(x){ return String(x) !== v; });
+                rm.closest('.tag').remove();
+              });
+            });
+          });
+          var saveBtn = document.getElementById('exit-op-save-policy');
+          if (saveBtn) saveBtn.addEventListener('click', function() {
+            var payload = {
+              policy: {
+                allow_tcp: document.getElementById('exit-op-allow-tcp').checked,
+                allow_udp: document.getElementById('exit-op-allow-udp').checked,
+                remote_dns: document.getElementById('exit-op-remote-dns').checked,
+                allowed_ports: store.allowed_ports.slice(),
+                denied_ports: store.denied_ports.slice(),
+                allowed_domains: store.allowed_domains.slice(),
+                denied_domains: store.denied_domains.slice(),
+                allowed_domain_suffixes: store.allowed_domain_suffixes.slice(),
+                denied_domain_suffixes: store.denied_domain_suffixes.slice(),
+                peer_whitelist: store.peer_whitelist.slice(),
+                peer_blacklist: store.peer_blacklist.slice(),
+                allow_private_ip_targets: document.getElementById('exit-op-allow-private').checked,
+                allow_loopback_targets: document.getElementById('exit-op-allow-loopback').checked,
+                allow_link_local_targets: document.getElementById('exit-op-allow-linklocal').checked
+              }
+            };
+            saveBtn.disabled = true;
+            post('/api/v1/exit/policy', payload).then(function() {
+              msgEl.innerHTML = '<div class="msg ok">策略已保存并已写回配置文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">保存失败: ' + escapeHtml(err.message) + '</div>';
+              saveBtn.disabled = false;
+            });
+          });
+          if (drainBtn) drainBtn.addEventListener('click', function() {
+            drainBtn.disabled = true;
+            post('/api/v1/exit/drain').then(function() {
+              msgEl.innerHTML = '<div class="msg ok">已进入维护模式，配置已写回文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">操作失败: ' + escapeHtml(err.message) + '</div>';
+              drainBtn.disabled = false;
+            });
+          });
+          if (resumeBtn) resumeBtn.addEventListener('click', function() {
+            resumeBtn.disabled = true;
+            post('/api/v1/exit/resume').then(function() {
+              msgEl.innerHTML = '<div class="msg ok">已结束维护模式，配置已写回文件。</div>';
+              show('exit-operator-policy');
+            }).catch(function(err) {
+              msgEl.innerHTML = '<div class="msg err">操作失败: ' + escapeHtml(err.message) + '</div>';
+              resumeBtn.disabled = false;
+            });
+          });
+        }, 0);
+        return html;
+      }).catch(function(err){ return '<h1>出口政策</h1><div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
+    }
+
     function renderLogs(data) {
-      const list = Array.isArray(data) ? data : [];
-      if (!list.length) return '<h1>日誌面板</h1><div class="card"><p class="empty">尚無最近錯誤紀錄</p></div>';
-      return '<h1>日誌面板</h1><div class="card"><h3>最近錯誤</h3>' +
-        list.map(e => '<div class="log-line"><span class="ts">' + (e.at ? new Date(e.at).toLocaleTimeString() : '') + '</span><span class="cat">[' + escapeHtml(e.category || '') + ']</span>' + escapeHtml(e.message || '') + '</div>').join('') + '</div>';
+      var list = Array.isArray(data) ? data : [];
+      if (!list.length) return '<h1>日志面板</h1><div class="card"><p class="empty">尚无最近错误记录</p></div>';
+      return '<h1>日志面板</h1><div class="card"><h3>最近错误</h3>' +
+        list.map(function(e){ return '<div class="log-line"><span class="ts">' + (e.at ? new Date(e.at).toLocaleTimeString() : '') + '</span><span class="cat">[' + escapeHtml(e.category || '') + ']</span>' + escapeHtml(e.message || '') + '</div>'; }).join('') + '</div>';
     }
-    function escapeHtml(s) {
-      if (s == null) return '';
-      const div = document.createElement('div');
-      div.textContent = s;
-      return div.innerHTML;
+    function escapeHtml(s) { if (s == null) return ''; var div = document.createElement('div'); div.textContent = s; return div.innerHTML; }
+    function formatHealth(alive, rtt, failures, lastPing, lastPong) {
+      var badgeClass = alive ? 'badge ok' : 'badge err';
+      var label = alive ? '正常' : '失联';
+      var rttNum = Number(rtt);
+      var rttText = Number.isFinite(rttNum) ? rttNum.toFixed(1) + ' ms' : '—';
+      var failureText = failures > 0 ? ' fail×' + failures : '';
+      var titleParts = [];
+      if (lastPing) {
+        var d = new Date(lastPing);
+        if (!Number.isNaN(d.valueOf())) {
+          titleParts.push('Ping: ' + d.toLocaleTimeString());
+        }
+      }
+      if (lastPong) {
+        var d = new Date(lastPong);
+        if (!Number.isNaN(d.valueOf())) {
+          titleParts.push('Pong: ' + d.toLocaleTimeString());
+        }
+      }
+      var title = titleParts.length ? titleParts.join(' / ') : '心跳状态';
+      return '<span class="' + badgeClass + '" title="' + escapeHtml(title) + '">' + label + (alive && rttText !== '—' ? ' ' + rttText : '') + failureText + '</span>';
     }
     function formatBytes(value) {
       if (value == null || value === '') return '-';
-      const num = Number(value);
+      var num = Number(value);
       if (!Number.isFinite(num)) return '-';
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let n = num;
-      let idx = 0;
+      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var n = num;
+      var idx = 0;
       while (n >= 1024 && idx < units.length - 1) {
         n /= 1024;
         idx++;
@@ -540,50 +759,14 @@
       }
       return n.toFixed(1) + ' ' + units[idx];
     }
-    function formatHealth(alive, rtt, failures, lastPing, lastPong) {
-      const badgeClass = alive ? 'badge ok' : 'badge err';
-      const label = alive ? '正常' : '失联';
-      const rttNum = Number(rtt);
-      const rttText = Number.isFinite(rttNum) ? rttNum.toFixed(1) + ' ms' : '—';
-      const failureText = failures > 0 ? ' fail×' + failures : '';
-      const titleParts = [];
-      if (lastPing) {
-        const d = new Date(lastPing);
-        if (!Number.isNaN(d.valueOf())) {
-          titleParts.push('Ping: ' + d.toLocaleTimeString());
-        }
-      }
-      if (lastPong) {
-        const d = new Date(lastPong);
-        if (!Number.isNaN(d.valueOf())) {
-          titleParts.push('Pong: ' + d.toLocaleTimeString());
-        }
-      }
-      const title = titleParts.length ? titleParts.join(' / ') : '心跳状态';
-      return '<span class="' + badgeClass + '" title="' + escapeHtml(title) + '">' + label + (alive && rttText !== '—' ? ' ' + rttText : '') + failureText + '</span>';
-    }
-    function formatUptime(sec) {
-      if (sec == null) return '-';
-      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
-      return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
-    }
+    function formatUptime(sec) { if (sec == null) return '-'; var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60); return [h,m,s].map(function(v){ return String(v).padStart(2,'0'); }).join(':'); }
 
-    const pages = {
-      status: () => get('/api/v1/status').then(renderStatus),
-      relays: () => Promise.all([get('/api/v1/relays').catch(() => []), get('/api/v1/exits').catch(() => [])]).then(([r,e]) => renderRelaysExits(r, e)),
-      circuits: () => get('/api/v1/circuits').then(renderCircuits),
-      streams: () => get('/api/v1/streams').then(renderStreams),
-      'circuit-pool': () => renderCircuitPoolConfig(),
-      traffic: () => get('/api/v1/metrics/summary').then(renderTraffic),
-      routing: () => Promise.resolve(renderRouting()),
-      'exit-policy': () => renderExitPolicy(),
-      logs: () => get('/api/v1/errors/recent').then(renderLogs),
-    };
-    const COLLAPSE_KEY = 'meshproxy-console-sidebar-collapsed';
-    const sidebar = document.querySelector('.sidebar');
-    const collapseToggle = document.querySelector('.collapse-toggle');
+    var COLLAPSE_KEY = 'meshproxy-console-sidebar-collapsed';
+    var sidebar = document.querySelector('.sidebar');
+    var collapseToggle = document.querySelector('.collapse-toggle');
     function applySidebarState(collapsed) {
-      sidebar?.classList.toggle('collapsed', collapsed);
+      if (!sidebar) return;
+      sidebar.classList.toggle('collapsed', collapsed);
       if (collapseToggle) {
         collapseToggle.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
       }
@@ -591,44 +774,52 @@
     function readSavedState() {
       try {
         return localStorage.getItem(COLLAPSE_KEY) === '1';
-      } catch {
-        return false;
-      }
+      } catch (e) { return false; }
     }
     function writeState(value) {
-      try { localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0'); } catch {}
+      try { localStorage.setItem(COLLAPSE_KEY, value ? '1' : '0'); } catch (e) {}
     }
     if (sidebar && collapseToggle) {
       applySidebarState(readSavedState());
-      collapseToggle.addEventListener('click', () => {
-        const nextState = !sidebar.classList.contains('collapsed');
+      collapseToggle.addEventListener('click', function() {
+        var nextState = !sidebar.classList.contains('collapsed');
         applySidebarState(nextState);
         writeState(nextState);
       });
     }
-    const langSelect = document.getElementById('lang-select');
+    var langSelect = document.getElementById('lang-select');
     if (langSelect) {
-      langSelect.addEventListener('change', () => {
+      langSelect.addEventListener('change', function() {
         currentLocale = langSelect.value || 'zh';
         writeLocale(currentLocale);
         applyStaticI18n();
         onNav();
       });
     }
+    var pages = {
+      status: function(){ return get('/api/v1/status').then(renderStatus); },
+      relays: function(){ return Promise.all([get('/api/v1/relays').catch(function(){ return []; }), get('/api/v1/exits').catch(function(){ return []; })]).then(function(r){ return renderRelaysExits(r[0], r[1]); }); },
+      circuits: function(){ return get('/api/v1/circuits').then(renderCircuits); },
+      streams: function(){ return get('/api/v1/streams').then(renderStreams); },
+      'circuit-pool': function(){ return renderCircuitPoolConfig(); },
+      traffic: function(){ return get('/api/v1/metrics/summary').then(renderTraffic); },
+      routing: function(){ return Promise.resolve(renderRouting()); },
+      'exit-policy': function(){ return renderExitPolicy(); },
+      'exit-operator-policy': function(){ return renderExitOperatorPolicy(); },
+      logs: function(){ return get('/api/v1/errors/recent').then(renderLogs); }
+    };
     function show(page) {
-      const el = document.getElementById('content');
+      var el = document.getElementById('content');
       el.innerHTML = '<p class="refresh">' + escapeHtml(ts('loading')) + '</p>';
-      (pages[page] || pages.status)()
-        .then(html => { el.innerHTML = translateHtml(html); })
-        .catch(err => { el.innerHTML = '<div class="card"><p class="empty">' + escapeHtml(ts('load_failed')) + escapeHtml(err.message) + '</p></div>'; });
+      (pages[page] || pages.status)().then(function(html){ el.innerHTML = translateHtml(html); }).catch(function(err){ el.innerHTML = '<div class="card"><p class="empty">' + escapeHtml(ts('load_failed')) + escapeHtml(err.message) + '</p></div>'; });
     }
     function onNav() {
-      const hash = (location.hash || '#status').slice(1) || 'status';
-      document.querySelectorAll('.sidebar a').forEach(a => { a.classList.toggle('active', a.dataset.page === hash); });
+      var hash = (location.hash || '#status').slice(1) || 'status';
+      document.querySelectorAll('.sidebar a').forEach(function(a){ a.classList.toggle('active', a.dataset.page === hash); });
       show(hash);
     }
     window.addEventListener('hashchange', onNav);
-    window.addEventListener('load', () => { applyStaticI18n(); onNav(); setInterval(onNav, 8000); });
+    window.addEventListener('load', function(){ applyStaticI18n(); onNav(); setInterval(onNav, 8000); });
   </script>
 </body>
 </html>
