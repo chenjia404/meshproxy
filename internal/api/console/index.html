@@ -21,6 +21,9 @@
     .layout { display: flex; min-height: 100vh; }
     .sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 1rem 0; flex-shrink: 0; position: relative; transition: width 0.2s ease, border 0.2s ease; }
     .sidebar h2 { font-size: 0.85rem; font-weight: 600; color: var(--muted); padding: 0 1rem; margin: 0 0 0.5rem; }
+    .sidebar-tools { display: flex; align-items: center; gap: 0.5rem; padding: 0 1rem 0.75rem; }
+    .sidebar-tools label { font-size: 0.8rem; color: var(--muted); }
+    .sidebar-tools select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.4rem; }
     .sidebar a { display: block; padding: 0.5rem 1rem; color: var(--text); text-decoration: none; font-size: 0.9rem; border-left: 3px solid transparent; }
     .sidebar a:hover { background: rgba(255,255,255,0.05); }
     .sidebar a.active { border-left-color: var(--accent); background: rgba(88,166,255,0.08); }
@@ -147,17 +150,24 @@
   <div class="layout">
     <nav class="sidebar">
       <button class="collapse-toggle" type="button" aria-label="折叠菜单" aria-pressed="false">☰</button>
-      <h2 class="sidebar-title">控制台</h2>
-      <a href="#status" data-page="status" class="active"><span class="nav-label">节点状态</span></a>
-      <a href="#relays" data-page="relays"><span class="nav-label">Relay / Exit</span></a>
-      <a href="#circuits" data-page="circuits"><span class="nav-label">Circuit 列表</span></a>
-      <a href="#streams" data-page="streams"><span class="nav-label">Stream 列表</span></a>
-      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label">电路池</span></a>
-      <a href="#traffic" data-page="traffic"><span class="nav-label">实时流量</span></a>
-      <a href="#routing" data-page="routing"><span class="nav-label">路由规则</span></a>
-      <a href="#exit-policy" data-page="exit-policy"><span class="nav-label">出口选择</span></a>
-      <a href="#exit-operator-policy" data-page="exit-operator-policy"><span class="nav-label">出口政策</span></a>
-      <a href="#logs" data-page="logs"><span class="nav-label">日志面板</span></a>
+      <h2 class="sidebar-title" data-i18n="console_title">控制台</h2>
+      <div class="sidebar-tools">
+        <label for="lang-select" data-i18n="language">语言</label>
+        <select id="lang-select">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <a href="#status" data-page="status" class="active"><span class="nav-label" data-i18n="nav_status">节点状态</span></a>
+      <a href="#relays" data-page="relays"><span class="nav-label" data-i18n="nav_relays">Relay / Exit</span></a>
+      <a href="#circuits" data-page="circuits"><span class="nav-label" data-i18n="nav_circuits">Circuit 列表</span></a>
+      <a href="#streams" data-page="streams"><span class="nav-label" data-i18n="nav_streams">Stream 列表</span></a>
+      <a href="#circuit-pool" data-page="circuit-pool"><span class="nav-label" data-i18n="nav_pool">电路池</span></a>
+      <a href="#traffic" data-page="traffic"><span class="nav-label" data-i18n="nav_traffic">实时流量</span></a>
+      <a href="#routing" data-page="routing"><span class="nav-label" data-i18n="nav_routing">路由规则</span></a>
+      <a href="#exit-policy" data-page="exit-policy"><span class="nav-label" data-i18n="nav_exit">出口选择</span></a>
+      <a href="#exit-operator-policy" data-page="exit-operator-policy"><span class="nav-label" data-i18n="nav_exit_operator">出口政策</span></a>
+      <a href="#logs" data-page="logs"><span class="nav-label" data-i18n="nav_logs">日志面板</span></a>
     </nav>
     <main class="main">
       <div id="content"></div>
@@ -165,6 +175,167 @@
   </div>
   <script>
     const API = '';
+    const LOCALE_KEY = 'meshproxy-console-locale';
+    const STATIC_I18N = {
+      zh: {
+        console_title: '控制台',
+        language: '语言',
+        nav_status: '节点状态',
+        nav_relays: 'Relay / Exit',
+        nav_circuits: 'Circuit 列表',
+        nav_streams: 'Stream 列表',
+        nav_pool: '电路池',
+        nav_traffic: '实时流量',
+        nav_routing: '路由规则',
+        nav_exit: '出口选择',
+        nav_exit_operator: '出口政策',
+        nav_logs: '日志面板',
+        loading: '加载中…',
+        load_failed: '加载失败: '
+      },
+      en: {
+        console_title: 'Console',
+        language: 'Language',
+        nav_status: 'Node Status',
+        nav_relays: 'Relay / Exit',
+        nav_circuits: 'Circuits',
+        nav_streams: 'Streams',
+        nav_pool: 'Circuit Pool',
+        nav_traffic: 'Traffic',
+        nav_routing: 'Routing',
+        nav_exit: 'Exit Selection',
+        nav_exit_operator: 'Exit Policy',
+        nav_logs: 'Logs',
+        loading: 'Loading…',
+        load_failed: 'Load failed: '
+      }
+    };
+    const EN_REPLACEMENTS = {
+      '控制台': 'Console',
+      '节点状态': 'Node Status',
+      '基本信息': 'Basic Info',
+      '模式': 'Mode',
+      '运行时长': 'Uptime',
+      '已知 Relay': 'Known Relays',
+      '已知 Exit': 'Known Exits',
+      'P2P 监听': 'P2P Listen',
+      '电路池': 'Circuit Pool',
+      '尚无节点': 'No nodes yet',
+      '版本': 'Version',
+      '角色': 'Role',
+      '国家/地区': 'Country/Region',
+      'Circuit 列表': 'Circuits',
+      '目前无电路': 'No circuits',
+      '状态': 'State',
+      '心跳': 'Heartbeat',
+      '路径': 'Path',
+      '发送': 'Sent',
+      '接收': 'Received',
+      '建立时间': 'Created At',
+      'Stream 列表': 'Streams',
+      '目前无 stream': 'No streams',
+      '目标': 'Target',
+      '实时流量': 'Traffic',
+      '无法取得指标': 'Unable to load metrics',
+      '汇总': 'Summary',
+      '电路总数': 'Circuits',
+      '活跃 Stream': 'Active Streams',
+      '最近错误数': 'Recent Errors',
+      '路由规则': 'Routing',
+      '路由规则界面尚未开放，请通过配置文件或 API 设置。': 'Routing UI is not available yet. Please use the config file or API.',
+      '总量控制': 'Total Limits',
+      '最小总数': 'Min Total',
+      '最大总数': 'Max Total',
+      '默认只维持 1 条 circuit。保存后会立即更新运行中的池子，并写回配置文件。': 'By default only 1 circuit is kept. Saving applies to the running pool and persists to config.',
+      '每池最小 / 最大（只读）': 'Per-pool Min / Max (read-only)',
+      '保存设置': 'Save',
+      '请输入正整数。': 'Please enter positive integers.',
+      '保存失败: ': 'Save failed: ',
+      '已保存电路池设置。': 'Circuit pool settings saved.',
+      '出口节点管理': 'Exit Selection',
+      '出口选择': 'Exit Selection',
+      '自动选择': 'Auto',
+      '仅使用指定国家/地区': 'Only selected countries/regions',
+      '优先使用指定国家/地区': 'Prefer selected countries/regions',
+      '固定指定出口节点': 'Fixed exit peer',
+      '固定出口 Peer ID（fixed_peer 时必填）': 'Fixed Exit Peer ID (required for fixed_peer)',
+      '排除指定国家/地区': 'Excluded countries/regions',
+      '找不到符合条件时允许退回任意出口': 'Fallback to any exit when no match',
+      '允许直连出口（Local → Exit）': 'Allow direct exit (Local → Exit)',
+      '本地 SOCKS5 原样转发到 Exit 的 SOCKS5': 'Tunnel local SOCKS5 to exit SOCKS5',
+      '仅选支持 Remote DNS 的出口': 'Require Remote DNS support',
+      '仅选支持 TCP 的出口': 'Require TCP support',
+      '当前可选出口': 'Available exits',
+      '暂无符合当前规则的出口节点，或尚未发现任何 Exit。': 'No exits match the current rules, or no exits have been discovered yet.',
+      '已保存出口选择设置。': 'Exit selection saved.',
+      '出口政策': 'Exit Policy',
+      '运行状态': 'Runtime Status',
+      '维护模式 (drain)': 'Drain Mode',
+      '接受新连接': 'Accept New Streams',
+      '当前出口连接数': 'Open Exit Connections',
+      '进入维护模式': 'Enter Drain Mode',
+      '结束维护模式': 'Leave Drain Mode',
+      '策略配置': 'Policy',
+      '允许 TCP': 'Allow TCP',
+      '允许 UDP': 'Allow UDP',
+      '出口端解析 DNS (Remote DNS)': 'Resolve DNS on exit (Remote DNS)',
+      '允许的端口（空则仅受拒绝列表限制）': 'Allowed ports (empty means only denied list applies)',
+      '拒绝的端口': 'Denied ports',
+      '允许的域名（精确）': 'Allowed domains (exact)',
+      '允许的域名后缀（如 .google.com）': 'Allowed domain suffixes (e.g. .google.com)',
+      '拒绝的域名（精确）': 'Denied domains (exact)',
+      '拒绝的域名后缀': 'Denied domain suffixes',
+      'Peer 白名单（空则不做白名单限制）': 'Peer whitelist (empty = disabled)',
+      'Peer 黑名单': 'Peer blacklist',
+      '允许访问私网目标 IP': 'Allow private IP targets',
+      '允许回环目标': 'Allow loopback targets',
+      '允许链路本地目标': 'Allow link-local targets',
+      '保存策略': 'Save Policy',
+      '最近拒绝记录': 'Recent Rejects',
+      '时间': 'Time',
+      '原因': 'Reason',
+      '策略已保存并已写回配置文件。': 'Policy saved and written back to the config file.',
+      '已进入维护模式，配置已写回文件。': 'Drain mode enabled and saved to config.',
+      '已结束维护模式，配置已写回文件。': 'Drain mode disabled and saved to config.',
+      '操作失败: ': 'Operation failed: ',
+      '日志面板': 'Logs',
+      '尚无最近错误记录': 'No recent errors',
+      '最近错误': 'Recent Errors',
+      '加载失败: ': 'Load failed: ',
+      '加载中…': 'Loading…',
+      '正常': 'Healthy',
+      '失联': 'Offline',
+      '心跳状态': 'Heartbeat status',
+      '是': 'Yes',
+      '否': 'No'
+    };
+    let currentLocale = readLocale();
+    function readLocale() {
+      try { return localStorage.getItem(LOCALE_KEY) || 'zh'; } catch (e) { return 'zh'; }
+    }
+    function writeLocale(value) {
+      try { localStorage.setItem(LOCALE_KEY, value); } catch (e) {}
+    }
+    function ts(key) {
+      return (STATIC_I18N[currentLocale] && STATIC_I18N[currentLocale][key]) || STATIC_I18N.zh[key] || key;
+    }
+    function translateHtml(html) {
+      if (currentLocale !== 'en') return html;
+      var out = html;
+      Object.keys(EN_REPLACEMENTS).sort(function(a, b){ return b.length - a.length; }).forEach(function(from) {
+        out = out.split(from).join(EN_REPLACEMENTS[from]);
+      });
+      return out;
+    }
+    function applyStaticI18n() {
+      document.documentElement.lang = currentLocale === 'en' ? 'en' : 'zh-CN';
+      document.title = 'meshproxy ' + ts('console_title');
+      document.querySelectorAll('[data-i18n]').forEach(function(el) {
+        el.textContent = ts(el.dataset.i18n);
+      });
+      var langSelect = document.getElementById('lang-select');
+      if (langSelect) langSelect.value = currentLocale;
+    }
     function api(path) { return (API || '') + path; }
     function get(path) { return fetch(api(path)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText))); }
     function post(path, body) {
@@ -616,6 +787,15 @@
         writeState(nextState);
       });
     }
+    var langSelect = document.getElementById('lang-select');
+    if (langSelect) {
+      langSelect.addEventListener('change', function() {
+        currentLocale = langSelect.value || 'zh';
+        writeLocale(currentLocale);
+        applyStaticI18n();
+        onNav();
+      });
+    }
     var pages = {
       status: function(){ return get('/api/v1/status').then(renderStatus); },
       relays: function(){ return Promise.all([get('/api/v1/relays').catch(function(){ return []; }), get('/api/v1/exits').catch(function(){ return []; })]).then(function(r){ return renderRelaysExits(r[0], r[1]); }); },
@@ -630,8 +810,8 @@
     };
     function show(page) {
       var el = document.getElementById('content');
-      el.innerHTML = '<p class="refresh">加载中…</p>';
-      (pages[page] || pages.status)().then(function(html){ el.innerHTML = html; }).catch(function(err){ el.innerHTML = '<div class="card"><p class="empty">加载失败: ' + escapeHtml(err.message) + '</p></div>'; });
+      el.innerHTML = '<p class="refresh">' + escapeHtml(ts('loading')) + '</p>';
+      (pages[page] || pages.status)().then(function(html){ el.innerHTML = translateHtml(html); }).catch(function(err){ el.innerHTML = '<div class="card"><p class="empty">' + escapeHtml(ts('load_failed')) + escapeHtml(err.message) + '</p></div>'; });
     }
     function onNav() {
       var hash = (location.hash || '#status').slice(1) || 'status';
@@ -639,7 +819,7 @@
       show(hash);
     }
     window.addEventListener('hashchange', onNav);
-    window.addEventListener('load', function(){ onNav(); setInterval(onNav, 8000); });
+    window.addEventListener('load', function(){ applyStaticI18n(); onNav(); setInterval(onNav, 8000); });
   </script>
 </body>
 </html>
