@@ -564,6 +564,51 @@ func (s *Service) ListGroupMessages(groupID string) ([]GroupMessage, error) {
 	return s.store.ListGroupMessages(groupID)
 }
 
+func (s *Service) RevokeGroupMessage(groupID, msgID string) error {
+	group, err := s.store.GetGroup(groupID)
+	if err != nil {
+		return err
+	}
+	if group.State != GroupStateActive {
+		return errors.New("group is archived")
+	}
+	member, err := s.store.GetGroupMember(groupID, s.localPeer)
+	if err != nil {
+		return err
+	}
+	if member.State != GroupMemberStateActive {
+		return errors.New("local peer is not an active group member")
+	}
+	msg, err := s.store.GetGroupMessage(msgID)
+	if err != nil {
+		return err
+	}
+	if msg.GroupID != groupID {
+		return errors.New("message does not belong to group")
+	}
+	if err := s.ensureLocalGroupMessageRevokeAllowed(groupID, member, msg); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	payload := GroupMessageRevokePayload{
+		MsgID:        msg.MsgID,
+		SenderPeerID: msg.SenderPeerID,
+	}
+	event, err := newGroupEvent(groupID, group.LastEventSeq+1, GroupEventMessageRevoke, s.localPeer, s.localPeer, now, payload)
+	if err != nil {
+		return err
+	}
+	if err := s.signGroupEvent(&event); err != nil {
+		return err
+	}
+	if err := s.store.RevokeGroupMessage(groupID, msg.MsgID, msg.SenderPeerID, s.localPeer, event); err != nil {
+		return err
+	}
+	members, _ := s.store.ListGroupMembers(groupID)
+	s.broadcastGroupEvent(groupID, event, peersFromMembers(members, s.localPeer)...)
+	return nil
+}
+
 func (s *Service) SendGroupText(groupID, text string) (GroupMessage, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -1108,7 +1153,7 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			return errors.New("invalid group_create signer or actor")
 		}
 		return nil
-	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventDissolve, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
+	case GroupEventInvite, GroupEventRemove, GroupEventTitleUpdate, GroupEventRetentionUpdate, GroupEventMessageRevoke, GroupEventDissolve, GroupEventControllerTransfer, GroupEventJoin, GroupEventLeave:
 		group, err := s.store.GetGroup(env.GroupID)
 		if err != nil {
 			if env.EventType == GroupEventInvite && errors.Is(err, sql.ErrNoRows) {
@@ -1124,9 +1169,11 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			return err
 		}
 		if group.ControllerPeerID != env.SignerPeerID {
-			if env.EventType != GroupEventRetentionUpdate {
+			if env.EventType != GroupEventRetentionUpdate && env.EventType != GroupEventMessageRevoke {
 				return errors.New("group control signer is not current controller")
 			}
+		}
+		if env.EventType == GroupEventRetentionUpdate {
 			member, memberErr := s.store.GetGroupMember(env.GroupID, env.SignerPeerID)
 			if memberErr != nil {
 				return memberErr
@@ -1136,6 +1183,43 @@ func (s *Service) verifyGroupControlAuthority(env GroupControlEnvelope) error {
 			}
 			if member.Role != GroupRoleController && member.Role != GroupRoleAdmin {
 				return errors.New("group retention signer is not controller or admin")
+			}
+		}
+		if env.EventType == GroupEventMessageRevoke {
+			if env.ActorPeerID != env.SignerPeerID {
+				return errors.New("group message revoke actor must match signer")
+			}
+			var payload GroupMessageRevokePayload
+			if err := json.Unmarshal(env.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.MsgID == "" || payload.SenderPeerID == "" {
+				return errors.New("group message revoke payload is incomplete")
+			}
+			signerMember, memberErr := s.store.GetGroupMember(env.GroupID, env.SignerPeerID)
+			if memberErr != nil {
+				return memberErr
+			}
+			if signerMember.State != GroupMemberStateActive {
+				return errors.New("group message revoke signer is not an active member")
+			}
+			if signerMember.PeerID == payload.SenderPeerID {
+				return nil
+			}
+			targetMember, targetErr := s.store.GetGroupMember(env.GroupID, payload.SenderPeerID)
+			if targetErr != nil {
+				return targetErr
+			}
+			switch signerMember.Role {
+			case GroupRoleController:
+				return nil
+			case GroupRoleAdmin:
+				if targetMember.Role == GroupRoleController {
+					return errors.New("admin cannot revoke controller messages")
+				}
+				return nil
+			default:
+				return errors.New("member cannot revoke other people's messages")
 			}
 		}
 		switch env.EventType {
@@ -1547,6 +1631,8 @@ func (s *Service) applyGroupControlEnvelope(env GroupControlEnvelope) error {
 		return s.applyRemoteGroupTitleUpdate(env)
 	case GroupEventRetentionUpdate:
 		return s.applyRemoteGroupRetentionUpdate(env)
+	case GroupEventMessageRevoke:
+		return s.applyRemoteGroupMessageRevoke(env)
 	case GroupEventDissolve:
 		return s.applyRemoteGroupDissolve(env)
 	case GroupEventControllerTransfer:
@@ -1850,6 +1936,30 @@ func (s *Service) applyRemoteGroupRetentionUpdate(env GroupControlEnvelope) erro
 	}
 	_, err = s.store.UpdateGroupRetention(env.GroupID, payload.RetentionMinutes, groupEventFromEnvelope(env))
 	return err
+}
+
+func (s *Service) applyRemoteGroupMessageRevoke(env GroupControlEnvelope) error {
+	group, err := s.store.GetGroup(env.GroupID)
+	if err != nil {
+		return err
+	}
+	shouldApply, err := shouldApplyGroupEvent(group.LastEventSeq, env.EventSeq)
+	if err != nil || !shouldApply {
+		return err
+	}
+	var payload GroupMessageRevokePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return err
+	}
+	if payload.MsgID == "" || payload.SenderPeerID == "" {
+		return errors.New("group message revoke payload is incomplete")
+	}
+	if msg, err := s.store.GetGroupMessage(payload.MsgID); err == nil && msg.SenderPeerID != payload.SenderPeerID {
+		return errors.New("group message revoke sender does not match target message")
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return s.store.RevokeGroupMessage(env.GroupID, payload.MsgID, payload.SenderPeerID, env.ActorPeerID, groupEventFromEnvelope(env))
 }
 
 func (s *Service) applyRemoteGroupDissolve(env GroupControlEnvelope) error {
@@ -2188,6 +2298,13 @@ func (s *Service) handleIncomingGroupText(msg GroupChatText) error {
 	if err != nil {
 		return err
 	}
+	revoked, err := s.store.IsGroupMessageRevoked(msg.GroupID, msg.MsgID)
+	if err != nil {
+		return err
+	}
+	if revoked {
+		return s.sendGroupDeliveryAck(msg.GroupID, msg.MsgID, msg.SenderPeerID)
+	}
 	member, err := s.store.GetGroupMember(msg.GroupID, msg.SenderPeerID)
 	if err != nil {
 		return err
@@ -2232,6 +2349,13 @@ func (s *Service) handleIncomingGroupFile(msg GroupChatFile) error {
 	group, err := s.store.GetGroup(msg.GroupID)
 	if err != nil {
 		return err
+	}
+	revoked, err := s.store.IsGroupMessageRevoked(msg.GroupID, msg.MsgID)
+	if err != nil {
+		return err
+	}
+	if revoked {
+		return s.sendGroupDeliveryAck(msg.GroupID, msg.MsgID, msg.SenderPeerID)
 	}
 	member, err := s.store.GetGroupMember(msg.GroupID, msg.SenderPeerID)
 	if err != nil {
@@ -2300,6 +2424,9 @@ func (s *Service) handleIncomingGroupAck(ack GroupDeliveryAck) error {
 	}
 	msg, err := s.store.GetGroupMessage(ack.MsgID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
 	if msg.GroupID != ack.GroupID {
@@ -2309,6 +2436,27 @@ func (s *Service) handleIncomingGroupAck(ack GroupDeliveryAck) error {
 		return errors.New("group ack targets a message not sent by local peer")
 	}
 	return s.store.MarkGroupDeliveryState(ack.MsgID, ack.FromPeerID, GroupDeliveryStateDeliveredRemote, time.UnixMilli(ack.AckedAtUnix).UTC())
+}
+
+func (s *Service) ensureLocalGroupMessageRevokeAllowed(groupID string, actor GroupMember, msg GroupMessage) error {
+	if actor.PeerID == msg.SenderPeerID {
+		return nil
+	}
+	switch actor.Role {
+	case GroupRoleController:
+		return nil
+	case GroupRoleAdmin:
+		target, err := s.store.GetGroupMember(groupID, msg.SenderPeerID)
+		if err != nil {
+			return err
+		}
+		if target.Role == GroupRoleController {
+			return errors.New("admin cannot revoke controller messages")
+		}
+		return nil
+	default:
+		return errors.New("you can only revoke your own messages")
+	}
 }
 
 func (s *Service) handleGroupSyncRequest(req GroupSyncRequest, fromPeerID string) (GroupSyncResponse, error) {

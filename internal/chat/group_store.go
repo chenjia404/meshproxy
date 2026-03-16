@@ -145,6 +145,14 @@ func (s *Store) ensureGroupTables() error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(event_id, peer_id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS group_message_revocations (
+			group_id TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			sender_peer_id TEXT NOT NULL DEFAULT '',
+			revoked_by_peer_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(group_id, msg_id)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_groups_updated_at ON groups(updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_members_state ON group_members(group_id, state);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_events_group_seq ON group_events(group_id, event_seq);`,
@@ -506,6 +514,51 @@ func (s *Store) GetGroupMessageBlob(msgID string) ([]byte, error) {
 		return nil, err
 	}
 	return blob, nil
+}
+
+func (s *Store) IsGroupMessageRevoked(groupID, msgID string) (bool, error) {
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM group_message_revocations WHERE group_id=? AND msg_id=? LIMIT 1`, groupID, msgID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) RevokeGroupMessage(groupID, msgID, senderPeerID, revokedByPeerID string, event GroupEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`
+		INSERT INTO group_message_revocations(group_id,msg_id,sender_peer_id,revoked_by_peer_id,created_at)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(group_id, msg_id) DO UPDATE SET
+			sender_peer_id=excluded.sender_peer_id,
+			revoked_by_peer_id=excluded.revoked_by_peer_id,
+			created_at=excluded.created_at
+	`, groupID, msgID, senderPeerID, revokedByPeerID, formatDBTime(event.CreatedAt)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_message_deliveries WHERE msg_id=?`, msgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_messages WHERE group_id=? AND msg_id=?`, groupID, msgID); err != nil {
+		return err
+	}
+	if err := insertGroupEventTx(tx, event); err != nil {
+		return err
+	}
+	if err := updateGroupMetaTx(tx, groupID, event.EventSeq, nil, nil, event.CreatedAt); err != nil {
+		return err
+	}
+	if err := refreshGroupMessageSummaryTx(tx, groupID, event.CreatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) MarkGroupDeliveryState(msgID, peerID, state string, deliveredAt time.Time) error {
@@ -1273,6 +1326,9 @@ func (s *Store) deleteGroupRecords(groupID string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM group_sync_cursors WHERE group_id=?`, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_message_revocations WHERE group_id=?`, groupID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM group_epochs WHERE group_id=?`, groupID); err != nil {

@@ -275,6 +275,11 @@
       return details.members.find(member => member.peer_id === state.me.peer_id) || null;
     }
 
+    function getGroupMember(details, peerID) {
+      if (!details || !details.members || !peerID) return null;
+      return details.members.find(member => member.peer_id === peerID) || null;
+    }
+
     function groupDraft(groupID) {
       if (!state.groupDrafts[groupID]) {
         state.groupDrafts[groupID] = {
@@ -502,6 +507,17 @@
         return '<div class="file-preview"><video src="' + url + '" controls autoplay muted playsinline preload="metadata"></video></div>';
       }
       return '<div class="file-preview"><a class="file-link" href="' + url + '" download="' + fileName + '"><span>文件</span><span class="name">' + fileName + '</span></a></div>';
+    }
+
+    function canRevokeGroupMessage(msg, group, details) {
+      if (!msg || !group || group.state !== 'active') return false;
+      const localMember = getLocalGroupMember(details);
+      if (!localMember || localMember.state !== 'active') return false;
+      if (msg.sender_peer_id === (state.me && state.me.peer_id)) return true;
+      if (localMember.role === 'controller') return true;
+      if (localMember.role !== 'admin') return false;
+      const senderMember = getGroupMember(details, msg.sender_peer_id);
+      return !senderMember || senderMember.role !== 'controller';
     }
 
     function fileExtForMime(mimeType) {
@@ -1564,7 +1580,8 @@
           };
         });
       } else if (group) {
-        const localGroupMember = getLocalGroupMember(getGroupDetails());
+        const groupDetails = getGroupDetails();
+        const localGroupMember = getLocalGroupMember(groupDetails);
         if (!(state.groupMessages || []).length) {
           wrap.innerHTML = localGroupMember && localGroupMember.state === 'invited'
             ? '<div class="empty-state"><strong>你还在等待加入这个群</strong><div>先点击上方“加入群聊”，加入后才能稳定发送和接收群消息。</div></div>'
@@ -1573,6 +1590,7 @@
           wrap.innerHTML = state.groupMessages.map(msg => {
             const outbound = msg.sender_peer_id === state.me?.peer_id;
             const senderName = outbound ? '我' : displayName(msg.sender_peer_id, shortPeer(msg.sender_peer_id));
+            const canRevoke = canRevokeGroupMessage(msg, group, groupDetails);
             return '<div class="bubble ' + escapeHtml(outbound ? 'outbound' : 'inbound') + '">' +
               '<div class="meta">' +
                 escapeHtml(senderName) + ' · ' +
@@ -1581,10 +1599,28 @@
                 escapeHtml(formatTime(msg.created_at)) +
               '</div>' +
               renderGroupMessageBody(msg) +
+              (canRevoke
+                ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-group-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+                : '') +
             '</div>';
           }).join('');
         }
       }
+      document.querySelectorAll('[data-group-revoke-msg]').forEach(btn => {
+        btn.onclick = async () => {
+          if (!group) return;
+          if (!window.confirm('确认撤回这条群消息吗？撤回后群成员都会删除这条消息。')) return;
+          try {
+            await post('/api/v1/groups/' + encodeURIComponent(group.group_id) + '/messages/' + encodeURIComponent(btn.dataset.groupRevokeMsg) + '/revoke');
+            showMessage('ok', '群消息已撤回');
+            await refreshCurrentThread();
+            await refreshGroups();
+            renderThreadLists();
+          } catch (err) {
+            showMessage('err', '群消息撤回失败: ' + err.message);
+          }
+        };
+      });
       document.querySelectorAll('[data-preview-src]').forEach(img => {
         img.onclick = () => openImageLightbox(img.dataset.previewSrc, img.dataset.previewName || '');
       });

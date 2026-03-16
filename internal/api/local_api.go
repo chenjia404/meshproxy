@@ -194,6 +194,7 @@ type ChatProvider interface {
 	DissolveGroup(groupID, reason string) (chat.Group, error)
 	TransferGroupController(groupID, peerID string) (chat.Group, error)
 	ListGroupMessages(groupID string) ([]chat.GroupMessage, error)
+	RevokeGroupMessage(groupID, msgID string) error
 	SendGroupText(groupID, text string) (chat.GroupMessage, error)
 	SendGroupFile(groupID, fileName, mimeType string, data []byte) (chat.GroupMessage, error)
 	GetGroupMessageFile(groupID, msgID string) (chat.GroupMessage, []byte, error)
@@ -1301,6 +1302,19 @@ func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, group)
 	case "messages":
+		if len(parts) == 4 && parts[3] == "revoke" {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			msgID := parts[2]
+			if err := a.opts.ChatService.RevokeGroupMessage(groupID, msgID); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true})
+			return
+		}
 		if len(parts) == 4 && parts[3] == "file" {
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
