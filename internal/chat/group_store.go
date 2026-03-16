@@ -26,6 +26,20 @@ type groupRetryDelivery struct {
 	RetryCount     int
 }
 
+type groupRetryEventDelivery struct {
+	EventID       string
+	GroupID       string
+	PeerID        string
+	EventSeq      uint64
+	EventType     string
+	ActorPeerID   string
+	SignerPeerID  string
+	PayloadJSON   string
+	Signature     []byte
+	CreatedAtUnix int64
+	RetryCount    int
+}
+
 type groupSyncFileMessage struct {
 	MsgID        string
 	GroupID      string
@@ -119,12 +133,22 @@ func (s *Store) ensureGroupTables() error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(group_id, peer_id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS group_event_deliveries (
+			event_id TEXT NOT NULL,
+			peer_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			next_retry_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(event_id, peer_id)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_groups_updated_at ON groups(updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_members_state ON group_members(group_id, state);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_events_group_seq ON group_events(group_id, event_seq);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_group_messages_sender_seq ON group_messages(group_id, sender_peer_id, sender_seq);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_messages_group_time ON group_messages(group_id, sent_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_group_deliveries_retry ON group_message_deliveries(state, next_retry_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_group_event_deliveries_retry ON group_event_deliveries(state, next_retry_at);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -189,6 +213,20 @@ func (s *Store) ListGroups() ([]Group, error) {
 				WHERE gm.group_id = g.group_id
 				  AND gm.state IN (?, ?)
 			), 0) AS member_count,
+			COALESCE((
+				SELECT gm_self.role
+				FROM group_members gm_self
+				WHERE gm_self.group_id = g.group_id
+				  AND gm_self.peer_id = (SELECT peer_id FROM profile LIMIT 1)
+				LIMIT 1
+			), '') AS local_member_role,
+			COALESCE((
+				SELECT gm_self.state
+				FROM group_members gm_self
+				WHERE gm_self.group_id = g.group_id
+				  AND gm_self.peer_id = (SELECT peer_id FROM profile LIMIT 1)
+				LIMIT 1
+			), '') AS local_member_state,
 			g.created_at,
 			g.updated_at
 		FROM groups g
@@ -226,6 +264,20 @@ func (s *Store) GetGroup(groupID string) (Group, error) {
 				WHERE gm.group_id = g.group_id
 				  AND gm.state IN (?, ?)
 			), 0) AS member_count,
+			COALESCE((
+				SELECT gm_self.role
+				FROM group_members gm_self
+				WHERE gm_self.group_id = g.group_id
+				  AND gm_self.peer_id = (SELECT peer_id FROM profile LIMIT 1)
+				LIMIT 1
+			), '') AS local_member_role,
+			COALESCE((
+				SELECT gm_self.state
+				FROM group_members gm_self
+				WHERE gm_self.group_id = g.group_id
+				  AND gm_self.peer_id = (SELECT peer_id FROM profile LIMIT 1)
+				LIMIT 1
+			), '') AS local_member_state,
 			g.created_at,
 			g.updated_at
 		FROM groups g
@@ -499,6 +551,83 @@ func (s *Store) ListGroupDeliveriesForRetry(now time.Time, limit int) ([]groupRe
 	return out, rows.Err()
 }
 
+func (s *Store) MarkGroupEventDeliverySent(eventID, peerID string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO group_event_deliveries(event_id,peer_id,state,retry_count,next_retry_at,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(event_id, peer_id) DO UPDATE SET
+			state=excluded.state,
+			next_retry_at='',
+			updated_at=excluded.updated_at
+	`, eventID, peerID, GroupDeliveryStateSentToTransport, 0, "", formatDBTime(time.Now().UTC()))
+	return err
+}
+
+func (s *Store) QueueGroupEventDeliveryRetry(eventID, peerID string, retryCount int, nextRetryAt time.Time) error {
+	_, err := s.db.Exec(`
+		INSERT INTO group_event_deliveries(event_id,peer_id,state,retry_count,next_retry_at,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(event_id, peer_id) DO UPDATE SET
+			state=excluded.state,
+			retry_count=excluded.retry_count,
+			next_retry_at=excluded.next_retry_at,
+			updated_at=excluded.updated_at
+	`, eventID, peerID, GroupDeliveryStateQueuedForRetry, retryCount, formatDBTime(nextRetryAt), formatDBTime(time.Now().UTC()))
+	return err
+}
+
+func (s *Store) ListGroupEventDeliveriesForRetry(now time.Time, limit int) ([]groupRetryEventDelivery, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			d.event_id,
+			e.group_id,
+			d.peer_id,
+			e.event_seq,
+			e.event_type,
+			e.actor_peer_id,
+			e.signer_peer_id,
+			e.payload_json,
+			e.signature,
+			e.created_at,
+			d.retry_count
+		FROM group_event_deliveries d
+		INNER JOIN group_events e ON e.event_id = d.event_id
+		WHERE d.state=? AND d.next_retry_at != '' AND d.next_retry_at <= ?
+		ORDER BY d.next_retry_at ASC, d.updated_at ASC
+		LIMIT ?
+	`, GroupDeliveryStateQueuedForRetry, formatDBTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []groupRetryEventDelivery
+	for rows.Next() {
+		var item groupRetryEventDelivery
+		var createdAt string
+		if err := rows.Scan(
+			&item.EventID,
+			&item.GroupID,
+			&item.PeerID,
+			&item.EventSeq,
+			&item.EventType,
+			&item.ActorPeerID,
+			&item.SignerPeerID,
+			&item.PayloadJSON,
+			&item.Signature,
+			&createdAt,
+			&item.RetryCount,
+		); err != nil {
+			return nil, err
+		}
+		item.CreatedAtUnix = parseDBTime(createdAt).UnixMilli()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) refreshGroupMessageState(msgID string) error {
 	rows, err := s.db.Query(`SELECT state FROM group_message_deliveries WHERE msg_id=?`, msgID)
 	if err != nil {
@@ -590,6 +719,63 @@ func (s *Store) ListGroupEventsAfter(groupID string, lastEventSeq uint64) ([]Gro
 			Payload:       json.RawMessage(payloadJSON),
 			Signature:     signature,
 		})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListRecentGroupEvents(groupID string, limit int) ([]GroupEventView, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			e.event_id,
+			e.group_id,
+			e.event_seq,
+			e.event_type,
+			e.actor_peer_id,
+			e.signer_peer_id,
+			e.payload_json,
+			e.created_at,
+			COALESCE(SUM(CASE WHEN d.state = ? THEN 1 ELSE 0 END), 0) AS sent_to_transport,
+			COALESCE(SUM(CASE WHEN d.state = ? THEN 1 ELSE 0 END), 0) AS queued_for_retry,
+			COALESCE(SUM(CASE WHEN d.state = ? THEN 1 ELSE 0 END), 0) AS failed,
+			COUNT(d.peer_id) AS total
+		FROM group_events e
+		LEFT JOIN group_event_deliveries d ON d.event_id = e.event_id
+		WHERE e.group_id = ?
+		GROUP BY e.event_id, e.group_id, e.event_seq, e.event_type, e.actor_peer_id, e.signer_peer_id, e.payload_json, e.created_at
+		ORDER BY e.event_seq DESC
+		LIMIT ?
+	`, GroupDeliveryStateSentToTransport, GroupDeliveryStateQueuedForRetry, GroupDeliveryStateFailed, groupID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GroupEventView
+	for rows.Next() {
+		var (
+			item      GroupEventView
+			createdAt string
+		)
+		if err := rows.Scan(
+			&item.EventID,
+			&item.GroupID,
+			&item.EventSeq,
+			&item.EventType,
+			&item.ActorPeerID,
+			&item.SignerPeerID,
+			&item.PayloadJSON,
+			&createdAt,
+			&item.DeliverySummary.SentToTransport,
+			&item.DeliverySummary.QueuedForRetry,
+			&item.DeliverySummary.Failed,
+			&item.DeliverySummary.Total,
+		); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseDBTime(createdAt)
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }
@@ -933,6 +1119,8 @@ func scanGroup(scan func(dest ...any) error) (Group, error) {
 		&group.LastEventSeq,
 		&lastMessageAt,
 		&group.MemberCount,
+		&group.LocalMemberRole,
+		&group.LocalMemberState,
 		&createdAt,
 		&updatedAt,
 	)

@@ -274,6 +274,11 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 
 	// Wrap mux to serve /console and /console/ with 200 + body (never redirect)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		applyCORSHeaders(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		path := r.URL.Path
 		if path == "/console" || path == "/console/" {
 			if len(api.consoleHTML) > 0 {
@@ -302,6 +307,19 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 		Handler: handler,
 	}
 	return api
+}
+
+func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	headers := w.Header()
+	headers.Set("Access-Control-Allow-Origin", "*")
+	headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	if reqHeaders := r.Header.Get("Access-Control-Request-Headers"); reqHeaders != "" {
+		headers.Set("Access-Control-Allow-Headers", reqHeaders)
+	} else {
+		headers.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Origin, X-Requested-With")
+	}
+	headers.Set("Access-Control-Expose-Headers", "Content-Type, Content-Length, Content-Disposition")
+	headers.Set("Access-Control-Max-Age", "86400")
 }
 
 // Start launches the HTTP server in a separate goroutine.

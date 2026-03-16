@@ -3,15 +3,17 @@ package chat
 import "time"
 
 const (
-	MessageTypeSessionRequest  = "session_request"
-	MessageTypeSessionAccept   = "session_accept"
-	MessageTypeSessionReject   = "session_reject"
-	MessageTypeChatText        = "chat_text"
-	MessageTypeChatFile        = "chat_file"
-	MessageTypeDeliveryAck     = "delivery_ack"
-	MessageTypeMessageRevoke   = "message_revoke"
-	MessageTypeRetentionUpdate = "retention_update"
-	MessageTypeRetentionAck    = "retention_ack"
+	MessageTypeSessionRequest    = "session_request"
+	MessageTypeSessionAccept     = "session_accept"
+	MessageTypeSessionReject     = "session_reject"
+	MessageTypeChatText          = "chat_text"
+	MessageTypeChatFile          = "chat_file"
+	MessageTypeGroupInviteNote   = "group_invite_notice"
+	MessageTypeGroupInviteNotice = MessageTypeGroupInviteNote
+	MessageTypeDeliveryAck       = "delivery_ack"
+	MessageTypeMessageRevoke     = "message_revoke"
+	MessageTypeRetentionUpdate   = "retention_update"
+	MessageTypeRetentionAck      = "retention_ack"
 )
 
 const (

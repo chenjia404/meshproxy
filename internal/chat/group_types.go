@@ -76,6 +76,8 @@ type Group struct {
 	LastEventSeq     uint64    `json:"last_event_seq"`
 	LastMessageAt    time.Time `json:"last_message_at"`
 	MemberCount      int       `json:"member_count,omitempty"`
+	LocalMemberRole  string    `json:"local_member_role,omitempty"`
+	LocalMemberState string    `json:"local_member_state,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
@@ -103,6 +105,25 @@ type GroupEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type GroupEventDeliverySummary struct {
+	Total           int `json:"total"`
+	SentToTransport int `json:"sent_to_transport"`
+	QueuedForRetry  int `json:"queued_for_retry"`
+	Failed          int `json:"failed"`
+}
+
+type GroupEventView struct {
+	EventID         string                    `json:"event_id"`
+	GroupID         string                    `json:"group_id"`
+	EventSeq        uint64                    `json:"event_seq"`
+	EventType       string                    `json:"event_type"`
+	ActorPeerID     string                    `json:"actor_peer_id"`
+	SignerPeerID    string                    `json:"signer_peer_id"`
+	PayloadJSON     string                    `json:"payload_json"`
+	CreatedAt       time.Time                 `json:"created_at"`
+	DeliverySummary GroupEventDeliverySummary `json:"delivery_summary"`
+}
+
 type GroupEpoch struct {
 	GroupID            string    `json:"group_id"`
 	Epoch              uint64    `json:"epoch"`
@@ -111,8 +132,22 @@ type GroupEpoch struct {
 }
 
 type GroupDetails struct {
-	Group   Group         `json:"group"`
-	Members []GroupMember `json:"members"`
+	Group        Group            `json:"group"`
+	Members      []GroupMember    `json:"members"`
+	RecentEvents []GroupEventView `json:"recent_events,omitempty"`
+}
+
+type GroupInviteNoticePayload struct {
+	GroupID          string               `json:"group_id"`
+	Title            string               `json:"title"`
+	ControllerPeerID string               `json:"controller_peer_id"`
+	InviteePeerID    string               `json:"invitee_peer_id"`
+	InviteText       string               `json:"invite_text,omitempty"`
+	EventID          string               `json:"event_id"`
+	EventSeq         uint64               `json:"event_seq,omitempty"`
+	CurrentEpoch     uint64               `json:"current_epoch"`
+	LocalMemberState string               `json:"local_member_state,omitempty"`
+	InviteEnvelope   GroupControlEnvelope `json:"invite_envelope"`
 }
 
 type GroupMessage struct {

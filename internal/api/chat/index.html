@@ -143,6 +143,7 @@
         <section class="card" id="network-card"></section>
         <section class="card" id="request-send-card"></section>
         <section class="card" id="group-create-card"></section>
+        <section class="card" id="group-invite-card"></section>
         <section class="card" id="request-list-card"></section>
         <section class="card" id="contact-list-card"></section>
       </div>
@@ -181,6 +182,7 @@
       previousRequestCount: 0,
       previousThreadCounts: {},
       threadFilter: 'all',
+      knownGroupStates: {},
       directDrafts: {},
       groupDrafts: {},
       contactNicknameDrafts: {},
@@ -331,6 +333,15 @@
       return value || '-';
     }
 
+    function groupArrivalBadge(group) {
+      if (!group) return '';
+      if (group.local_member_state === 'invited') return '待加入';
+      if (group.local_member_state === 'active') return '已加入';
+      if (group.local_member_state === 'left') return '已退出';
+      if (group.local_member_state === 'removed') return '已移除';
+      return '';
+    }
+
     function groupMemberStats(details) {
       const stats = { total: 0, active: 0, invited: 0, left: 0, removed: 0 };
       const members = (details && details.members) || [];
@@ -361,7 +372,7 @@
         subtitle: shortPeer(group.group_id),
         stamp: Math.max(timeValue(group.last_message_at), timeValue(group.updated_at)),
         badge: group.state || '-',
-        summary: (group.last_message_at ? '最近消息 ' + relativeTime(group.last_message_at) : '最近更新 ' + relativeTime(group.updated_at)) + ' · 成员 ' + (group.member_count || 0)
+        summary: (groupArrivalBadge(group) ? (groupArrivalBadge(group) + ' · ') : '') + (group.last_message_at ? '最近消息 ' + relativeTime(group.last_message_at) : '最近更新 ' + relativeTime(group.updated_at)) + ' · 成员 ' + (group.member_count || 0)
       }));
       return directItems.concat(groupItems).sort((a, b) => b.stamp - a.stamp);
     }
@@ -448,6 +459,21 @@
     }
 
     function renderDirectMessageBody(msg) {
+      if (msg && msg.msg_type === 'group_invite_notice') {
+        let payload = null;
+        try {
+          payload = JSON.parse(msg.plaintext || '{}');
+        } catch (_) {}
+        const groupID = payload && payload.group_id ? payload.group_id : '';
+        const title = payload && payload.title ? payload.title : '未命名群';
+        const inviteText = payload && payload.invite_text ? payload.invite_text : '';
+        return '<div class="file-preview">' +
+          '<div><strong>群聊邀请</strong></div>' +
+          '<div class="muted">群：' + escapeHtml(title) + '</div>' +
+          (inviteText ? '<div class="muted">附言：' + escapeHtml(inviteText) + '</div>' : '') +
+          (groupID ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-secondary" data-open-group-from-direct="' + escapeHtml(groupID) + '">打开群聊</button><button type="button" class="btn btn-primary" data-join-group-from-direct="' + escapeHtml(groupID) + '">加入群聊</button></div>' : '') +
+        '</div>';
+      }
       if (!msg || msg.msg_type !== 'chat_file') {
         return '<div>' + escapeHtml(msg.plaintext || '') + '</div>';
       }
@@ -748,6 +774,53 @@
       });
     }
 
+    function renderGroupInvites() {
+      const invites = (state.groups || []).filter(group => group.local_member_state === 'invited');
+      let html = '<h2>群邀请</h2>';
+      if (!invites.length) {
+        html += '<p class="empty">暂无待处理群邀请</p>';
+      } else {
+        html += '<div class="list">';
+        html += invites.map(group => (
+          '<div class="item">' +
+            '<div class="item-toolbar">' +
+              '<h3>' + escapeHtml(group.title || '未命名群') + '</h3>' +
+              '<span class="badge warn">待加入</span>' +
+            '</div>' +
+            '<div class="muted">controller：' + escapeHtml(displayName(group.controller_peer_id, shortPeer(group.controller_peer_id))) + '</div>' +
+            '<div class="muted">成员 ' + escapeHtml(String(group.member_count || 0)) + ' · epoch ' + escapeHtml(String(group.current_epoch || 0)) + '</div>' +
+            '<div class="muted">更新时间：' + escapeHtml(formatTime(group.updated_at)) + '</div>' +
+            '<div class="actions" style="margin-top:0.6rem">' +
+              '<button type="button" class="btn btn-secondary" data-open-group-invite="' + escapeHtml(group.group_id) + '">查看邀请</button>' +
+              '<button type="button" class="btn btn-primary" data-accept-group-invite="' + escapeHtml(group.group_id) + '">加入群聊</button>' +
+            '</div>' +
+          '</div>'
+        )).join('');
+        html += '</div>';
+      }
+      document.getElementById('group-invite-card').innerHTML = html;
+      document.querySelectorAll('[data-open-group-invite]').forEach(btn => {
+        btn.onclick = async () => {
+          selectGroup(btn.dataset.openGroupInvite);
+          renderThreadLists();
+          await refreshCurrentThread();
+        };
+      });
+      document.querySelectorAll('[data-accept-group-invite]').forEach(btn => {
+        btn.onclick = async () => {
+          try {
+            await post('/api/v1/groups/' + encodeURIComponent(btn.dataset.acceptGroupInvite) + '/join');
+            showMessage('ok', '已加入群聊');
+            await refreshGroups();
+            renderThreadLists();
+            await refreshCurrentThread();
+          } catch (err) {
+            showMessage('err', '加入群聊失败: ' + err.message);
+          }
+        };
+      });
+    }
+
     function renderContacts() {
       const list = state.contacts || [];
       let html = '<h2>联系人</h2>';
@@ -848,6 +921,7 @@
     }
 
     function renderThreadLists() {
+      renderGroupInvites();
       renderThreadSwitcher();
       renderConversations();
       renderGroups();
@@ -950,11 +1024,18 @@
           '<div class="item' + (state.selectedThreadKind === 'group' && group.group_id === state.selectedGroupId ? ' active' : '') + '" data-group="' + escapeHtml(group.group_id) + '">' +
             '<div class="item-toolbar">' +
               '<h3>' + escapeHtml(group.title || '未命名群') + '</h3>' +
-              '<span class="badge ' + escapeHtml(group.state === 'active' ? 'direct' : 'offline') + '">' + escapeHtml(group.state || '-') + '</span>' +
+              '<div class="member-chip-row">' +
+                '<span class="badge ' + escapeHtml(group.state === 'active' ? 'direct' : 'offline') + '">' + escapeHtml(group.state || '-') + '</span>' +
+                (group.local_member_state === 'invited'
+                  ? '<span class="badge warn">邀请待处理</span>'
+                  : group.local_member_state
+                    ? '<span class="badge relay">' + escapeHtml(groupMemberStateLabel(group.local_member_state)) + '</span>'
+                    : '') +
+              '</div>' +
             '</div>' +
             '<div class="muted"><code>' + escapeHtml(shortPeer(group.group_id)) + '</code></div>' +
             '<div class="muted">controller：' + escapeHtml(displayName(group.controller_peer_id, shortPeer(group.controller_peer_id))) + '</div>' +
-            '<div class="group-summary">成员 ' + escapeHtml(String(group.member_count || 0)) + ' · epoch ' + escapeHtml(String(group.current_epoch || 0)) + ' · ' + escapeHtml(group.last_message_at ? ('最近消息 ' + relativeTime(group.last_message_at)) : ('最近更新 ' + relativeTime(group.updated_at))) + '</div>' +
+            '<div class="group-summary">' + (group.local_member_state === 'invited' ? '你被邀请加入这个群 · ' : '') + '成员 ' + escapeHtml(String(group.member_count || 0)) + ' · epoch ' + escapeHtml(String(group.current_epoch || 0)) + ' · ' + escapeHtml(group.last_message_at ? ('最近消息 ' + relativeTime(group.last_message_at)) : ('最近更新 ' + relativeTime(group.updated_at))) + '</div>' +
           '</div>'
         )).join('');
         html += '</div>';
@@ -1126,6 +1207,26 @@
                 : '<div class="muted">当前节点不是 controller，可查看成员和收发群消息。</div>') +
             '</div>' +
           '</div>' +
+        '</div>' +
+        '<div class="group-panel">' +
+          '<div class="muted">最近群事件</div>' +
+          (((details.recent_events || []).length)
+            ? '<div class="member-list">' +
+                (details.recent_events || []).map(event => (
+                  '<div class="member-item">' +
+                    '<div class="member-main">' +
+                      '<div>' + escapeHtml(describeGroupEvent(event)) + '</div>' +
+                      '<div class="member-meta">' +
+                        '<span class="badge msg-local">#' + escapeHtml(String(event.event_seq || 0)) + '</span>' +
+                        '<span class="muted">actor: <code>' + escapeHtml(shortPeer(event.actor_peer_id)) + '</code></span>' +
+                        '<span class="muted">' + escapeHtml(formatTime(event.created_at)) + '</span>' +
+                      '</div>' +
+                    '</div>' +
+                    '<div class="member-actions">' + renderGroupEventDeliverySummary(event.delivery_summary) + '</div>' +
+                  '</div>'
+                )).join('') +
+              '</div>'
+            : '<div class="empty-state"><strong>还没有群控制事件</strong><div>后续邀请、加入、移除和 controller 转移都会显示在这里。</div></div>') +
         '</div>';
 
       document.querySelectorAll('[data-remove-group-member]').forEach(btn => {
@@ -1314,6 +1415,53 @@
       return '<span class="badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(parts.join(' · ')) + '</span>';
     }
 
+    function parseEventPayload(payloadJSON) {
+      if (!payloadJSON) return null;
+      try {
+        return JSON.parse(payloadJSON);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function renderGroupEventDeliverySummary(summary) {
+      if (!summary || typeof summary.total !== 'number' || summary.total <= 0) return '<span class="badge msg-local">仅本地记录</span>';
+      const parts = [];
+      if (summary.sent_to_transport) parts.push('已发出 ' + summary.sent_to_transport);
+      if (summary.queued_for_retry) parts.push('重试 ' + summary.queued_for_retry);
+      if (summary.failed) parts.push('失败 ' + summary.failed);
+      if (!parts.length) parts.push('目标 ' + summary.total);
+      const badgeClass = summary.failed ? 'msg-failed' : summary.queued_for_retry ? 'msg-retry' : 'msg-sent';
+      return '<span class="badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(parts.join(' · ')) + '</span>';
+    }
+
+    function describeGroupEvent(event) {
+      const payload = parseEventPayload(event && event.payload_json);
+      if (!event) return '未知事件';
+      if (event.event_type === 'group_invite') {
+        return '邀请 ' + displayName(payload && payload.invitee_peer_id, shortPeer(payload && payload.invitee_peer_id));
+      }
+      if (event.event_type === 'group_join') {
+        return displayName(payload && payload.joiner_peer_id, shortPeer(payload && payload.joiner_peer_id)) + ' 加入群聊';
+      }
+      if (event.event_type === 'group_leave') {
+        return displayName(payload && payload.leaver_peer_id, shortPeer(payload && payload.leaver_peer_id)) + ' 退出群聊';
+      }
+      if (event.event_type === 'group_remove') {
+        return '移除 ' + displayName(payload && payload.target_peer_id, shortPeer(payload && payload.target_peer_id));
+      }
+      if (event.event_type === 'group_title_update') {
+        return '修改群标题为“' + ((payload && payload.title) || '') + '”';
+      }
+      if (event.event_type === 'group_controller_transfer') {
+        return 'controller 转移给 ' + displayName(payload && payload.to_peer_id, shortPeer(payload && payload.to_peer_id));
+      }
+      if (event.event_type === 'group_create') {
+        return '创建群聊';
+      }
+      return event.event_type || '未知事件';
+    }
+
     function renderThreadMessages() {
       const wrap = document.getElementById('messages');
       if (!wrap) return;
@@ -1327,15 +1475,18 @@
         if (!(state.messages || []).length) {
           wrap.innerHTML = '<div class="empty-state"><strong>这段单聊还没有消息</strong><div>发一条文字或文件，消息会根据 direct / relay 状态自动尝试发送。</div></div>';
         } else {
-          wrap.innerHTML = state.messages.map(msg => (
-            '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
+          wrap.innerHTML = state.messages.map(msg => {
+            const canRevoke = msg.direction === 'outbound'
+              && msg.sender_peer_id === state.me?.peer_id
+              && (msg.msg_type === 'chat_text' || msg.msg_type === 'chat_file');
+            return '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
               '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + threadMessageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
               renderDirectMessageBody(msg) +
-              (msg.direction === 'outbound'
+              (canRevoke
                 ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
                 : '') +
-            '</div>'
-          )).join('');
+            '</div>';
+          }).join('');
         }
         document.querySelectorAll('[data-revoke-msg]').forEach(btn => {
           btn.onclick = async () => {
@@ -1349,6 +1500,26 @@
               renderThreadLists();
             } catch (err) {
               showMessage('err', '撤回失败: ' + err.message);
+            }
+          };
+        });
+        document.querySelectorAll('[data-open-group-from-direct]').forEach(btn => {
+          btn.onclick = async () => {
+            selectGroup(btn.dataset.openGroupFromDirect);
+            renderThreadLists();
+            await refreshCurrentThread();
+          };
+        });
+        document.querySelectorAll('[data-join-group-from-direct]').forEach(btn => {
+          btn.onclick = async () => {
+            try {
+              await post('/api/v1/groups/' + encodeURIComponent(btn.dataset.joinGroupFromDirect) + '/join');
+              showMessage('ok', '已加入群聊');
+              await refreshGroups();
+              renderThreadLists();
+              await refreshCurrentThread();
+            } catch (err) {
+              showMessage('err', '加入群聊失败: ' + err.message);
             }
           };
         });
@@ -1525,8 +1696,25 @@
     }
 
     async function refreshGroups() {
+      const prevStates = Object.assign({}, state.knownGroupStates || {});
       state.groups = await get('/api/v1/groups');
       if (!Array.isArray(state.groups)) state.groups = [];
+      const nextStates = {};
+      const freshInvites = [];
+      state.groups.forEach(group => {
+        nextStates[group.group_id] = group.local_member_state || '';
+        const prevState = prevStates[group.group_id] || '';
+        if (group.local_member_state === 'invited' && prevState !== 'invited') {
+          freshInvites.push(group);
+        }
+      });
+      state.knownGroupStates = nextStates;
+      if (freshInvites.length > 0) {
+        const latest = freshInvites[0];
+        flashRefreshHint('收到新的群邀请');
+        showMessage('info', '收到新的群邀请：' + (latest.title || '未命名群'));
+      }
+      renderGroupInvites();
     }
 
     async function refreshDirectMessages() {

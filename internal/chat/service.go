@@ -845,55 +845,12 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
-	case MessageTypeChatText:
+	case MessageTypeChatText, MessageTypeGroupInviteNote:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
-			return nil
-		}
-		conv, err := s.store.GetConversation(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		sess, err := s.store.GetSessionState(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-		aad := []byte(msg.ConversationID + "\x00chat_text")
-		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-		if err != nil {
-			return err
-		}
-		incoming := Message{
-			MsgID:          msg.MsgID,
-			ConversationID: msg.ConversationID,
-			SenderPeerID:   msg.FromPeerID,
-			ReceiverPeerID: s.localPeer,
-			Direction:      "inbound",
-			MsgType:        MessageTypeChatText,
-			Plaintext:      string(plain),
-			TransportMode:  "relay",
-			State:          MessageStateReceived,
-			Counter:        msg.Counter,
-			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
-		}
-		if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
-			return err
-		}
-		_ = s.store.UpsertPeer(msg.FromPeerID, "")
-		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-		ack := DeliveryAck{
-			Type:           MessageTypeDeliveryAck,
-			ConversationID: msg.ConversationID,
-			MsgID:          msg.MsgID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       msg.FromPeerID,
-			AckedAtUnix:    time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingChatText(msg, "relay")
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
@@ -993,55 +950,12 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 	switch env["type"] {
 	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
 		return s.processGroupEnvelope(env)
-	case MessageTypeChatText:
+	case MessageTypeChatText, MessageTypeGroupInviteNote:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
-			return nil
-		}
-		conv, err := s.store.GetConversation(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		sess, err := s.store.GetSessionState(msg.ConversationID)
-		if err != nil {
-			return err
-		}
-		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-		aad := []byte(msg.ConversationID + "\x00chat_text")
-		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-		if err != nil {
-			return err
-		}
-		incoming := Message{
-			MsgID:          msg.MsgID,
-			ConversationID: msg.ConversationID,
-			SenderPeerID:   msg.FromPeerID,
-			ReceiverPeerID: s.localPeer,
-			Direction:      "inbound",
-			MsgType:        MessageTypeChatText,
-			Plaintext:      string(plain),
-			TransportMode:  TransportModeDirect,
-			State:          MessageStateReceived,
-			Counter:        msg.Counter,
-			CreatedAt:      time.UnixMilli(msg.SentAtUnix),
-		}
-		if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
-			return err
-		}
-		_ = s.store.UpsertPeer(msg.FromPeerID, "")
-		_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
-		ack := DeliveryAck{
-			Type:           MessageTypeDeliveryAck,
-			ConversationID: msg.ConversationID,
-			MsgID:          msg.MsgID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       msg.FromPeerID,
-			AckedAtUnix:    time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingChatText(msg, TransportModeDirect)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
@@ -1135,6 +1049,91 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) error {
+	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
+		return nil
+	}
+	conv, err := s.store.GetConversation(msg.ConversationID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSessionState(msg.ConversationID)
+	if err != nil {
+		return err
+	}
+	msgType := msg.Type
+	if msgType == "" {
+		msgType = MessageTypeChatText
+	}
+	if msgType != MessageTypeChatText && msgType != MessageTypeGroupInviteNote {
+		return fmt.Errorf("unsupported chat text type: %s", msgType)
+	}
+	nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+	aad := []byte(msg.ConversationID + "\x00" + msgType)
+	plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+	if err != nil {
+		return err
+	}
+	if msgType == MessageTypeGroupInviteNote {
+		if err := s.handleIncomingGroupInviteNotice(msg, plain); err != nil {
+			return err
+		}
+	}
+	incoming := Message{
+		MsgID:          msg.MsgID,
+		ConversationID: msg.ConversationID,
+		SenderPeerID:   msg.FromPeerID,
+		ReceiverPeerID: s.localPeer,
+		Direction:      "inbound",
+		MsgType:        msgType,
+		Plaintext:      string(plain),
+		TransportMode:  transportMode,
+		State:          MessageStateReceived,
+		Counter:        msg.Counter,
+		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
+	}
+	if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
+		return err
+	}
+	_ = s.store.UpsertPeer(msg.FromPeerID, "")
+	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
+	ack := DeliveryAck{
+		Type:           MessageTypeDeliveryAck,
+		ConversationID: msg.ConversationID,
+		MsgID:          msg.MsgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       msg.FromPeerID,
+		AckedAtUnix:    time.Now().UnixMilli(),
+	}
+	return s.sendEnvelope(conv.PeerID, ack)
+}
+
+func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) error {
+	var payload GroupInviteNoticePayload
+	if err := json.Unmarshal(plain, &payload); err != nil {
+		return err
+	}
+	if payload.InviteePeerID != "" && payload.InviteePeerID != s.localPeer {
+		return errors.New("group invite notice is not addressed to local peer")
+	}
+	if payload.ControllerPeerID != "" && payload.ControllerPeerID != msg.FromPeerID {
+		return errors.New("group invite controller does not match sender")
+	}
+	if payload.InviteEnvelope.Type != MessageTypeGroupControl || payload.InviteEnvelope.EventType != GroupEventInvite {
+		return errors.New("group invite notice is missing invite envelope")
+	}
+	if payload.InviteEnvelope.GroupID != "" && payload.GroupID != "" && payload.InviteEnvelope.GroupID != payload.GroupID {
+		return errors.New("group invite notice group mismatch")
+	}
+	if payload.InviteEnvelope.SignerPeerID != msg.FromPeerID {
+		return errors.New("group invite envelope signer does not match sender")
+	}
+	if err := s.verifyGroupControlEnvelope(payload.InviteEnvelope); err != nil {
+		return err
+	}
+	return s.applyRemoteGroupInviteEnvelope(payload.InviteEnvelope, false)
 }
 
 func (s *Service) runRetentionLoop() {

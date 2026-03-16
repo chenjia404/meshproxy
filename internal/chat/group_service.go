@@ -41,7 +41,11 @@ func (s *Service) GetGroupDetails(groupID string) (GroupDetails, error) {
 	if err != nil {
 		return GroupDetails{}, err
 	}
-	return GroupDetails{Group: group, Members: members}, nil
+	events, err := s.store.ListRecentGroupEvents(groupID, 12)
+	if err != nil {
+		return GroupDetails{}, err
+	}
+	return GroupDetails{Group: group, Members: members, RecentEvents: events}, nil
 }
 
 func (s *Service) CreateGroup(title string, memberPeerIDs []string) (Group, error) {
@@ -138,6 +142,12 @@ func (s *Service) InviteGroupMember(groupID, peerID, role, inviteText string) (G
 	if peerID == s.localPeer {
 		return Group{}, errors.New("controller is already in the group")
 	}
+	if _, err := s.store.GetConversationByPeer(peerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Group{}, errors.New("group invites require an existing direct conversation")
+		}
+		return Group{}, err
+	}
 	role, err = normalizeInviteRole(role)
 	if err != nil {
 		return Group{}, err
@@ -189,8 +199,10 @@ func (s *Service) InviteGroupMember(groupID, peerID, role, inviteText string) (G
 		return Group{}, err
 	}
 	recipients := peersFromMembers(members, s.localPeer)
-	recipients = appendIfMissing(recipients, peerID, s.localPeer)
 	s.broadcastGroupEvent(groupID, event, recipients...)
+	if err := s.sendDirectGroupInviteNotice(peerID, updated, payload, groupEnvelopeFromEvent(event)); err != nil {
+		log.Printf("[group] send direct invite notice group=%s peer=%s failed: %v", groupID, peerID, err)
+	}
 	return updated, nil
 }
 
@@ -790,6 +802,15 @@ func (s *Service) processGroupRetries(now time.Time) error {
 			log.Printf("[group] retry delivery group=%s msg=%s peer=%s failed: %v", item.GroupID, item.MsgID, item.PeerID, err)
 		}
 	}
+	eventItems, err := s.store.ListGroupEventDeliveriesForRetry(now, groupRetryBatchSize)
+	if err != nil {
+		return err
+	}
+	for _, item := range eventItems {
+		if err := s.retryGroupEventDelivery(item); err != nil {
+			log.Printf("[group] retry event delivery group=%s event=%s peer=%s failed: %v", item.GroupID, item.EventID, item.PeerID, err)
+		}
+	}
 	return nil
 }
 
@@ -853,6 +874,32 @@ func (s *Service) scheduleGroupDeliveryRetry(msgID, peerID string, retryCount in
 		retryCount = 1
 	}
 	return s.store.QueueGroupDeliveryRetry(msgID, peerID, retryCount, time.Now().UTC().Add(groupRetryDelay(retryCount)))
+}
+
+func (s *Service) retryGroupEventDelivery(item groupRetryEventDelivery) error {
+	env := GroupControlEnvelope{
+		Type:          MessageTypeGroupControl,
+		EventType:     item.EventType,
+		GroupID:       item.GroupID,
+		EventID:       item.EventID,
+		EventSeq:      item.EventSeq,
+		ActorPeerID:   item.ActorPeerID,
+		SignerPeerID:  item.SignerPeerID,
+		CreatedAtUnix: item.CreatedAtUnix,
+		Payload:       json.RawMessage(item.PayloadJSON),
+		Signature:     item.Signature,
+	}
+	if err := s.sendEnvelope(item.PeerID, env); err != nil {
+		return s.scheduleGroupEventDeliveryRetry(item.EventID, item.PeerID, item.RetryCount+1)
+	}
+	return s.store.MarkGroupEventDeliverySent(item.EventID, item.PeerID)
+}
+
+func (s *Service) scheduleGroupEventDeliveryRetry(eventID, peerID string, retryCount int) error {
+	if retryCount < 1 {
+		retryCount = 1
+	}
+	return s.store.QueueGroupEventDeliveryRetry(eventID, peerID, retryCount, time.Now().UTC().Add(groupRetryDelay(retryCount)))
 }
 
 func groupRetryDelay(retryCount int) time.Duration {
@@ -1525,6 +1572,10 @@ func (s *Service) applyRemoteGroupCreate(env GroupControlEnvelope) error {
 }
 
 func (s *Service) applyRemoteGroupInvite(env GroupControlEnvelope) error {
+	return s.applyRemoteGroupInviteEnvelope(env, true)
+}
+
+func (s *Service) applyRemoteGroupInviteEnvelope(env GroupControlEnvelope, appendNotice bool) error {
 	group, err := s.ensureGroupForInviteEnvelope(env)
 	if err != nil {
 		return err
@@ -1554,8 +1605,14 @@ func (s *Service) applyRemoteGroupInvite(env GroupControlEnvelope) error {
 	}); err != nil {
 		return err
 	}
-	_, err = s.store.UpsertGroupMember(env.GroupID, member, groupEventFromEnvelope(env))
-	return err
+	updated, err := s.store.UpsertGroupMember(env.GroupID, member, groupEventFromEnvelope(env))
+	if err != nil {
+		return err
+	}
+	if appendNotice && payload.InviteePeerID == s.localPeer {
+		s.appendGroupInviteNotice(updated, payload, env)
+	}
+	return nil
 }
 
 func (s *Service) applyRemoteGroupJoin(env GroupControlEnvelope) error {
@@ -1737,8 +1794,11 @@ func (s *Service) broadcastGroupEvent(groupID string, event GroupEvent, peerIDs 
 			continue
 		}
 		if err := s.sendEnvelope(peerID, env); err != nil {
+			_ = s.scheduleGroupEventDeliveryRetry(event.EventID, peerID, 1)
 			log.Printf("[group] broadcast event=%s group=%s peer=%s failed: %v", event.EventType, groupID, peerID, err)
+			continue
 		}
+		_ = s.store.MarkGroupEventDeliverySent(event.EventID, peerID)
 	}
 }
 
@@ -1821,6 +1881,104 @@ func uniquePeers(peers []string) []string {
 		out = append(out, peerID)
 	}
 	return out
+}
+
+func (s *Service) appendGroupInviteNotice(group Group, payload GroupInvitePayload, env GroupControlEnvelope) {
+	conv, err := s.store.GetConversationByPeer(payload.ControllerPeerID)
+	if err != nil {
+		return
+	}
+	noticePayload, err := json.Marshal(buildGroupInviteNoticePayload(group, payload, env, GroupMemberStateInvited))
+	if err != nil {
+		return
+	}
+	_, _ = s.store.AddMessage(Message{
+		MsgID:          "group-invite-" + env.EventID,
+		ConversationID: conv.ConversationID,
+		SenderPeerID:   payload.ControllerPeerID,
+		ReceiverPeerID: s.localPeer,
+		Direction:      "inbound",
+		MsgType:        MessageTypeGroupInviteNote,
+		Plaintext:      string(noticePayload),
+		TransportMode:  TransportModeDirect,
+		State:          MessageStateReceived,
+		Counter:        0,
+		CreatedAt:      time.UnixMilli(env.CreatedAtUnix).UTC(),
+	}, nil)
+}
+
+func (s *Service) sendDirectGroupInviteNotice(peerID string, group Group, payload GroupInvitePayload, env GroupControlEnvelope) error {
+	conv, err := s.store.GetConversationByPeer(peerID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSessionState(conv.ConversationID)
+	if err != nil {
+		return err
+	}
+	noticePayload, err := json.Marshal(buildGroupInviteNoticePayload(group, payload, env, ""))
+	if err != nil {
+		return err
+	}
+	counter := sess.SendCounter
+	nonce := protocol.BuildAEADNonce("fwd", counter)
+	aad := []byte(conv.ConversationID + "\x00" + MessageTypeGroupInviteNotice)
+	ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, noticePayload, aad)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	msgID := "group-invite-" + env.EventID
+	localMsg := Message{
+		MsgID:          msgID,
+		ConversationID: conv.ConversationID,
+		SenderPeerID:   s.localPeer,
+		ReceiverPeerID: peerID,
+		Direction:      "outbound",
+		MsgType:        MessageTypeGroupInviteNotice,
+		Plaintext:      string(noticePayload),
+		TransportMode:  TransportModeDirect,
+		State:          MessageStateLocalOnly,
+		Counter:        counter,
+		CreatedAt:      now,
+	}
+	if _, err := s.store.AddMessage(localMsg, ciphertext); err != nil {
+		return err
+	}
+	wire := ChatText{
+		Type:           MessageTypeGroupInviteNotice,
+		ConversationID: conv.ConversationID,
+		MsgID:          msgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       peerID,
+		Ciphertext:     ciphertext,
+		Counter:        counter,
+		SentAtUnix:     now.UnixMilli(),
+	}
+	if err := s.sendEnvelope(peerID, wire); err != nil {
+		return err
+	}
+	if err := s.store.UpdateSendCounter(conv.ConversationID, counter+1); err != nil {
+		return err
+	}
+	localMsg.State = MessageStateSentToTransport
+	_, err = s.store.AddMessage(localMsg, ciphertext)
+	return err
+}
+
+func buildGroupInviteNoticePayload(group Group, payload GroupInvitePayload, env GroupControlEnvelope, localMemberState string) GroupInviteNoticePayload {
+	return GroupInviteNoticePayload{
+		GroupID:          group.GroupID,
+		Title:            group.Title,
+		ControllerPeerID: payload.ControllerPeerID,
+		InviteePeerID:    payload.InviteePeerID,
+		InviteText:       payload.InviteText,
+		EventID:          env.EventID,
+		EventSeq:         env.EventSeq,
+		CurrentEpoch:     group.CurrentEpoch,
+		LocalMemberState: localMemberState,
+		InviteEnvelope:   env,
+	}
 }
 
 func ignoreDuplicateCreate(err error) error {
