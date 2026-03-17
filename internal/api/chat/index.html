@@ -375,8 +375,6 @@
             <button type="button" class="btn btn-secondary mobile-sheet-close" data-close-mobile-panel>返回聊天</button>
           </div>
           <section class="card" id="thread-switcher-card"></section>
-          <section class="card" id="conversation-list-card"></section>
-          <section class="card" id="group-list-card"></section>
         </div>
         <section class="card chat-layout" id="chat-card">
           <div id="thread-header"></div>
@@ -1249,8 +1247,6 @@
     function renderThreadLists() {
       renderGroupInvites();
       renderThreadSwitcher();
-      renderConversations();
-      renderGroups();
     }
 
     function renderThreadSwitcher() {
@@ -1262,7 +1258,7 @@
       let html =
         '<h2>线程切换</h2>' +
         '<div class="item-toolbar">' +
-          '<div class="section-note">把单聊和群聊合在一起快速切换</div>' +
+          '<div class="section-note">单聊和群聊统一在这里切换</div>' +
           '<div class="segmented">' +
             '<button type="button" class="seg-btn' + (filter === 'all' ? ' active' : '') + '" data-thread-filter="all">全部</button>' +
             '<button type="button" class="seg-btn' + (filter === 'direct' ? ' active' : '') + '" data-thread-filter="direct">单聊</button>' +
@@ -1273,7 +1269,7 @@
         html += '<div class="empty-state thread-mini-empty"><strong>还没有可切换的线程</strong><div>你可以先发起聊天请求，或者直接创建一个群聊。</div></div>';
       } else {
         html += '<div class="thread-switch-list">';
-        html += items.slice(0, 8).map(item => (
+        html += items.map(item => (
           '<div class="thread-mini' + (currentThreadKey() === threadKey(item.kind, item.id) ? ' active' : '') + '" data-thread-kind="' + escapeHtml(item.kind) + '" data-thread-id="' + escapeHtml(item.id) + '">' +
             '<div class="thread-mini-top">' +
               '<div class="thread-mini-meta">' +
@@ -1304,72 +1300,6 @@
           } else {
             selectConversation(item.dataset.threadId);
           }
-          renderThreadLists();
-          await refreshCurrentThread();
-        };
-      });
-    }
-
-    function renderConversations() {
-      const list = state.conversations || [];
-      let html = '<h2>单聊列表</h2><div class="section-note">保留原始单聊视图，方便查看 transport 与会话级设置。</div>';
-      if (!list.length) {
-        html += '<p class="empty">暂无会话</p>';
-      } else {
-        html += '<div class="list">';
-        html += list.map(conv => (
-          '<div class="item' + (state.selectedThreadKind === 'direct' && conv.conversation_id === state.selectedConversationId ? ' active' : '') + '" data-conv="' + escapeHtml(conv.conversation_id) + '">' +
-            '<div class="item-toolbar">' +
-              '<h3>' + escapeHtml(displayName(conv.peer_id, shortPeer(conv.peer_id))) + '</h3>' +
-              '<span class="badge ' + escapeHtml(conv.last_transport_mode === 'direct' ? 'direct' : (conv.last_transport_mode === 'relay' ? 'relay' : 'offline')) + '">' + escapeHtml(conv.last_transport_mode || '-') + '</span>' +
-            '</div>' +
-            '<div class="muted"><code>' + escapeHtml(shortPeer(conv.peer_id)) + '</code></div>' +
-            '<div class="muted">更新时间：' + escapeHtml(formatTime(conv.updated_at)) + ' · ' + escapeHtml(relativeTime(conv.updated_at)) + '</div>' +
-          '</div>'
-        )).join('');
-        html += '</div>';
-      }
-      document.getElementById('conversation-list-card').innerHTML = html;
-      document.querySelectorAll('[data-conv]').forEach(item => {
-        item.onclick = async () => {
-          selectConversation(item.dataset.conv);
-          renderThreadLists();
-          await refreshCurrentThread();
-        };
-      });
-    }
-
-    function renderGroups() {
-      const list = state.groups || [];
-      let html = '<h2>群聊列表</h2><div class="section-note">群标题、controller、成员规模和最近活跃一眼能看清。</div>';
-      if (!list.length) {
-        html += '<p class="empty">暂无群聊</p>';
-      } else {
-        html += '<div class="list">';
-        html += list.map(group => (
-          '<div class="item' + (state.selectedThreadKind === 'group' && group.group_id === state.selectedGroupId ? ' active' : '') + '" data-group="' + escapeHtml(group.group_id) + '">' +
-            '<div class="item-toolbar">' +
-              '<h3>' + escapeHtml(group.title || '未命名群') + '</h3>' +
-              '<div class="member-chip-row">' +
-                '<span class="badge ' + escapeHtml(group.state === 'active' ? 'direct' : 'offline') + '">' + escapeHtml(group.state || '-') + '</span>' +
-                (group.local_member_state === 'invited'
-                  ? '<span class="badge warn">邀请待处理</span>'
-                  : group.local_member_state
-                    ? '<span class="badge relay">' + escapeHtml(groupMemberStateLabel(group.local_member_state)) + '</span>'
-                    : '') +
-              '</div>' +
-            '</div>' +
-            '<div class="muted"><code>' + escapeHtml(shortPeer(group.group_id)) + '</code></div>' +
-            '<div class="muted">controller：' + escapeHtml(displayName(group.controller_peer_id, shortPeer(group.controller_peer_id))) + '</div>' +
-            '<div class="group-summary">' + (group.local_member_state === 'invited' ? '你被邀请加入这个群 · ' : '') + '成员 ' + escapeHtml(String(group.member_count || 0)) + ' · epoch ' + escapeHtml(String(group.current_epoch || 0)) + ' · ' + escapeHtml(group.last_message_at ? ('最近消息 ' + relativeTime(group.last_message_at)) : ('最近更新 ' + relativeTime(group.updated_at))) + '</div>' +
-          '</div>'
-        )).join('');
-        html += '</div>';
-      }
-      document.getElementById('group-list-card').innerHTML = html;
-      document.querySelectorAll('[data-group]').forEach(item => {
-        item.onclick = async () => {
-          selectGroup(item.dataset.group);
           renderThreadLists();
           await refreshCurrentThread();
         };
