@@ -82,7 +82,11 @@ func NewStore(path, localPeerID string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+	// SQLite works much more reliably in this app when all chat writes are
+	// serialized through one shared connection.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.Exec(`PRAGMA busy_timeout = 15000`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
 	}
