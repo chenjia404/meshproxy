@@ -131,12 +131,18 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 			if a.relayCache == nil || info.ID == "" {
 				return
 			}
+			if len(info.Addrs) > 0 {
+				a.Host().Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour)
+			}
 			addrs := filterMultiaddrStrings(info.Addrs)
 			if len(addrs) == 0 {
 				return
 			}
 			if err := a.relayCache.Add(info.ID.String(), addrs); err != nil {
 				log.Printf("[relaycache] persist discovered peer %s: %v", info.ID.String(), err)
+			}
+			if a.chat != nil {
+				a.chat.OnPeerDiscovered(info.ID.String())
 			}
 		})
 	}

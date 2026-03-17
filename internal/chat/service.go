@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,12 +33,15 @@ type Service struct {
 	discovery *discovery.Store
 	store     *Store
 	localPeer string
+
+	autoConnectSeen sync.Map
 }
 
 const (
 	directRetryBatchSize = 64
 	directAckWait        = 20 * time.Second
 	directSyncBatchSize  = 256
+	directAutoConnectTTL = 30 * time.Second
 )
 
 func NewService(ctx context.Context, dbPath string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -519,6 +523,34 @@ func (s *Service) ConnectPeer(peerID string) error {
 	}
 	s.OnPeerConnected(peerID)
 	return nil
+}
+
+func (s *Service) OnPeerDiscovered(peerID string) {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" || peerID == s.localPeer {
+		return
+	}
+	if last, ok := s.autoConnectSeen.Load(peerID); ok {
+		if lastTime, ok := last.(time.Time); ok && time.Since(lastTime) < directAutoConnectTTL {
+			return
+		}
+	}
+	s.autoConnectSeen.Store(peerID, time.Now())
+	safe.Go("chat.onPeerDiscovered", func() {
+		conv, err := s.store.GetConversationByPeer(peerID)
+		if err != nil || conv.State != ConversationStateActive {
+			return
+		}
+		contact, err := s.store.GetPeer(peerID)
+		if err == nil && contact.Blocked {
+			return
+		}
+		if err := s.ensurePeerConnected(peerID); err != nil {
+			log.Printf("[chat] auto-connect discovered peer=%s failed: %v", peerID, err)
+			return
+		}
+		s.OnPeerConnected(peerID)
+	})
 }
 
 func (s *Service) OnPeerConnected(peerID string) {
