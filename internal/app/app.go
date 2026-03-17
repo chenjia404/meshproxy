@@ -15,6 +15,7 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	peerstore "github.com/libp2p/go-libp2p/core/peerstore"
+	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	multiaddr "github.com/multiformats/go-multiaddr"
 
 	"github.com/chenjia404/meshproxy/internal/api"
@@ -69,11 +70,15 @@ type App struct {
 
 	closeOnce sync.Once
 	closeErr  error
+	ownsHost  bool
 }
 
 type Options struct {
 	EnableSOCKS5   bool
 	EnableLocalAPI bool
+	Host           host.Host
+	Routing        corerouting.Routing
+	CloseHost      bool
 }
 
 const (
@@ -132,9 +137,27 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.idMgr = idMgr
 
 	// P2P host
-	h, err := p2p.NewHost(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs)
-	if err != nil {
-		return nil, fmt.Errorf("init p2p host: %w", err)
+	var h *p2p.Host
+	if opts.Host != nil {
+		expectedPeerID, err := peer.IDFromPrivateKey(idMgr.PrivateKey())
+		if err != nil {
+			return nil, fmt.Errorf("derive identity peer id: %w", err)
+		}
+		if opts.Host.ID() != expectedPeerID {
+			return nil, fmt.Errorf("injected host peer id mismatch: host=%s identity=%s", opts.Host.ID(), expectedPeerID)
+		}
+		h = &p2p.Host{
+			Host:        opts.Host,
+			Routing:     opts.Routing,
+			ListenAddrs: opts.Host.Addrs(),
+		}
+		a.ownsHost = opts.CloseHost
+	} else {
+		h, err = p2p.NewHost(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs)
+		if err != nil {
+			return nil, fmt.Errorf("init p2p host: %w", err)
+		}
+		a.ownsHost = true
 	}
 	a.host = h
 
@@ -392,7 +415,7 @@ func (a *App) Close() error {
 		if a.discovery != nil {
 			a.discovery.Stop()
 		}
-		if a.host != nil {
+		if a.host != nil && a.ownsHost {
 			if err := a.host.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}

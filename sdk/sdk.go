@@ -4,10 +4,13 @@ import (
 	"context"
 	"time"
 
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
+	corerouting "github.com/libp2p/go-libp2p/core/routing"
 
 	"github.com/chenjia404/meshproxy/internal/app"
 	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/identity"
 	"github.com/chenjia404/meshproxy/internal/update"
 )
 
@@ -35,6 +38,9 @@ const (
 type Options struct {
 	EnableSOCKS5   bool
 	EnableLocalAPI bool
+	Host           host.Host
+	Routing        corerouting.Routing
+	CloseHost      bool
 }
 
 type UpdateInfo = update.Info
@@ -53,10 +59,21 @@ func LoadConfig(path string) (Config, error) {
 	return config.Load(path)
 }
 
+func LoadOrCreatePrivateKey(path string) (crypto.PrivKey, error) {
+	mgr, err := identity.NewManager(path)
+	if err != nil {
+		return nil, err
+	}
+	return mgr.PrivateKey(), nil
+}
+
 func New(ctx context.Context, cfg Config, opts Options) (*Node, error) {
 	inner, err := app.NewWithOptions(ctx, cfg, app.Options{
 		EnableSOCKS5:   opts.EnableSOCKS5,
 		EnableLocalAPI: opts.EnableLocalAPI,
+		Host:           opts.Host,
+		Routing:        opts.Routing,
+		CloseHost:      opts.CloseHost,
 	})
 	if err != nil {
 		return nil, err

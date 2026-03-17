@@ -8,6 +8,7 @@
 - 适合场景：
   - 在自己的 Go 程序里启动一个 meshproxy 节点
   - 关闭内置 `SOCKS5` 或 `Local API`
+  - 注入现成的 `libp2p Host`
   - 调用聊天能力
   - 获取 `Peer ID`、`libp2p Host`
 
@@ -138,6 +139,66 @@ h := node.Host()
 log.Println(h.ID())
 ```
 
+## 注入现成的 libp2p Host
+
+如果你的程序已经自己创建了 `libp2p Host`，可以直接注入给 `meshproxy SDK` 复用：
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	libp2p "github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
+
+	"github.com/chenjia404/meshproxy/sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	cfg := sdk.DefaultConfig()
+	cfg.DataDir = "data-sdk"
+
+	priv, err := sdk.LoadOrCreatePrivateKey(cfg.IdentityKeyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	h, err := libp2p.New(libp2p.Identity(priv))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer h.Close()
+
+	r, err := dht.New(ctx, h)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	node, err := sdk.New(ctx, cfg, sdk.Options{
+		EnableSOCKS5:   false,
+		EnableLocalAPI: false,
+		Host:           h,
+		Routing:        r,
+		CloseHost:      false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer node.Close()
+}
+```
+
+说明：
+
+- 注入的 `Host` 必须和 `IdentityKeyPath` 对应的身份一致，否则会报错
+- 可以先用 `sdk.LoadOrCreatePrivateKey(...)` 构造和 meshproxy 相同身份的 `Host`
+- `Routing` 是可选的；不传也能启动，但 `FindPeer`、DHT discovery 这类能力会变弱
+- `CloseHost: false` 表示 `node.Close()` 不会关闭你外部传入的 `Host`
+
 ## 检查更新
 
 ```go
@@ -155,6 +216,7 @@ if info.UpdateAvailable {
 - `sdk.New(...)`
 - `sdk.LoadConfig(...)`
 - `sdk.DefaultConfig()`
+- `sdk.LoadOrCreatePrivateKey(...)`
 - `node.PeerID()`
 - `node.Host()`
 - `node.Chat()`
