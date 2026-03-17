@@ -486,17 +486,7 @@ func (s *Service) SyncConversation(conversationID string) error {
 	if err != nil {
 		return err
 	}
-	for _, msg := range resp.Messages {
-		if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
-			return err
-		}
-	}
-	for _, msg := range resp.Files {
-		if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.applyChatSyncResponse(conversationID, resp)
 }
 
 func (s *Service) NetworkStatus() map[string]any {
@@ -1352,19 +1342,61 @@ func (s *Service) triggerConversationSync(conversationID, peerID string, nextCou
 			log.Printf("[chat] sync on gap failed conversation=%s peer=%s: %v", conversationID, peerID, err)
 			return
 		}
-		for _, msg := range resp.Messages {
-			if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
-				log.Printf("[chat] apply synced text failed conversation=%s msg=%s: %v", conversationID, msg.MsgID, err)
-				return
-			}
-		}
-		for _, msg := range resp.Files {
-			if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
-				log.Printf("[chat] apply synced file failed conversation=%s msg=%s: %v", conversationID, msg.MsgID, err)
-				return
-			}
+		if err := s.applyChatSyncResponse(conversationID, resp); err != nil {
+			log.Printf("[chat] apply synced response failed conversation=%s: %v", conversationID, err)
+			return
 		}
 	})
+}
+
+func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResponse) error {
+	sess, err := s.store.GetSessionState(conversationID)
+	if err != nil {
+		return err
+	}
+	expected := sess.RecvCounter
+	if len(resp.Messages) == 0 && len(resp.Files) == 0 && resp.RemoteSendCounter > expected {
+		if err := s.store.UpdateRecvCounter(conversationID, resp.RemoteSendCounter); err != nil {
+			return err
+		}
+		return nil
+	}
+	textIdx := 0
+	fileIdx := 0
+	for textIdx < len(resp.Messages) || fileIdx < len(resp.Files) {
+		useText := fileIdx >= len(resp.Files)
+		if textIdx < len(resp.Messages) && fileIdx < len(resp.Files) {
+			useText = resp.Messages[textIdx].Counter <= resp.Files[fileIdx].Counter
+		}
+		if useText {
+			msg := resp.Messages[textIdx]
+			if msg.Counter > expected {
+				if err := s.store.UpdateRecvCounter(conversationID, msg.Counter); err != nil {
+					return err
+				}
+				expected = msg.Counter
+			}
+			if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
+				return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
+			}
+			expected = msg.Counter + 1
+			textIdx++
+			continue
+		}
+		msg := resp.Files[fileIdx]
+		if msg.Counter > expected {
+			if err := s.store.UpdateRecvCounter(conversationID, msg.Counter); err != nil {
+				return err
+			}
+			expected = msg.Counter
+		}
+		if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
+			return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
+		}
+		expected = msg.Counter + 1
+		fileIdx++
+	}
+	return nil
 }
 
 func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string) (ChatSyncResponse, error) {
@@ -1388,6 +1420,9 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 	resp := ChatSyncResponse{
 		Type:           MessageTypeChatSyncResponse,
 		ConversationID: req.ConversationID,
+	}
+	if sess, err := s.store.GetSessionState(req.ConversationID); err == nil {
+		resp.RemoteSendCounter = sess.SendCounter
 	}
 	for _, item := range items {
 		msg := Message{

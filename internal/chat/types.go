@@ -175,10 +175,11 @@ type ChatSyncRequest struct {
 }
 
 type ChatSyncResponse struct {
-	Type           string     `json:"type"`
-	ConversationID string     `json:"conversation_id"`
-	Messages       []ChatText `json:"messages,omitempty"`
-	Files          []ChatFile `json:"files,omitempty"`
+	Type              string     `json:"type"`
+	ConversationID    string     `json:"conversation_id"`
+	RemoteSendCounter uint64     `json:"remote_send_counter,omitempty"`
+	Messages          []ChatText `json:"messages,omitempty"`
+	Files             []ChatFile `json:"files,omitempty"`
 }
 
 type MessageRevoke struct {
