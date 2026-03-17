@@ -153,7 +153,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	a.gossip = gossipComp
 
 	// Discovery manager
-	selfDesc, err := discovery.BuildSelfDescriptor("v0.1.0", idMgr.PrivateKey(), a.P2PListenAddrs(), true, cfg.Mode == config.ModeRelayExit, time.Minute*2)
+	selfVersion := update.Version
+	if selfVersion == "" {
+		selfVersion = "devel"
+	}
+	selfDesc, err := discovery.BuildSelfDescriptor(selfVersion, idMgr.PrivateKey(), a.P2PListenAddrs(), true, cfg.Mode == config.ModeRelayExit, time.Minute*2)
 	if err != nil {
 		return nil, fmt.Errorf("build self descriptor: %w", err)
 	}
