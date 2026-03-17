@@ -192,6 +192,20 @@ func main() {
 }
 ```
 
+如果你不想手动组 `sdk.Options`，也可以直接用更薄的 `sdk.NewFromHost(...)`：
+
+```go
+node, err := sdk.NewFromHost(ctx, cfg, h, r, sdk.HostOptions{
+	EnableSOCKS5:   false,
+	EnableLocalAPI: false,
+	CloseHost:      false,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer node.Close()
+```
+
 说明：
 
 - 注入的 `Host` 必须和 `IdentityKeyPath` 对应的身份一致，否则会报错
@@ -214,6 +228,7 @@ if info.UpdateAvailable {
 ## 当前公开能力
 
 - `sdk.New(...)`
+- `sdk.NewFromHost(...)`
 - `sdk.LoadConfig(...)`
 - `sdk.DefaultConfig()`
 - `sdk.LoadOrCreatePrivateKey(...)`

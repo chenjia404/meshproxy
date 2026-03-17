@@ -43,6 +43,12 @@ type Options struct {
 	CloseHost      bool
 }
 
+type HostOptions struct {
+	EnableSOCKS5   bool
+	EnableLocalAPI bool
+	CloseHost      bool
+}
+
 type UpdateInfo = update.Info
 type UpdateApplyResult = update.ApplyResult
 
@@ -82,6 +88,16 @@ func New(ctx context.Context, cfg Config, opts Options) (*Node, error) {
 		inner: inner,
 		chat:  &ChatService{inner: inner.ChatService()},
 	}, nil
+}
+
+func NewFromHost(ctx context.Context, cfg Config, h host.Host, routing corerouting.Routing, opts HostOptions) (*Node, error) {
+	return New(ctx, cfg, Options{
+		EnableSOCKS5:   opts.EnableSOCKS5,
+		EnableLocalAPI: opts.EnableLocalAPI,
+		Host:           h,
+		Routing:        routing,
+		CloseHost:      opts.CloseHost,
+	})
 }
 
 func (n *Node) Close() error {
