@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/update"
 )
 
 //go:generate go run ../tools/syncconsole
@@ -157,7 +159,13 @@ type LocalAPIOpts struct {
 	// ExitService 僅在 mode=relay+exit 時非空，用於出口策略/狀態 API。
 	ExitService *exit.Service
 	// ChatService provides first-stage direct chat APIs.
-	ChatService ChatProvider
+	ChatService   ChatProvider
+	UpdateService UpdateProvider
+}
+
+type UpdateProvider interface {
+	CheckForUpdate(ctx context.Context) (update.Info, error)
+	ApplyUpdate(ctx context.Context) (update.ApplyResult, error)
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -257,6 +265,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
+	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
+	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
 	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
 		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
@@ -370,6 +380,40 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, resp)
+}
+
+func (a *LocalAPI) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.UpdateService == nil {
+		http.Error(w, "update service not available", http.StatusNotFound)
+		return
+	}
+	info, err := a.opts.UpdateService.CheckForUpdate(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, info)
+}
+
+func (a *LocalAPI) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.UpdateService == nil {
+		http.Error(w, "update service not available", http.StatusNotFound)
+		return
+	}
+	result, err := a.opts.UpdateService.ApplyUpdate(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, result)
 }
 
 func (a *LocalAPI) handleNodes(w http.ResponseWriter, r *http.Request) {

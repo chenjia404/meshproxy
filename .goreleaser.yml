@@ -18,7 +18,7 @@ builds:
         - cp -f configs/config.docker.yaml "{{dir  .Path }}/config.docker.yaml"
     
     ldflags:
-      - -s -w -X main.gitRev="{{.ShortCommit}}" -X main.buildTime="{{.CommitDate}}"
+      - -s -w -X github.com/chenjia404/meshproxy/internal/update.Version={{.Version}}
     asmflags:
       # - all=-trimpath={{.Env.GOPATH}}
       - ./dontoptimizeme=-N

@@ -32,6 +32,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/store"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
+	"github.com/chenjia404/meshproxy/internal/update"
 )
 
 // App is the main meshproxy application wiring together all components.
@@ -61,6 +62,7 @@ type App struct {
 	relayCache     *relaycache.Cache
 	bootstrapCache *relaycache.Cache
 	selfDesc       *discovery.NodeDescriptor
+	updater        *update.Service
 
 	peerExchangeOnce sync.Map
 	peerExchangeDial sync.Map
@@ -104,6 +106,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		circuitStore:   store.NewCircuitStore(),
 		relayCache:     relayCache,
 		bootstrapCache: bootstrapCache,
+		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
 	}
 
 	// Identity
@@ -321,6 +324,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		ConfigPath:          cfg.ConfigFilePath,
 		ExitService:         exitSvc,
 		ChatService:         chatSvc,
+		UpdateService:       a,
 	}
 	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
 	localAPI.Start()
@@ -404,6 +408,20 @@ func (a *App) P2PListenAddrs() []string {
 // StartTime returns when the application instance was created.
 func (a *App) StartTime() time.Time {
 	return a.startTime
+}
+
+func (a *App) CheckForUpdate(ctx context.Context) (update.Info, error) {
+	if a == nil || a.updater == nil {
+		return update.Info{}, fmt.Errorf("updater not available")
+	}
+	return a.updater.Check(ctx)
+}
+
+func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
+	if a == nil || a.updater == nil {
+		return update.ApplyResult{}, fmt.Errorf("updater not available")
+	}
+	return a.updater.Apply(ctx)
 }
 
 // Host returns the underlying libp2p host, mainly for internal usage.
