@@ -316,6 +316,22 @@
         background: linear-gradient(180deg, rgba(26,35,50,0), rgba(26,35,50,0.92) 18%, rgba(26,35,50,0.98));
         backdrop-filter: blur(8px);
       }
+      .composer .actions .btn {
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        min-height: 44px;
+      }
+      .composer .actions .btn-primary {
+        background: #7cc0ff;
+        color: #06111d;
+        border: 1px solid rgba(124,192,255,0.75);
+        box-shadow: 0 8px 18px rgba(88,166,255,0.22);
+      }
+      .composer .actions .btn-secondary {
+        background: rgba(255,255,255,0.08);
+        color: #f3f7fb;
+        border-color: rgba(255,255,255,0.2);
+      }
       .composer textarea { min-height: 88px; }
       .file-preview img,
       .file-preview video {
@@ -1398,9 +1414,9 @@
         const syncCandidate = (details.members || []).find(member => member.peer_id !== state.me?.peer_id && member.state === 'active');
         drafts.syncPeerId = syncCandidate ? syncCandidate.peer_id : selectedGroup.controller_peer_id || '';
       }
-      header.innerHTML =
-        '<h2>当前群聊</h2>' +
-        '<div class="thread-title">' +
+	      header.innerHTML =
+	        '<h2>当前群聊</h2>' +
+	        '<div class="thread-title">' +
           '<div>' +
             '<h3>' + escapeHtml(selectedGroup.title || '未命名群') + '</h3>' +
             '<div class="thread-subline">' +
@@ -1409,17 +1425,20 @@
             '</div>' +
           '</div>' +
         '</div>' +
-        '<div class="status-row">' +
-          '<span class="badge ' + escapeHtml(selectedGroup.state === 'active' ? 'direct' : 'offline') + '">状态: ' + escapeHtml(groupStateLabel(selectedGroup.state || '-')) + '</span>' +
+	        '<div class="status-row">' +
+	          '<span class="badge ' + escapeHtml(selectedGroup.state === 'active' ? 'direct' : 'offline') + '">状态: ' + escapeHtml(groupStateLabel(selectedGroup.state || '-')) + '</span>' +
           '<span class="badge relay">epoch: ' + escapeHtml(String(selectedGroup.current_epoch || 0)) + '</span>' +
           '<span class="badge warn">成员: ' + escapeHtml(String((details.members || []).length)) + '</span>' +
           '<span class="badge msg-local">自动删除: ' + escapeHtml(selectedGroup.retention_minutes > 0 ? (selectedGroup.retention_minutes + ' 分钟') : '关闭') + '</span>' +
           (localMember ? '<span class="badge direct">我的角色: ' + escapeHtml(groupRoleLabel(localMember.role || '-')) + '</span>' : '<span class="badge offline">未入群</span>') +
-          (localMember ? '<span class="badge ' + escapeHtml(localMember.state === 'active' ? 'direct' : 'warn') + '">成员状态: ' + escapeHtml(groupMemberStateLabel(localMember.state)) + '</span>' : '') +
-        '</div>' +
-        (localMember && localMember.state === 'invited'
-          ? '<div class="hint-box">你已经收到这个群的邀请。加入后才会以 active 成员身份正常发送群消息与文件。</div>'
-          : localMember && localMember.role === 'controller'
+	          (localMember ? '<span class="badge ' + escapeHtml(localMember.state === 'active' ? 'direct' : 'warn') + '">成员状态: ' + escapeHtml(groupMemberStateLabel(localMember.state)) + '</span>' : '') +
+	        '</div>' +
+	        (localMember && localMember.role === 'controller' && selectedGroup.state === 'active'
+	          ? '<div class="actions" style="margin-top:0.7rem"><button type="button" class="btn btn-danger" id="group-dissolve-btn">解散群聊</button></div>'
+	          : '') +
+	        (localMember && localMember.state === 'invited'
+	          ? '<div class="hint-box">你已经收到这个群的邀请。加入后才会以 active 成员身份正常发送群消息与文件。</div>'
+	          : localMember && localMember.role === 'controller'
             ? '<div class="hint-box">当前节点是这个群的 controller。成员变更、移除和 controller 转移都会触发群事件与 epoch 轮换。</div>'
             : '') +
         '<div class="group-panel">' +
@@ -1546,8 +1565,8 @@
         };
       }
 
-      const joinBtn = document.getElementById('group-join-btn');
-      if (joinBtn) {
+	      const joinBtn = document.getElementById('group-join-btn');
+	      if (joinBtn) {
         joinBtn.onclick = async () => {
           try {
             await post('/api/v1/groups/' + encodeURIComponent(selectedGroup.group_id) + '/join');
@@ -1561,8 +1580,8 @@
         };
       }
 
-      const leaveBtn = document.getElementById('group-leave-btn');
-      if (leaveBtn) {
+	      const leaveBtn = document.getElementById('group-leave-btn');
+	      if (leaveBtn) {
         leaveBtn.onclick = async () => {
           if (!window.confirm('确认退出这个群聊吗？')) return;
           try {
@@ -1575,10 +1594,25 @@
             showMessage('err', '退出群聊失败: ' + err.message);
           }
         };
-      }
+	      }
+	      const dissolveBtn = document.getElementById('group-dissolve-btn');
+	      if (dissolveBtn) {
+	        dissolveBtn.onclick = async () => {
+	          if (!window.confirm('确认解散这个群聊吗？解散后所有成员都会删除群消息，24 小时后本地归档记录也会清除。')) return;
+	          try {
+	            await post('/api/v1/groups/' + encodeURIComponent(selectedGroup.group_id) + '/dissolve');
+	            showMessage('ok', '群聊已解散');
+	            await refreshGroups();
+	            await refreshCurrentThread();
+	            renderThreadLists();
+	          } catch (err) {
+	            showMessage('err', '解散群聊失败: ' + err.message);
+	          }
+	        };
+	      }
 
-      const titleInput = document.getElementById('group-title-input');
-      const retentionInput = document.getElementById('group-retention-input');
+	      const titleInput = document.getElementById('group-title-input');
+	      const retentionInput = document.getElementById('group-retention-input');
       if (retentionInput) {
         retentionInput.addEventListener('input', () => {
           groupDraft(selectedGroup.group_id).retentionMinutes = retentionInput.value;
