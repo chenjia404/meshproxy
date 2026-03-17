@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>meshproxy 聊天</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
     :root {
       --bg: #0f1419;
@@ -411,6 +412,7 @@
       knownGroupStates: {},
       directDrafts: {},
       groupDrafts: {},
+      composerThreadKey: '',
       mobilePanel: '',
       contactNicknameDrafts: {},
       retentionDrafts: {},
@@ -1943,46 +1945,58 @@
       const localGroupMember = getLocalGroupMember(groupDetails);
       if (!direct && !group) {
         composer.innerHTML = '';
+        state.composerThreadKey = '';
         return;
       }
 
       if (direct) {
+        const draftKey = threadKey('direct', direct.conversation_id);
         const draft = state.directDrafts[direct.conversation_id] || '';
-        composer.innerHTML =
-          '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div>' +
-          '<input id="composer-file" type="file" hidden>' +
-          '<div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送文件</button></div>' +
-          '<div id="composer-send-status"></div>';
+        const shouldRebuild = state.composerThreadKey !== draftKey || !document.getElementById('composer-text');
+        if (shouldRebuild) {
+          composer.innerHTML =
+            '<div class="form-row"><label>发送消息</label><textarea id="composer-text" placeholder="输入消息内容"></textarea></div>' +
+            '<input id="composer-file" type="file" hidden>' +
+            '<div class="actions"><button class="btn btn-primary" id="send-message-btn">发送</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送文件</button></div>' +
+            '<div id="composer-send-status"></div>';
+          state.composerThreadKey = draftKey;
+        }
         const input = document.getElementById('composer-text');
         if (input) {
-          input.value = draft;
-          input.addEventListener('input', () => {
-            state.directDrafts[direct.conversation_id] = input.value;
-          });
-          input.addEventListener('paste', async (e) => {
-            try {
-              await handleComposerPaste(e);
-            } catch (err) {
-              showMessage('err', '粘贴图片发送失败: ' + err.message);
-            }
-          });
-        }
-        document.getElementById('send-message-btn').onclick = async () => {
-          const text = (document.getElementById('composer-text')?.value || '').trim();
-          if (!text) return;
-          try {
-            await post('/api/v1/chat/conversations/' + encodeURIComponent(direct.conversation_id) + '/messages', { text });
-            state.directDrafts[direct.conversation_id] = '';
-            await refreshCurrentThread();
-            await refreshConversations();
-            renderThreadLists();
-          } catch (err) {
-            showMessage('err', '发送失败: ' + err.message);
+          if (input.value !== draft && document.activeElement !== input) {
+            input.value = draft;
           }
-        };
+          if (shouldRebuild) {
+            input.addEventListener('input', () => {
+              state.directDrafts[direct.conversation_id] = input.value;
+            });
+            input.addEventListener('paste', async (e) => {
+              try {
+                await handleComposerPaste(e);
+              } catch (err) {
+                showMessage('err', '粘贴图片发送失败: ' + err.message);
+              }
+            });
+          }
+        }
+        if (shouldRebuild) {
+          document.getElementById('send-message-btn').onclick = async () => {
+            const text = (document.getElementById('composer-text')?.value || '').trim();
+            if (!text) return;
+            try {
+              await post('/api/v1/chat/conversations/' + encodeURIComponent(direct.conversation_id) + '/messages', { text });
+              state.directDrafts[direct.conversation_id] = '';
+              await refreshCurrentThread();
+              await refreshConversations();
+              renderThreadLists();
+            } catch (err) {
+              showMessage('err', '发送失败: ' + err.message);
+            }
+          };
+        }
         const fileBtn = document.getElementById('send-file-btn');
         const fileInput = document.getElementById('composer-file');
-        if (fileBtn && fileInput) {
+        if (shouldRebuild && fileBtn && fileInput) {
           fileBtn.onclick = () => fileInput.click();
           fileInput.onchange = async () => {
             const file = fileInput.files && fileInput.files[0];
@@ -1996,49 +2010,62 @@
 
       if (!group || !localGroupMember) {
         composer.innerHTML = '<p class="empty">当前群聊状态不可发送消息</p>';
+        state.composerThreadKey = '';
         return;
       }
       if (localGroupMember.state !== 'active') {
         composer.innerHTML = '<p class="empty">当前成员状态为 ' + escapeHtml(localGroupMember.state) + '，暂不能发送群消息。</p>';
+        state.composerThreadKey = '';
         return;
       }
+      const draftKey = threadKey('group', group.group_id);
       const draft = groupDraft(group.group_id).message || '';
-      composer.innerHTML =
-        '<div class="form-row"><label>发送群消息</label><textarea id="composer-text" placeholder="输入群消息内容"></textarea></div>' +
-        '<input id="composer-file" type="file" hidden>' +
-        '<div class="actions"><button class="btn btn-primary" id="send-message-btn">发送到群</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送群文件</button></div>' +
-        '<div class="composer-hint">当前 epoch ' + escapeHtml(String(group.current_epoch || 0)) + ' · active 成员会收到 fanout 投递，离线成员可在后续补同步时拉取。</div>' +
-        '<div id="composer-send-status"></div>';
+      const shouldRebuild = state.composerThreadKey !== draftKey || !document.getElementById('composer-text');
+      if (shouldRebuild) {
+        composer.innerHTML =
+          '<div class="form-row"><label>发送群消息</label><textarea id="composer-text" placeholder="输入群消息内容"></textarea></div>' +
+          '<input id="composer-file" type="file" hidden>' +
+          '<div class="actions"><button class="btn btn-primary" id="send-message-btn">发送到群</button><button type="button" class="btn btn-secondary" id="send-file-btn">发送群文件</button></div>' +
+          '<div class="composer-hint">当前 epoch ' + escapeHtml(String(group.current_epoch || 0)) + ' · active 成员会收到 fanout 投递，离线成员可在后续补同步时拉取。</div>' +
+          '<div id="composer-send-status"></div>';
+        state.composerThreadKey = draftKey;
+      }
       const input = document.getElementById('composer-text');
       if (input) {
-        input.value = draft;
-        input.addEventListener('input', () => {
-          groupDraft(group.group_id).message = input.value;
-        });
-        input.addEventListener('paste', async (e) => {
-          try {
-            await handleComposerPaste(e);
-          } catch (err) {
-            showMessage('err', '粘贴图片发送失败: ' + err.message);
-          }
-        });
-      }
-      document.getElementById('send-message-btn').onclick = async () => {
-        const text = (document.getElementById('composer-text')?.value || '').trim();
-        if (!text) return;
-        try {
-          await post('/api/v1/groups/' + encodeURIComponent(group.group_id) + '/messages', { text });
-          groupDraft(group.group_id).message = '';
-          await refreshCurrentThread();
-          await refreshGroups();
-          renderThreadLists();
-        } catch (err) {
-          showMessage('err', '发送群消息失败: ' + err.message);
+        if (input.value !== draft && document.activeElement !== input) {
+          input.value = draft;
         }
-      };
+        if (shouldRebuild) {
+          input.addEventListener('input', () => {
+            groupDraft(group.group_id).message = input.value;
+          });
+          input.addEventListener('paste', async (e) => {
+            try {
+              await handleComposerPaste(e);
+            } catch (err) {
+              showMessage('err', '粘贴图片发送失败: ' + err.message);
+            }
+          });
+        }
+      }
+      if (shouldRebuild) {
+        document.getElementById('send-message-btn').onclick = async () => {
+          const text = (document.getElementById('composer-text')?.value || '').trim();
+          if (!text) return;
+          try {
+            await post('/api/v1/groups/' + encodeURIComponent(group.group_id) + '/messages', { text });
+            groupDraft(group.group_id).message = '';
+            await refreshCurrentThread();
+            await refreshGroups();
+            renderThreadLists();
+          } catch (err) {
+            showMessage('err', '发送群消息失败: ' + err.message);
+          }
+        };
+      }
       const fileBtn = document.getElementById('send-file-btn');
       const fileInput = document.getElementById('composer-file');
-      if (fileBtn && fileInput) {
+      if (shouldRebuild && fileBtn && fileInput) {
         fileBtn.onclick = () => fileInput.click();
         fileInput.onchange = async () => {
           const file = fileInput.files && fileInput.files[0];
