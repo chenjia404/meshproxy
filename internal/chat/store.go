@@ -65,7 +65,8 @@ type outboxRecoveryItem struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	localPeerID string
 }
 
 const (
@@ -90,7 +91,7 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, localPeerID: localPeerID}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -418,12 +419,25 @@ func (s *Store) UpsertPeer(peerID, nickname string) error {
 
 func (s *Store) ListContacts() ([]Contact, error) {
 	rows, err := s.db.Query(`
-		SELECT p.peer_id, p.nickname, p.blocked, p.last_seen_at, p.updated_at
+		SELECT
+			p.peer_id,
+			p.nickname,
+			p.blocked,
+			p.last_seen_at,
+			p.updated_at,
+			COALESCE((
+				SELECT r.nickname
+				FROM requests r
+				WHERE r.nickname != ''
+				  AND ((r.from_peer_id = p.peer_id AND r.to_peer_id = ?) OR (r.to_peer_id = p.peer_id AND r.from_peer_id = ?))
+				ORDER BY r.updated_at DESC, r.created_at DESC
+				LIMIT 1
+			), '')
 		FROM peers p
 		INNER JOIN conversations c ON c.peer_id = p.peer_id
 		WHERE c.state = ?
 		ORDER BY c.updated_at DESC, p.updated_at DESC
-	`, ConversationStateActive)
+	`, s.localPeerID, s.localPeerID, ConversationStateActive)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +447,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt); err != nil {
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
@@ -448,8 +462,25 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 	var c Contact
 	var blocked int
 	var lastSeenAt, updatedAt string
-	err := s.db.QueryRow(`SELECT peer_id,nickname,blocked,last_seen_at,updated_at FROM peers WHERE peer_id=?`, peerID).
-		Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt)
+	err := s.db.QueryRow(`
+		SELECT
+			p.peer_id,
+			p.nickname,
+			p.blocked,
+			p.last_seen_at,
+			p.updated_at,
+			COALESCE((
+				SELECT r.nickname
+				FROM requests r
+				WHERE r.nickname != ''
+				  AND ((r.from_peer_id = p.peer_id AND r.to_peer_id = ?) OR (r.to_peer_id = p.peer_id AND r.from_peer_id = ?))
+				ORDER BY r.updated_at DESC, r.created_at DESC
+				LIMIT 1
+			), '')
+		FROM peers p
+		WHERE p.peer_id=?
+	`, s.localPeerID, s.localPeerID, peerID).
+		Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
 	}

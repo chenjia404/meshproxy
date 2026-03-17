@@ -49,11 +49,12 @@ type Profile struct {
 }
 
 type Contact struct {
-	PeerID     string    `json:"peer_id"`
-	Nickname   string    `json:"nickname"`
-	Blocked    bool      `json:"blocked"`
-	LastSeenAt time.Time `json:"last_seen_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	PeerID         string    `json:"peer_id"`
+	Nickname       string    `json:"nickname"`
+	RemoteNickname string    `json:"remote_nickname,omitempty"`
+	Blocked        bool      `json:"blocked"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type Request struct {

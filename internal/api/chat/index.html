@@ -1199,6 +1199,9 @@
         html += list.map(contact => (
           '<div class="item">' +
             '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
+            ((contact.remote_nickname && contact.remote_nickname !== contact.nickname)
+              ? '<div class="muted">对方昵称：' + escapeHtml(contact.remote_nickname) + '</div>'
+              : '') +
             '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
             '<div class="muted">最后活跃：' + escapeHtml(formatTime(contact.last_seen_at)) + '</div>' +
             '<div class="muted">状态：' + (contact.blocked ? '已拉黑' : '正常') + '</div>' +
