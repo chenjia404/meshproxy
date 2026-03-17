@@ -645,6 +645,67 @@ func (s *Store) ListGroupDeliveriesForRetry(now time.Time, limit int) ([]groupRe
 	return out, rows.Err()
 }
 
+func (s *Store) ListGroupDeliveriesAwaitingAck(now time.Time, ackTimeout time.Duration, limit int) ([]groupRetryDelivery, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	cutoff := now.Add(-ackTimeout)
+	rows, err := s.db.Query(`
+		SELECT
+			d.msg_id,
+			m.group_id,
+			d.peer_id,
+			m.epoch,
+			m.sender_peer_id,
+			m.sender_seq,
+			m.msg_type,
+			m.plaintext,
+			m.file_name,
+			m.mime_type,
+			m.file_size,
+			m.ciphertext_blob,
+			m.signature,
+			m.sent_at,
+			d.retry_count
+		FROM group_message_deliveries d
+		INNER JOIN group_messages m ON m.msg_id = d.msg_id
+		WHERE d.state=? AND d.updated_at != '' AND d.updated_at <= ?
+		ORDER BY d.updated_at ASC
+		LIMIT ?
+	`, GroupDeliveryStateSentToTransport, formatDBTime(cutoff), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []groupRetryDelivery
+	for rows.Next() {
+		var item groupRetryDelivery
+		var sentAt string
+		if err := rows.Scan(
+			&item.MsgID,
+			&item.GroupID,
+			&item.PeerID,
+			&item.Epoch,
+			&item.SenderPeerID,
+			&item.SenderSeq,
+			&item.MsgType,
+			&item.Plaintext,
+			&item.FileName,
+			&item.MIMEType,
+			&item.FileSize,
+			&item.CiphertextBlob,
+			&item.Signature,
+			&sentAt,
+			&item.RetryCount,
+		); err != nil {
+			return nil, err
+		}
+		item.SentAtUnix = parseDBTime(sentAt).UnixMilli()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) MarkGroupEventDeliverySent(eventID, peerID string) error {
 	_, err := s.db.Exec(`
 		INSERT INTO group_event_deliveries(event_id,peer_id,state,retry_count,next_retry_at,updated_at)

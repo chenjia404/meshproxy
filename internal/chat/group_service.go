@@ -25,6 +25,7 @@ const (
 	groupRetryBatchSize    = 32
 	groupRetryBaseDelay    = 15 * time.Second
 	groupRetryMaxDelay     = 5 * time.Minute
+	groupAckTimeout        = 30 * time.Second
 	groupMaxFutureSkew     = 10 * time.Minute
 	groupRequestMaxAge     = 15 * time.Minute
 )
@@ -954,6 +955,18 @@ func (s *Service) processGroupRetries(now time.Time) error {
 		}
 		if err := s.retryGroupDelivery(item); err != nil {
 			log.Printf("[group] retry delivery group=%s msg=%s peer=%s failed: %v", item.GroupID, item.MsgID, item.PeerID, err)
+		}
+	}
+	ackTimeoutItems, err := s.store.ListGroupDeliveriesAwaitingAck(now, groupAckTimeout, groupRetryBatchSize)
+	if err != nil {
+		return err
+	}
+	for _, item := range ackTimeoutItems {
+		if item.SenderPeerID != s.localPeer {
+			continue
+		}
+		if err := s.retryGroupDelivery(item); err != nil {
+			log.Printf("[group] retry delivery after ack timeout group=%s msg=%s peer=%s failed: %v", item.GroupID, item.MsgID, item.PeerID, err)
 		}
 	}
 	eventItems, err := s.store.ListGroupEventDeliveriesForRetry(now, groupRetryBatchSize)
