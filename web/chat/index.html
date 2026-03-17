@@ -41,6 +41,15 @@
     .btn-danger { background: rgba(248,81,73,0.15); color: var(--err); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .message-actions {
+      justify-content: flex-start;
+    }
+    .message-revoke-btn {
+      padding: 0.34rem 0.7rem;
+      font-size: 0.8rem;
+      line-height: 1.1;
+      border-radius: 999px;
+    }
     .list { display: grid; gap: 0.55rem; }
     .item { border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem; background: rgba(255,255,255,0.02); min-width: 0; }
     .item.active { border-color: var(--accent); background: rgba(88,166,255,0.08); box-shadow: inset 0 0 0 1px rgba(88,166,255,0.16); }
@@ -200,6 +209,11 @@
       .mobile-app-actions .btn {
         padding: 0.46rem 0.72rem;
       }
+      .message-revoke-btn {
+        padding: 0.2rem 0.52rem;
+        font-size: 0.72rem;
+        min-height: 30px;
+      }
       .mobile-app-actions .btn.active {
         background: rgba(88,166,255,0.16);
         border-color: rgba(88,166,255,0.3);
@@ -316,10 +330,24 @@
         background: linear-gradient(180deg, rgba(26,35,50,0), rgba(26,35,50,0.92) 18%, rgba(26,35,50,0.98));
         backdrop-filter: blur(8px);
       }
+      .message-actions .btn {
+        width: auto;
+        flex: 0 0 auto;
+      }
+      .composer .actions {
+        display: flex;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        align-items: center;
+      }
       .composer .actions .btn {
+        width: auto;
+        flex: 0 0 auto;
         font-weight: 700;
         letter-spacing: 0.01em;
-        min-height: 44px;
+        min-height: 38px;
+        padding: 0.48rem 0.78rem;
+        font-size: 0.82rem;
       }
       .composer .actions .btn-primary {
         background: #7cc0ff;
@@ -1813,7 +1841,7 @@
               '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + threadMessageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
               renderDirectMessageBody(msg) +
               (canRevoke
-                ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+                ? '<div class="actions message-actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger message-revoke-btn" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
                 : '') +
             '</div>';
           }).join('');
@@ -1874,7 +1902,7 @@
               '</div>' +
               renderGroupMessageBody(msg) +
               (canRevoke
-                ? '<div class="actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger" data-group-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+                ? '<div class="actions message-actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger message-revoke-btn" data-group-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
                 : '') +
             '</div>';
           }).join('');
