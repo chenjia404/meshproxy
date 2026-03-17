@@ -67,13 +67,14 @@ type App struct {
 }
 
 const (
-	peerExchangeInterval      = time.Minute
-	peerExchangeTTL           = 2 * time.Minute
-	peerExchangeMaxEntries    = 16
-	peerExchangeMaxAddrs      = 4
-	peerExchangeDialTimeout   = 8 * time.Second
-	peerExchangeStreamTimeout = 10 * time.Second
-	bootstrapCacheMaxEntries  = 200
+	peerExchangeInterval       = time.Minute
+	peerExchangeTTL            = 2 * time.Minute
+	peerExchangeMaxEntries     = 16
+	peerExchangeMaxAddrs       = 4
+	peerExchangeDialTimeout    = 8 * time.Second
+	peerExchangeStreamTimeout  = 10 * time.Second
+	startupCacheConnectTimeout = 8 * time.Second
+	bootstrapCacheMaxEntries   = 200
 )
 
 // New creates and initializes a new App instance.
@@ -89,16 +90,10 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init relay cache: %w", err)
 	}
-	if err := relayCache.Clear(); err != nil {
-		return nil, fmt.Errorf("reset relay cache: %w", err)
-	}
 	bootstrapPath := filepath.Join(cfg.DataDir, "bootstrap.json")
 	bootstrapCache, err := relaycache.New(bootstrapPath)
 	if err != nil {
 		return nil, fmt.Errorf("init bootstrap cache: %w", err)
-	}
-	if err := bootstrapCache.Clear(); err != nil {
-		return nil, fmt.Errorf("reset bootstrap cache: %w", err)
 	}
 
 	a := &App{
@@ -186,6 +181,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	a.restoreCachedPeerConnections()
 
 	// Path selector and circuit manager
 	localPeerID := a.PeerID()
@@ -598,6 +594,65 @@ func ensurePeerMultiaddr(addr, peerID string) string {
 		return ""
 	}
 	return m.Encapsulate(p2pSeg).String()
+}
+
+func (a *App) restoreCachedPeerConnections() {
+	if a == nil || a.host == nil {
+		return
+	}
+	recordsByPeer := make(map[string][]string)
+	merge := func(cache *relaycache.Cache) {
+		if cache == nil {
+			return
+		}
+		for _, rec := range cache.Records() {
+			if rec == nil || rec.PeerID == "" {
+				continue
+			}
+			recordsByPeer[rec.PeerID] = append(recordsByPeer[rec.PeerID], rec.Addrs...)
+		}
+	}
+	merge(a.relayCache)
+	merge(a.bootstrapCache)
+	for peerID, addrs := range recordsByPeer {
+		peerID := peerID
+		addrs := filterAddrStrings(addrs)
+		if peerID == "" || peerID == a.PeerID() || len(addrs) == 0 {
+			continue
+		}
+		pid, err := peer.Decode(peerID)
+		if err != nil {
+			continue
+		}
+		maddrs := make([]multiaddr.Multiaddr, 0, len(addrs))
+		for _, addr := range addrs {
+			full := ensurePeerMultiaddr(addr, peerID)
+			if full == "" {
+				continue
+			}
+			maddr, err := multiaddr.NewMultiaddr(full)
+			if err != nil {
+				continue
+			}
+			maddrs = append(maddrs, maddr)
+		}
+		if len(maddrs) == 0 {
+			continue
+		}
+		a.Host().Peerstore().AddAddrs(pid, maddrs, time.Hour)
+		safe.Go("app.restoreCachedPeerConnection", func() {
+			if a.Host().Network().Connectedness(pid) == network.Connected {
+				return
+			}
+			ctx, cancel := context.WithTimeout(a.ctx, startupCacheConnectTimeout)
+			defer cancel()
+			if err := a.Host().Connect(ctx, peer.AddrInfo{ID: pid, Addrs: maddrs}); err != nil {
+				log.Printf("[startup] connect cached peer %s failed: %v", peerID, err)
+				return
+			}
+			log.Printf("[startup] connected cached peer %s", peerID)
+		})
+	}
 }
 
 func (a *App) runPeerExchange(ctx context.Context) {
