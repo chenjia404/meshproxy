@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,6 +310,29 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	if err != nil {
 		return Conversation{}, err
 	}
+	if existingConv, err := s.store.GetConversationByPeer(req.FromPeerID); err == nil {
+		if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
+			return Conversation{}, err
+		}
+		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname)
+		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
+			wire := SessionAccept{
+				Type:           MessageTypeSessionAccept,
+				RequestID:      req.RequestID,
+				ConversationID: existingConv.ConversationID,
+				FromPeerID:     s.localPeer,
+				ToPeerID:       req.FromPeerID,
+				ChatKexPub:     profile.ChatKexPub,
+				SentAtUnix:     time.Now().UnixMilli(),
+			}
+			if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
+				log.Printf("[chat] send accept for existing conversation failed request=%s err=%v", requestID, err)
+			}
+		}
+		return existingConv, nil
+	} else if err != sql.ErrNoRows {
+		return Conversation{}, err
+	}
 	convID := deriveConversationID(s.localPeer, req.FromPeerID, req.RequestID)
 	sess, err := deriveSessionState(convID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
 	if err != nil {
@@ -597,6 +621,14 @@ func (s *Service) serveRequestStream(str network.Stream) {
 	case MessageTypeSessionAccept:
 		var accept SessionAccept
 		if err := remarshal(env, &accept); err != nil {
+			return
+		}
+		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
+			_ = s.store.UpsertPeer(accept.FromPeerID, "")
+			_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
+			return
+		} else if err != sql.ErrNoRows {
+			log.Printf("[chat] lookup existing accepted conversation failed: %v", err)
 			return
 		}
 		_, priv, err := s.store.GetProfile(s.localPeer)
@@ -918,6 +950,12 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 	case MessageTypeSessionAccept:
 		var accept SessionAccept
 		if err := remarshal(env, &accept); err != nil {
+			return err
+		}
+		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
+			_ = s.store.UpsertPeer(accept.FromPeerID, "")
+			return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
+		} else if err != sql.ErrNoRows {
 			return err
 		}
 		_, priv, err := s.store.GetProfile(s.localPeer)
