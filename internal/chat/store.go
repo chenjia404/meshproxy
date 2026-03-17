@@ -95,6 +95,19 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	now := time.Now().UTC()
+	if err := s.CleanupExpiredMessages(now); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("startup cleanup direct retention: %w", err)
+	}
+	if err := s.CleanupExpiredGroupMessages(now); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("startup cleanup group retention: %w", err)
+	}
+	if err := s.CleanupArchivedGroups(now); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("startup cleanup archived groups: %w", err)
+	}
 	return s, nil
 }
 
@@ -536,11 +549,54 @@ func (s *Store) UpdateRequestState(requestID, state, conversationID string) erro
 }
 
 func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conversation, error) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if existing, err := s.GetConversation(conv.ConversationID); err == nil {
+		if conv.LastMessageAt.IsZero() {
+			conv.LastMessageAt = existing.LastMessageAt
+		}
+		if conv.UnreadCount == 0 && existing.UnreadCount > 0 {
+			conv.UnreadCount = existing.UnreadCount
+		}
+		if conv.RetentionMinutes == 0 && existing.RetentionMinutes > 0 {
+			conv.RetentionMinutes = existing.RetentionMinutes
+		}
+		if conv.RetentionSyncState == "" {
+			conv.RetentionSyncState = existing.RetentionSyncState
+		}
+		if conv.RetentionSyncedAt.IsZero() && !existing.RetentionSyncedAt.IsZero() {
+			conv.RetentionSyncedAt = existing.RetentionSyncedAt
+		}
+		if conv.CreatedAt.IsZero() && !existing.CreatedAt.IsZero() {
+			conv.CreatedAt = existing.CreatedAt
+		}
+	} else if err != sql.ErrNoRows {
+		return Conversation{}, err
+	} else if existingByPeer, err := s.GetConversationByPeer(conv.PeerID); err == nil {
+		if conv.RetentionMinutes == 0 && existingByPeer.RetentionMinutes > 0 {
+			conv.RetentionMinutes = existingByPeer.RetentionMinutes
+		}
+		if conv.RetentionSyncState == "" {
+			conv.RetentionSyncState = existingByPeer.RetentionSyncState
+		}
+		if conv.RetentionSyncedAt.IsZero() && !existingByPeer.RetentionSyncedAt.IsZero() {
+			conv.RetentionSyncedAt = existingByPeer.RetentionSyncedAt
+		}
+	} else if err != sql.ErrNoRows {
+		return Conversation{}, err
+	}
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
+	lastMessageAt := now
+	if !conv.LastMessageAt.IsZero() {
+		lastMessageAt = conv.LastMessageAt.UTC().Format(time.RFC3339Nano)
+	}
+	createdAt := now
+	if !conv.CreatedAt.IsZero() {
+		createdAt = conv.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
 	_, err := s.db.Exec(`
 		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?)
-	`, conv.ConversationID, conv.PeerID, conv.State, now, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), now, now)
+	`, conv.ConversationID, conv.PeerID, conv.State, lastMessageAt, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), createdAt, now)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -978,18 +1034,32 @@ func (s *Store) CleanupExpiredMessages(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type retentionJob struct {
+		conversationID string
+		minutes        int
+	}
+	var jobs []retentionJob
 	for rows.Next() {
 		var conversationID string
 		var minutes int
 		if err := rows.Scan(&conversationID, &minutes); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		if err := s.cleanupConversationExpiredMessages(conversationID, minutes, now); err != nil {
+		jobs = append(jobs, retentionJob{conversationID: conversationID, minutes: minutes})
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if err := s.cleanupConversationExpiredMessages(job.conversationID, job.minutes, now); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) cleanupConversationExpiredMessages(conversationID string, minutes int, now time.Time) error {

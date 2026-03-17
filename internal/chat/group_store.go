@@ -1244,18 +1244,32 @@ func (s *Store) CleanupExpiredGroupMessages(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type retentionJob struct {
+		groupID string
+		minutes int
+	}
+	var jobs []retentionJob
 	for rows.Next() {
 		var groupID string
 		var minutes int
 		if err := rows.Scan(&groupID, &minutes); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		if err := s.cleanupExpiredGroupMessages(groupID, minutes, now); err != nil {
+		jobs = append(jobs, retentionJob{groupID: groupID, minutes: minutes})
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if err := s.cleanupExpiredGroupMessages(job.groupID, job.minutes, now); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) CleanupArchivedGroups(now time.Time) error {

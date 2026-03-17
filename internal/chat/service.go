@@ -59,6 +59,7 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 	h.SetStreamHandler(p2p.ProtocolGroupControl, s.handleGroupControlStream)
 	h.SetStreamHandler(p2p.ProtocolGroupMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolGroupSync, s.handleGroupSyncStream)
+	s.runRetentionSweep(time.Now().UTC())
 	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
 	safe.Go("chat.recoverOutboxLoop", func() { s.recoverMissingOutboxJobs() })
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
@@ -1439,15 +1440,19 @@ func (s *Service) runRetentionLoop() {
 		case <-s.ctx.Done():
 			return
 		case now := <-ticker.C:
-			if err := s.store.CleanupExpiredMessages(now.UTC()); err != nil {
-				log.Printf("[chat] retention cleanup failed: %v", err)
-			}
-			if err := s.store.CleanupExpiredGroupMessages(now.UTC()); err != nil {
-				log.Printf("[group] retention cleanup failed: %v", err)
-			}
-			if err := s.store.CleanupArchivedGroups(now.UTC()); err != nil {
-				log.Printf("[group] archived cleanup failed: %v", err)
-			}
+			s.runRetentionSweep(now.UTC())
 		}
+	}
+}
+
+func (s *Service) runRetentionSweep(now time.Time) {
+	if err := s.store.CleanupExpiredMessages(now); err != nil {
+		log.Printf("[chat] retention cleanup failed: %v", err)
+	}
+	if err := s.store.CleanupExpiredGroupMessages(now); err != nil {
+		log.Printf("[group] retention cleanup failed: %v", err)
+	}
+	if err := s.store.CleanupArchivedGroups(now); err != nil {
+		log.Printf("[group] archived cleanup failed: %v", err)
 	}
 }
