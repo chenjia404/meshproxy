@@ -12,9 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chenjia404/meshproxy/internal/app"
-	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/sdk"
 )
 
 func main() {
@@ -30,7 +29,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := config.Load(*cfgPath)
+	cfg, err := sdk.LoadConfig(*cfgPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
@@ -58,7 +57,10 @@ func main() {
 		defer cleanup()
 	}
 
-	application, err := app.New(ctx, cfg)
+	application, err := sdk.New(ctx, cfg, sdk.Options{
+		EnableSOCKS5:   true,
+		EnableLocalAPI: true,
+	})
 	if err != nil {
 		log.Fatalf("init app failed: %v", err)
 	}

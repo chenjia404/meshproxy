@@ -66,6 +66,14 @@ type App struct {
 
 	peerExchangeOnce sync.Map
 	peerExchangeDial sync.Map
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type Options struct {
+	EnableSOCKS5   bool
+	EnableLocalAPI bool
 }
 
 const (
@@ -81,6 +89,13 @@ const (
 
 // New creates and initializes a new App instance.
 func New(ctx context.Context, cfg config.Config) (*App, error) {
+	return NewWithOptions(ctx, cfg, Options{
+		EnableSOCKS5:   true,
+		EnableLocalAPI: true,
+	})
+}
+
+func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = "data"
 	}
@@ -303,36 +318,40 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		})
 	}
 
-	socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
-	socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
-	socks.SetTunnelToExit(cfg.Socks5.TunnelToExit, cfg.Socks5.ExitUpstream)
-	if err := socks.Start(); err != nil {
-		return nil, fmt.Errorf("start socks5: %w", err)
+	if opts.EnableSOCKS5 {
+		socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
+		socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
+		socks.SetTunnelToExit(cfg.Socks5.TunnelToExit, cfg.Socks5.ExitUpstream)
+		if err := socks.Start(); err != nil {
+			return nil, fmt.Errorf("start socks5: %w", err)
+		}
+		a.socks5 = socks
 	}
-	a.socks5 = socks
 
-	// Local API (full observability: status, nodes, relays, exits, circuits, streams, pool, scores, errors, metrics)
-	opts := &api.LocalAPIOpts{
-		Relays:              discoveryStore,
-		Exits:               discoveryStore,
-		Streams:             &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
-		Pool:                &poolStatusAPIAdapter{cm: cm},
-		CircuitPoolConfig:   &poolConfigAPIAdapter{cm: cm},
-		Scores:              &scoresPlaceholder{},
-		Errors:              a.recentErrors,
-		Metrics:             &metricsSummaryAdapter{app: a},
-		ExitSelection:       selector,
-		Socks5Tunnel:        &socks5TunnelAPIAdapter{app: a},
-		ExitCandidates:      selector,
-		ExitCountryResolver: selector,
-		ConfigPath:          cfg.ConfigFilePath,
-		ExitService:         exitSvc,
-		ChatService:         chatSvc,
-		UpdateService:       a,
+	if opts.EnableLocalAPI {
+		// Local API (full observability: status, nodes, relays, exits, circuits, streams, pool, scores, errors, metrics)
+		apiOpts := &api.LocalAPIOpts{
+			Relays:              discoveryStore,
+			Exits:               discoveryStore,
+			Streams:             &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
+			Pool:                &poolStatusAPIAdapter{cm: cm},
+			CircuitPoolConfig:   &poolConfigAPIAdapter{cm: cm},
+			Scores:              &scoresPlaceholder{},
+			Errors:              a.recentErrors,
+			Metrics:             &metricsSummaryAdapter{app: a},
+			ExitSelection:       selector,
+			Socks5Tunnel:        &socks5TunnelAPIAdapter{app: a},
+			ExitCandidates:      selector,
+			ExitCountryResolver: selector,
+			ConfigPath:          cfg.ConfigFilePath,
+			ExitService:         exitSvc,
+			ChatService:         chatSvc,
+			UpdateService:       a,
+		}
+		localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, apiOpts)
+		localAPI.Start()
+		a.localAPI = localAPI
 	}
-	localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, opts)
-	localAPI.Start()
-	a.localAPI = localAPI
 
 	return a, nil
 }
@@ -341,33 +360,46 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 func (a *App) Run() error {
 	<-a.ctx.Done()
 	log.Printf("shutting down meshproxy...")
+	return a.Close()
+}
 
-	var firstErr error
-
-	if err := a.localAPI.Shutdown(); err != nil && firstErr == nil {
-		firstErr = err
+func (a *App) Close() error {
+	if a == nil {
+		return nil
 	}
-	if err := a.socks5.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	if a.chat != nil {
-		if err := a.chat.Close(); err != nil && firstErr == nil {
-			firstErr = err
+	a.closeOnce.Do(func() {
+		var firstErr error
+		if a.localAPI != nil {
+			if err := a.localAPI.Shutdown(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
-	}
-	if a.exitSocks5 != nil {
-		if err := a.exitSocks5.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		if a.socks5 != nil {
+			if err := a.socks5.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
-	}
-	if a.discovery != nil {
-		a.discovery.Stop()
-	}
-	if err := a.host.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-
-	return firstErr
+		if a.chat != nil {
+			if err := a.chat.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if a.exitSocks5 != nil {
+			if err := a.exitSocks5.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if a.discovery != nil {
+			a.discovery.Stop()
+		}
+		if a.host != nil {
+			if err := a.host.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		a.closeErr = firstErr
+	})
+	return a.closeErr
 }
 
 // PeerID returns the string representation of the local peer ID.
@@ -434,6 +466,20 @@ func (a *App) Host() host.Host {
 		return nil
 	}
 	return a.host.Host
+}
+
+func (a *App) ChatService() *chat.Service {
+	if a == nil {
+		return nil
+	}
+	return a.chat
+}
+
+func (a *App) LocalAPIListen() string {
+	if a == nil || a.localAPI == nil {
+		return ""
+	}
+	return a.cfg.API.Listen
 }
 
 // ListCircuits implements api.CircuitProvider.
