@@ -22,8 +22,8 @@
     body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: radial-gradient(circle at top, rgba(88,166,255,0.10), transparent 35%), var(--bg); color: var(--text); }
     .shell { max-width: 1360px; margin: 0 auto; padding: 1rem; }
     h1 { margin: 0 0 1rem; font-size: 1.4rem; letter-spacing: 0.02em; }
-    .grid { display: grid; grid-template-columns: 340px 1fr; gap: 1rem; align-items: start; }
-    .stack { display: grid; gap: 1rem; }
+    .grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 1rem; align-items: start; }
+    .stack { display: grid; gap: 1rem; min-width: 0; }
     .card { background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; box-shadow: 0 8px 30px rgba(0,0,0,0.18); }
     .card h2 { margin: 0 0 0.75rem; font-size: 0.96rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
     .kv { display: grid; grid-template-columns: 120px 1fr; gap: 0.4rem 0.8rem; font-size: 0.9rem; }
@@ -41,7 +41,7 @@
     .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .list { display: grid; gap: 0.55rem; }
-    .item { border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem; background: rgba(255,255,255,0.02); }
+    .item { border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem; background: rgba(255,255,255,0.02); min-width: 0; }
     .item.active { border-color: var(--accent); background: rgba(88,166,255,0.08); box-shadow: inset 0 0 0 1px rgba(88,166,255,0.16); }
     .item h3 { margin: 0 0 0.25rem; font-size: 0.94rem; }
     .muted { color: var(--muted); font-size: 0.82rem; }
@@ -51,9 +51,9 @@
     .msg.err { background: rgba(248,81,73,0.12); color: var(--err); }
     .msg.info { background: rgba(88,166,255,0.12); color: var(--accent); }
     .chat-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 76vh; }
-    .messages { display: grid; gap: 0.7rem; max-height: 62vh; overflow: auto; padding-right: 0.2rem; }
-    .bubble { border: 1px solid var(--border); border-radius: 12px; padding: 0.8rem; background: rgba(255,255,255,0.03); }
-    .bubble.outbound { background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.25); }
+    .messages { display: grid; gap: 0.7rem; max-height: min(62vh, 62dvh); overflow: auto; padding-right: 0.2rem; min-width: 0; }
+    .bubble { border: 1px solid var(--border); border-radius: 12px; padding: 0.8rem; background: rgba(255,255,255,0.03); min-width: 0; }
+    .bubble.outbound { background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.25);max-width: 100vw; }
     .bubble .meta { color: var(--muted); font-size: 0.78rem; margin-bottom: 0.4rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
     .composer textarea { min-height: 100px; }
     code { font-family: ui-monospace, monospace; }
@@ -93,7 +93,7 @@
     .thread-title h3 { margin: 0; font-size: 1.15rem; }
     .thread-subline { display: grid; gap: 0.3rem; margin-top: 0.45rem; }
     .member-list { display: grid; gap: 0.45rem; margin-top: 0.65rem; }
-    .member-item { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,0.02); }
+    .member-item { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,0.02); min-width: 0; }
     .member-main { display: grid; gap: 0.15rem; min-width: 0; }
     .member-meta { display: flex; gap: 0.4rem; flex-wrap: wrap; }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
@@ -104,7 +104,7 @@
     .seg-btn { border: none; background: transparent; color: var(--muted); border-radius: 999px; padding: 0.32rem 0.72rem; cursor: pointer; }
     .seg-btn.active { background: rgba(88,166,255,0.14); color: var(--text); }
     .thread-switch-list { display: grid; gap: 0.55rem; margin-top: 0.8rem; }
-    .thread-mini { border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 0.8rem; background: rgba(255,255,255,0.02); cursor: pointer; transition: border-color 120ms ease, transform 120ms ease, background 120ms ease; }
+    .thread-mini { border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 0.8rem; background: rgba(255,255,255,0.02); cursor: pointer; transition: border-color 120ms ease, transform 120ms ease, background 120ms ease; min-width: 0; }
     .thread-mini:hover { transform: translateY(-1px); border-color: rgba(88,166,255,0.26); }
     .thread-mini.active { border-color: var(--accent); background: rgba(88,166,255,0.08); box-shadow: inset 0 0 0 1px rgba(88,166,255,0.14); }
     .thread-mini-top { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
@@ -121,11 +121,225 @@
     .empty-state { display: grid; gap: 0.35rem; padding: 1rem 0.2rem; color: var(--muted); }
     .empty-state strong { color: var(--text); font-size: 0.94rem; }
     .composer-hint { margin-top: 0.6rem; color: var(--muted); font-size: 0.82rem; }
+    .mobile-app-bar, .mobile-sheet-backdrop, .mobile-sheet-head { display: none; }
+    .mobile-sheet-close { min-width: 88px; }
     @media (max-width: 1080px) {
+      .shell { padding: 0.85rem; }
       .grid { grid-template-columns: 1fr; }
+      .grid > .stack:first-child { order: 2; }
+      .grid > .stack:last-child { order: 1; }
       .chat-layout { min-height: auto; }
       .messages { max-height: none; }
       .two-col { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      body { padding-bottom: env(safe-area-inset-bottom, 0); }
+      .shell {
+        width: 100vw;
+        max-width: 100vw;
+        margin: 0;
+        padding: 0.6rem;
+        overflow-x: clip;
+      }
+      .grid,
+      .grid > .stack,
+      #chat-card {
+        width: 100%;
+        max-width: 100%;
+      }
+      h1 { font-size: 1.15rem; margin-bottom: 0.75rem; }
+      .card { padding: 0.8rem; border-radius: 10px; }
+      .refresh-bar { display: none; }
+      .mobile-app-bar {
+        position: sticky;
+        top: 0;
+        z-index: 45;
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        align-items: center;
+        margin: 0 0 0.8rem;
+        padding: 0.72rem 0.78rem;
+        border: 1px solid rgba(88,166,255,0.18);
+        border-radius: 12px;
+        background: rgba(15,20,25,0.88);
+        backdrop-filter: blur(14px);
+        box-shadow: 0 10px 28px rgba(0,0,0,0.2);
+      }
+      .mobile-app-main {
+        min-width: 0;
+        display: grid;
+        gap: 0.18rem;
+      }
+      .mobile-app-kicker {
+        color: var(--muted);
+        font-size: 0.73rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .mobile-app-thread {
+        font-size: 0.96rem;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .mobile-app-subline {
+        color: var(--muted);
+        font-size: 0.78rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .mobile-app-actions {
+        display: flex;
+        gap: 0.4rem;
+        flex-shrink: 0;
+      }
+      .mobile-app-actions .btn {
+        padding: 0.46rem 0.72rem;
+      }
+      .mobile-app-actions .btn.active {
+        background: rgba(88,166,255,0.16);
+        border-color: rgba(88,166,255,0.3);
+        color: var(--text);
+      }
+      .mobile-sheet-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 54;
+        background: rgba(0,0,0,0.48);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 140ms ease;
+      }
+      body.mobile-panel-open .mobile-sheet-backdrop {
+        display: block;
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .mobile-sheet-head {
+        position: sticky;
+        top: 0;
+        z-index: 3;
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        align-items: center;
+        margin: -0.1rem 0 0.8rem;
+        padding: 0.25rem 0 0.8rem;
+        background: linear-gradient(180deg, rgba(15,20,25,0.98), rgba(15,20,25,0.92) 72%, rgba(15,20,25,0));
+        backdrop-filter: blur(10px);
+      }
+      .mobile-sheet-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+      #utility-stack,
+      #thread-stack {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        padding: calc(0.65rem + env(safe-area-inset-top, 0px)) 0.6rem calc(1rem + env(safe-area-inset-bottom, 0px));
+        background: rgba(15,20,25,0.96);
+        overflow: auto;
+        transform: translateY(110%);
+        opacity: 0;
+        pointer-events: none;
+        transition: transform 180ms ease, opacity 140ms ease;
+      }
+      body.mobile-panel-tools #utility-stack,
+      body.mobile-panel-threads #thread-stack {
+        transform: translateY(0);
+        opacity: 1;
+        pointer-events: auto;
+      }
+      #chat-card {
+        min-width: 0;
+      }
+      .refresh-bar,
+      .thread-title,
+      .item-toolbar,
+      .thread-mini-top,
+      .member-item,
+      .contact-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .kv { grid-template-columns: 92px 1fr; }
+      .actions,
+      .status-row,
+      .member-actions,
+      .member-chip-row {
+        gap: 0.4rem;
+      }
+      .actions .btn,
+      .member-actions .btn,
+      .inline-form .btn,
+      .retention-row .btn,
+      .group-toolbar .btn {
+        width: 100%;
+      }
+      .inline-form,
+      .retention-row,
+      .group-toolbar {
+        align-items: stretch;
+      }
+      .inline-form > input,
+      .inline-form > select,
+      .retention-row > input,
+      .group-toolbar > input,
+      .group-toolbar > select {
+        width: 100%;
+      }
+      .retention-row input { width: 100%; }
+      .segmented {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: 100%;
+      }
+      .seg-btn {
+        width: 100%;
+        text-align: center;
+      }
+      .messages {
+        gap: 0.55rem;
+        padding-right: 0;
+      }
+      .bubble { padding: 0.72rem; }
+      .bubble .meta { font-size: 0.74rem; }
+      .composer {
+        position: sticky;
+        bottom: 0;
+        padding-top: 0.8rem;
+        background: linear-gradient(180deg, rgba(26,35,50,0), rgba(26,35,50,0.92) 18%, rgba(26,35,50,0.98));
+        backdrop-filter: blur(8px);
+      }
+      .composer textarea { min-height: 88px; }
+      .file-preview img,
+      .file-preview video {
+        max-width: 100%;
+      }
+      .file-link {
+        width: 100%;
+      }
+      .file-link .name {
+        max-width: none;
+        min-width: 0;
+      }
+    }
+    @media (max-width: 480px) {
+      .shell { padding: 0.45rem; }
+      .card { padding: 0.72rem; }
+      .thread-mini,
+      .item,
+      .bubble,
+      .member-item {
+        border-radius: 9px;
+      }
+      .kv { grid-template-columns: 1fr; }
+      .kv dt { margin-top: 0.3rem; }
+      .thread-subline { gap: 0.22rem; }
     }
   </style>
 </head>
@@ -137,8 +351,14 @@
       <div id="refresh-status" class="refresh-pill">自动刷新：初始化中…</div>
       <div id="refresh-hint"></div>
     </div>
+    <div id="mobile-app-bar" class="mobile-app-bar"></div>
+    <div id="mobile-sheet-backdrop" class="mobile-sheet-backdrop"></div>
     <div class="grid">
-      <div class="stack">
+      <div class="stack" id="utility-stack">
+        <div class="mobile-sheet-head">
+          <div class="mobile-sheet-title">工具与联系人</div>
+          <button type="button" class="btn btn-secondary mobile-sheet-close" data-close-mobile-panel>返回聊天</button>
+        </div>
         <section class="card" id="profile-card"></section>
         <section class="card" id="network-card"></section>
         <section class="card" id="request-send-card"></section>
@@ -148,10 +368,16 @@
         <section class="card" id="contact-list-card"></section>
       </div>
       <div class="stack">
-        <section class="card" id="thread-switcher-card"></section>
-        <section class="card" id="conversation-list-card"></section>
-        <section class="card" id="group-list-card"></section>
-        <section class="card chat-layout">
+        <div class="stack" id="thread-stack">
+          <div class="mobile-sheet-head">
+            <div class="mobile-sheet-title">线程切换</div>
+            <button type="button" class="btn btn-secondary mobile-sheet-close" data-close-mobile-panel>返回聊天</button>
+          </div>
+          <section class="card" id="thread-switcher-card"></section>
+          <section class="card" id="conversation-list-card"></section>
+          <section class="card" id="group-list-card"></section>
+        </div>
+        <section class="card chat-layout" id="chat-card">
           <div id="thread-header"></div>
           <div id="messages" class="messages"></div>
           <div id="composer" class="composer"></div>
@@ -185,6 +411,7 @@
       knownGroupStates: {},
       directDrafts: {},
       groupDrafts: {},
+      mobilePanel: '',
       contactNicknameDrafts: {},
       retentionDrafts: {},
       fileSendStatus: null,
@@ -256,6 +483,84 @@
         : state.selectedThreadKind === 'direct'
           ? threadKey('direct', state.selectedConversationId)
           : '';
+    }
+
+    function isCompactMobileViewport() {
+      return window.matchMedia('(max-width: 720px)').matches;
+    }
+
+    function currentThreadSummary() {
+      const direct = state.selectedThreadKind === 'direct' ? getSelectedConversation() : null;
+      const group = state.selectedThreadKind === 'group' ? getSelectedGroup() : null;
+      if (direct) {
+        return {
+          title: displayName(direct.peer_id, shortPeer(direct.peer_id)),
+          subtitle: '单聊 · ' + shortPeer(direct.peer_id)
+        };
+      }
+      if (group) {
+        return {
+          title: group.title || '未命名群',
+          subtitle: '群聊 · ' + groupMemberStateLabel(group.local_member_state || '') + ' · ' + shortPeer(group.group_id)
+        };
+      }
+      return {
+        title: '还没有选中线程',
+        subtitle: '打开线程列表开始聊天'
+      };
+    }
+
+    function applyMobilePanelState() {
+      const body = document.body;
+      if (!body) return;
+      if (!isCompactMobileViewport()) {
+        state.mobilePanel = '';
+      }
+      body.classList.toggle('mobile-panel-open', !!state.mobilePanel);
+      body.classList.toggle('mobile-panel-tools', state.mobilePanel === 'tools');
+      body.classList.toggle('mobile-panel-threads', state.mobilePanel === 'threads');
+    }
+
+    function openMobilePanel(panel) {
+      state.mobilePanel = panel || '';
+      applyMobilePanelState();
+      renderMobileAppBar();
+    }
+
+    function closeMobilePanel() {
+      if (!state.mobilePanel) return;
+      state.mobilePanel = '';
+      applyMobilePanelState();
+      renderMobileAppBar();
+    }
+
+    function renderMobileAppBar() {
+      const bar = document.getElementById('mobile-app-bar');
+      if (!bar) return;
+      const summary = currentThreadSummary();
+      bar.innerHTML =
+        '<div class="mobile-app-main">' +
+          '<div class="mobile-app-kicker">meshproxy chat</div>' +
+          '<div class="mobile-app-thread">' + escapeHtml(summary.title) + '</div>' +
+          '<div class="mobile-app-subline">' + escapeHtml(summary.subtitle) + '</div>' +
+        '</div>' +
+        '<div class="mobile-app-actions">' +
+          '<button type="button" class="btn btn-secondary' + (state.mobilePanel === 'threads' ? ' active' : '') + '" data-open-mobile-panel="threads">' + escapeHtml(state.mobilePanel === 'threads' ? '关闭线程' : '线程') + '</button>' +
+          '<button type="button" class="btn btn-secondary' + (state.mobilePanel === 'tools' ? ' active' : '') + '" data-open-mobile-panel="tools">' + escapeHtml(state.mobilePanel === 'tools' ? '关闭工具' : '工具') + '</button>' +
+        '</div>';
+      document.querySelectorAll('[data-open-mobile-panel]').forEach(btn => {
+        btn.onclick = () => {
+          const panel = btn.dataset.openMobilePanel || '';
+          if (state.mobilePanel === panel) {
+            closeMobilePanel();
+          } else {
+            openMobilePanel(panel);
+          }
+        };
+      });
+      document.querySelectorAll('[data-close-mobile-panel]').forEach(btn => {
+        btn.onclick = () => closeMobilePanel();
+      });
     }
 
     function getSelectedConversation() {
@@ -419,6 +724,7 @@
       state.selectedGroupId = '';
       state.selectedGroupDetails = null;
       state.fileSendStatus = null;
+      closeMobilePanel();
     }
 
     function selectGroup(groupID) {
@@ -427,6 +733,7 @@
       state.selectedConversationId = '';
       state.peerStatus = null;
       state.fileSendStatus = null;
+      closeMobilePanel();
     }
 
     function threadMessageStateBadge(msgState) {
@@ -1068,6 +1375,7 @@
     }
 
     function renderThread() {
+      renderMobileAppBar();
       renderThreadHeader();
       renderThreadMessages();
       renderComposer();
@@ -1860,17 +2168,27 @@
     window.addEventListener('load', async () => {
       const lightbox = document.getElementById('image-lightbox');
       const lightboxClose = document.getElementById('lightbox-close');
+      const mobileBackdrop = document.getElementById('mobile-sheet-backdrop');
       if (lightbox) {
         lightbox.addEventListener('click', (e) => {
           if (e.target === lightbox) closeImageLightbox();
         });
       }
+      if (mobileBackdrop) {
+        mobileBackdrop.addEventListener('click', closeMobilePanel);
+      }
       if (lightboxClose) lightboxClose.addEventListener('click', closeImageLightbox);
       window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeImageLightbox();
       });
+      window.addEventListener('resize', () => {
+        applyMobilePanelState();
+        renderMobileAppBar();
+      });
       renderRequestSend();
       renderGroupCreate();
+      applyMobilePanelState();
+      renderMobileAppBar();
       try {
         await refreshAll();
       } catch (err) {
