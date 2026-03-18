@@ -114,6 +114,7 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("my nickname:", profile.Nickname)
+	log.Println("my bio:", profile.Bio)
 
 	contacts, err := chat.ListContacts()
 	if err != nil {
@@ -224,6 +225,18 @@ if info.UpdateAvailable {
 	log.Println("latest:", info.LatestVersion)
 }
 ```
+
+## 更新资料
+
+```go
+profile, err := node.Chat().UpdateProfile("Alice", "喜欢折腾去中心化网络")
+if err != nil {
+	log.Fatal(err)
+}
+log.Println(profile.Nickname, profile.Bio)
+```
+
+`bio` 最多 `140` 字，超出时会直接返回错误。
 
 ## 当前公开能力
 

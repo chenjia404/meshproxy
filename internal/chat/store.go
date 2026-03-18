@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -96,6 +97,18 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureProfileBioColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.ensurePeerBioColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.ensureRequestBioColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureProfile(localPeerID); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -128,6 +141,7 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS profile (
 			peer_id TEXT PRIMARY KEY,
 			nickname TEXT NOT NULL,
+			bio TEXT NOT NULL DEFAULT '',
 			chat_kex_priv TEXT NOT NULL,
 			chat_kex_pub TEXT NOT NULL,
 			created_at TEXT NOT NULL,
@@ -136,6 +150,7 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS peers (
 			peer_id TEXT PRIMARY KEY,
 			nickname TEXT NOT NULL,
+			bio TEXT NOT NULL DEFAULT '',
 			blocked INTEGER NOT NULL DEFAULT 0,
 			last_seen_at TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
@@ -147,6 +162,7 @@ func (s *Store) migrate() error {
 			state TEXT NOT NULL,
 			intro_text TEXT NOT NULL,
 			nickname TEXT NOT NULL,
+			bio TEXT NOT NULL DEFAULT '',
 			remote_chat_kex_pub TEXT NOT NULL,
 			conversation_id TEXT NOT NULL DEFAULT '',
 			last_transport_mode TEXT NOT NULL,
@@ -361,16 +377,16 @@ func (s *Store) ensureProfile(localPeerID string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	nickname := "peer-" + shortPeerID(localPeerID)
-	_, err = s.db.Exec(`INSERT INTO profile(peer_id,nickname,chat_kex_priv,chat_kex_pub,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
-		localPeerID, nickname, base64.StdEncoding.EncodeToString(priv), base64.StdEncoding.EncodeToString(pub), now, now)
+	_, err = s.db.Exec(`INSERT INTO profile(peer_id,nickname,bio,chat_kex_priv,chat_kex_pub,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
+		localPeerID, nickname, "", base64.StdEncoding.EncodeToString(priv), base64.StdEncoding.EncodeToString(pub), now, now)
 	return err
 }
 
 func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	var p Profile
 	var privB64, createdAt string
-	err := s.db.QueryRow(`SELECT peer_id,nickname,chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
-		Scan(&p.PeerID, &p.Nickname, &privB64, &p.ChatKexPub, &createdAt)
+	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
+		Scan(&p.PeerID, &p.Nickname, &p.Bio, &privB64, &p.ChatKexPub, &createdAt)
 	if err != nil {
 		return Profile{}, nil, err
 	}
@@ -384,20 +400,57 @@ func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	return p, priv, nil
 }
 
-func (s *Store) UpdateProfileNickname(localPeerID, nickname string) (Profile, error) {
+func (s *Store) UpdateProfile(localPeerID, nickname, bio string) (Profile, error) {
 	nickname = strings.TrimSpace(nickname)
 	if nickname == "" {
 		nickname = "peer-" + shortPeerID(localPeerID)
 	}
+	bio = strings.TrimSpace(bio)
+	if utf8.RuneCountInString(bio) > MaxProfileBioLength {
+		return Profile{}, fmt.Errorf("bio too long: max %d characters", MaxProfileBioLength)
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`UPDATE profile SET nickname=?, updated_at=? WHERE peer_id=?`, nickname, now, localPeerID); err != nil {
+	if _, err := s.db.Exec(`UPDATE profile SET nickname=?, bio=?, updated_at=? WHERE peer_id=?`, nickname, bio, now, localPeerID); err != nil {
 		return Profile{}, err
 	}
 	p, _, err := s.GetProfile(localPeerID)
 	return p, err
 }
 
-func (s *Store) UpsertPeer(peerID, nickname string) error {
+func (s *Store) ensureProfileBioColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(profile)`)
+	if err != nil {
+		return err
+	}
+	hasBio := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "bio" {
+			hasBio = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasBio {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE profile ADD COLUMN bio TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	if peerID == "" {
 		return nil
 	}
@@ -405,15 +458,17 @@ func (s *Store) UpsertPeer(peerID, nickname string) error {
 	if nickname == "" {
 		nickname = "peer-" + shortPeerID(peerID)
 	}
+	bio = strings.TrimSpace(bio)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT INTO peers(peer_id,nickname,updated_at,last_seen_at)
-		VALUES(?,?,?,?)
+		INSERT INTO peers(peer_id,nickname,bio,updated_at,last_seen_at)
+		VALUES(?,?,?,?,?)
 		ON CONFLICT(peer_id) DO UPDATE SET
 			nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE peers.nickname END,
+			bio=CASE WHEN excluded.bio != '' THEN excluded.bio ELSE peers.bio END,
 			last_seen_at=CASE WHEN excluded.last_seen_at != '' THEN excluded.last_seen_at ELSE peers.last_seen_at END,
 			updated_at=excluded.updated_at
-	`, peerID, nickname, now, now)
+	`, peerID, nickname, bio, now, now)
 	return err
 }
 
@@ -422,6 +477,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		SELECT
 			p.peer_id,
 			p.nickname,
+			p.bio,
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -447,7 +503,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname); err != nil {
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
@@ -466,6 +522,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 		SELECT
 			p.peer_id,
 			p.nickname,
+			p.bio,
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -480,7 +537,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 		FROM peers p
 		WHERE p.peer_id=?
 	`, s.localPeerID, s.localPeerID, peerID).
-		Scan(&c.PeerID, &c.Nickname, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname)
+		Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
 	}
@@ -505,6 +562,72 @@ func (s *Store) UpdatePeerNickname(peerID, nickname string) (Contact, error) {
 	return s.GetPeer(peerID)
 }
 
+func (s *Store) ensurePeerBioColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(peers)`)
+	if err != nil {
+		return err
+	}
+	hasBio := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "bio" {
+			hasBio = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasBio {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE peers ADD COLUMN bio TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensureRequestBioColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(requests)`)
+	if err != nil {
+		return err
+	}
+	hasBio := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "bio" {
+			hasBio = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasBio {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE requests ADD COLUMN bio TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
 func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
 	if peerID == "" {
 		return Contact{}, sql.ErrNoRows
@@ -523,29 +646,30 @@ func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
 func (s *Store) UpsertIncomingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			state=excluded.state,
 			intro_text=excluded.intro_text,
 			nickname=excluded.nickname,
+			bio=excluded.bio,
 			remote_chat_kex_pub=excluded.remote_chat_kex_pub,
 			updated_at=excluded.updated_at
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) SaveOutgoingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
-	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
+	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +678,7 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 	for rows.Next() {
 		var r Request
 		var createdAt, updatedAt string
-		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = parseDBTime(createdAt)
@@ -567,8 +691,8 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 func (s *Store) GetRequest(requestID string) (Request, error) {
 	var r Request
 	var createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
-		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
+		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
 	if err != nil {
 		return Request{}, err
 	}

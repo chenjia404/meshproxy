@@ -20,8 +20,8 @@ func (c *ChatService) GetProfile() (Profile, error) {
 	return c.inner.GetProfile()
 }
 
-func (c *ChatService) UpdateProfile(nickname string) (Profile, error) {
-	return c.inner.UpdateProfile(nickname)
+func (c *ChatService) UpdateProfile(nickname, bio string) (Profile, error) {
+	return c.inner.UpdateProfile(nickname, bio)
 }
 
 func (c *ChatService) ListContacts() ([]Contact, error) {

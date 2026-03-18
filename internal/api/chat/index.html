@@ -1006,19 +1006,30 @@
         '<dl class="kv">' +
           '<dt>Peer ID</dt><dd><code>' + escapeHtml(me.peer_id) + '</code></dd>' +
           '<dt>昵称</dt><dd>' + escapeHtml(me.nickname || '-') + '</dd>' +
+          '<dt>简介</dt><dd>' + escapeHtml(me.bio || '-') + '</dd>' +
           '<dt>Chat KEX</dt><dd><code>' + escapeHtml(shortPeer(me.chat_kex_pub)) + '</code></dd>' +
         '</dl>' +
         '<div class="form-row"><label>修改昵称</label><input id="nickname-input" type="text" value="' + escapeHtml(me.nickname || '') + '" placeholder="输入昵称"></div>' +
-        '<div class="actions"><button class="btn btn-primary" id="save-nickname-btn">保存昵称</button></div>';
-      document.getElementById('save-nickname-btn').onclick = async () => {
+        '<div class="form-row"><label>修改简介</label><textarea id="bio-input" maxlength="140" placeholder="介绍一下你自己，最多 140 字">' + escapeHtml(me.bio || '') + '</textarea><div class="muted" id="bio-help">最多 140 字。</div></div>' +
+        '<div class="actions"><button class="btn btn-primary" id="save-profile-btn">保存资料</button></div>';
+      const bioInput = document.getElementById('bio-input');
+      const bioHelp = document.getElementById('bio-help');
+      const updateBioHelp = () => {
+        if (!bioInput || !bioHelp) return;
+        bioHelp.textContent = '还可输入 ' + Math.max(0, 140 - Array.from(bioInput.value || '').length) + ' 字。';
+      };
+      updateBioHelp();
+      bioInput.oninput = updateBioHelp;
+      document.getElementById('save-profile-btn').onclick = async () => {
         const nickname = document.getElementById('nickname-input').value.trim();
+        const bio = document.getElementById('bio-input').value.trim();
         try {
-          state.me = await post('/api/v1/chat/profile', { nickname });
+          state.me = await post('/api/v1/chat/profile', { nickname, bio });
           renderProfile();
-          showMessage('ok', '昵称已保存');
+          showMessage('ok', '资料已保存');
           renderThread();
         } catch (err) {
-          showMessage('err', '保存昵称失败: ' + err.message);
+          showMessage('err', '保存资料失败: ' + err.message);
         }
       };
     }
@@ -1107,6 +1118,7 @@
           const inbound = req.to_peer_id === state.me?.peer_id;
           return '<div class="item">' +
             '<h3>' + escapeHtml(inbound ? displayName(req.from_peer_id, req.nickname || req.from_peer_id) : displayName(req.to_peer_id, req.to_peer_id)) + '</h3>' +
+            (req.bio ? '<div class="muted">简介：' + escapeHtml(req.bio) + '</div>' : '') +
             '<div class="muted">状态：' + escapeHtml(req.state) + '</div>' +
             '<div class="muted">时间：' + escapeHtml(formatTime(req.created_at)) + '</div>' +
             '<p>' + escapeHtml(req.intro_text || '') + '</p>' +
@@ -1202,6 +1214,7 @@
             ((contact.remote_nickname && contact.remote_nickname !== contact.nickname)
               ? '<div class="muted">对方昵称：' + escapeHtml(contact.remote_nickname) + '</div>'
               : '') +
+            (contact.bio ? '<div class="muted">简介：' + escapeHtml(contact.bio) + '</div>' : '') +
             '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
             '<div class="muted">最后活跃：' + escapeHtml(formatTime(contact.last_seen_at)) + '</div>' +
             '<div class="muted">状态：' + (contact.blocked ? '已拉黑' : '正常') + '</div>' +

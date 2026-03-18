@@ -187,7 +187,7 @@ func (s *Service) InviteGroupMember(groupID, peerID, role, inviteText string) (G
 		InvitedBy: s.localPeer,
 		UpdatedAt: now,
 	}
-	_ = s.store.UpsertPeer(peerID, "")
+	_ = s.store.UpsertPeer(peerID, "", "")
 	updated, err := s.store.UpsertGroupMember(groupID, member, event)
 	if err != nil {
 		return Group{}, err
@@ -1787,7 +1787,7 @@ func (s *Service) applyRemoteGroupCreate(env GroupControlEnvelope) error {
 			JoinedEpoch: joinedEpoch,
 			UpdatedAt:   now,
 		})
-		_ = s.store.UpsertPeer(peerID, "")
+		_ = s.store.UpsertPeer(peerID, "", "")
 	}
 	group := Group{
 		GroupID:          env.GroupID,
@@ -2044,7 +2044,7 @@ func (s *Service) ensureGroupForInviteEnvelope(env GroupControlEnvelope) (Group,
 			InvitedBy: payload.ControllerPeerID,
 			UpdatedAt: now,
 		})
-		_ = s.store.UpsertPeer(peerID, "")
+		_ = s.store.UpsertPeer(peerID, "", "")
 	}
 	group = Group{
 		GroupID:          env.GroupID,

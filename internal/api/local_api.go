@@ -171,7 +171,7 @@ type UpdateProvider interface {
 // ChatProvider exposes direct chat functions to the local API.
 type ChatProvider interface {
 	GetProfile() (chat.Profile, error)
-	UpdateProfile(nickname string) (chat.Profile, error)
+	UpdateProfile(nickname, bio string) (chat.Profile, error)
 	ListContacts() ([]chat.Contact, error)
 	UpdateContactNickname(peerID, nickname string) (chat.Contact, error)
 	SetContactBlocked(peerID string, blocked bool) (chat.Contact, error)
@@ -863,12 +863,13 @@ func (a *LocalAPI) handleChatProfile(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var body struct {
 			Nickname string `json:"nickname"`
+			Bio      string `json:"bio"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		profile, err := a.opts.ChatService.UpdateProfile(body.Nickname)
+		profile, err := a.opts.ChatService.UpdateProfile(body.Nickname, body.Bio)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

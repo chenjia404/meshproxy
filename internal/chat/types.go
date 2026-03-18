@@ -41,9 +41,12 @@ const (
 	MessageStateQueuedForRetry  = "queued_for_retry"
 )
 
+const MaxProfileBioLength = 140
+
 type Profile struct {
 	PeerID     string    `json:"peer_id"`
 	Nickname   string    `json:"nickname"`
+	Bio        string    `json:"bio"`
 	ChatKexPub string    `json:"chat_kex_pub"`
 	CreatedAt  time.Time `json:"created_at"`
 }
@@ -51,6 +54,7 @@ type Profile struct {
 type Contact struct {
 	PeerID         string    `json:"peer_id"`
 	Nickname       string    `json:"nickname"`
+	Bio            string    `json:"bio"`
 	RemoteNickname string    `json:"remote_nickname,omitempty"`
 	Blocked        bool      `json:"blocked"`
 	LastSeenAt     time.Time `json:"last_seen_at"`
@@ -64,6 +68,7 @@ type Request struct {
 	State             string    `json:"state"`
 	IntroText         string    `json:"intro_text"`
 	Nickname          string    `json:"nickname"`
+	Bio               string    `json:"bio"`
 	RemoteChatKexPub  string    `json:"remote_chat_kex_pub"`
 	ConversationID    string    `json:"conversation_id,omitempty"`
 	LastTransportMode string    `json:"last_transport_mode"`
@@ -109,6 +114,7 @@ type SessionRequest struct {
 	FromPeerID string `json:"from_peer_id"`
 	ToPeerID   string `json:"to_peer_id"`
 	Nickname   string `json:"nickname"`
+	Bio        string `json:"bio"`
 	IntroText  string `json:"intro_text"`
 	ChatKexPub string `json:"chat_kex_pub"`
 	SentAtUnix int64  `json:"sent_at_unix"`
@@ -120,6 +126,7 @@ type SessionAccept struct {
 	ConversationID string `json:"conversation_id"`
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
+	Bio            string `json:"bio"`
 	ChatKexPub     string `json:"chat_kex_pub"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
 }

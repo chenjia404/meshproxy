@@ -91,8 +91,8 @@ func (s *Service) GetProfile() (Profile, error) {
 	return p, err
 }
 
-func (s *Service) UpdateProfile(nickname string) (Profile, error) {
-	return s.store.UpdateProfileNickname(s.localPeer, nickname)
+func (s *Service) UpdateProfile(nickname, bio string) (Profile, error) {
+	return s.store.UpdateProfile(s.localPeer, nickname, bio)
 }
 
 func (s *Service) ListRequests() ([]Request, error) {
@@ -277,6 +277,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		State:             RequestStatePending,
 		IntroText:         strings.TrimSpace(introText),
 		Nickname:          profile.Nickname,
+		Bio:               profile.Bio,
 		LastTransportMode: TransportModeDirect,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -287,6 +288,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		FromPeerID: req.FromPeerID,
 		ToPeerID:   req.ToPeerID,
 		Nickname:   profile.Nickname,
+		Bio:        profile.Bio,
 		IntroText:  req.IntroText,
 		ChatKexPub: profile.ChatKexPub,
 		SentAtUnix: time.Now().UnixMilli(),
@@ -295,7 +297,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	if err := s.store.SaveOutgoingRequest(req); err != nil {
 		return Request{}, err
 	}
-	_ = s.store.UpsertPeer(toPeerID, "")
+	_ = s.store.UpsertPeer(toPeerID, "", "")
 	if err := s.sendEnvelope(toPeerID, wire); err != nil {
 		return Request{}, err
 	}
@@ -318,7 +320,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
 			return Conversation{}, err
 		}
-		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname)
+		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
 			wire := SessionAccept{
 				Type:           MessageTypeSessionAccept,
@@ -326,6 +328,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 				ConversationID: existingConv.ConversationID,
 				FromPeerID:     s.localPeer,
 				ToPeerID:       req.FromPeerID,
+				Bio:            profile.Bio,
 				ChatKexPub:     profile.ChatKexPub,
 				SentAtUnix:     time.Now().UnixMilli(),
 			}
@@ -357,7 +360,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, convID); err != nil {
 		return Conversation{}, err
 	}
-	_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname)
+	_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
 		return conv, nil
 	}
@@ -367,6 +370,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		ConversationID: convID,
 		FromPeerID:     s.localPeer,
 		ToPeerID:       req.FromPeerID,
+		Bio:            profile.Bio,
 		ChatKexPub:     profile.ChatKexPub,
 		SentAtUnix:     time.Now().UnixMilli(),
 	}
@@ -631,12 +635,13 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			State:             RequestStatePending,
 			IntroText:         req.IntroText,
 			Nickname:          req.Nickname,
+			Bio:               req.Bio,
 			RemoteChatKexPub:  req.ChatKexPub,
 			LastTransportMode: TransportModeDirect,
 			CreatedAt:         time.UnixMilli(req.SentAtUnix),
 			UpdatedAt:         time.Now(),
 		}
-		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname)
+		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		if err := s.store.UpsertIncomingRequest(stored); err != nil {
 			log.Printf("[chat] save request failed: %v", err)
 		}
@@ -646,7 +651,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			return
 		}
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
-			_ = s.store.UpsertPeer(accept.FromPeerID, "")
+			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 			_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
 			return
 		} else if err != sql.ErrNoRows {
@@ -673,7 +678,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			log.Printf("[chat] create accepted conversation failed: %v", err)
 			return
 		}
-		_ = s.store.UpsertPeer(accept.FromPeerID, "")
+		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 		_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
 	case MessageTypeSessionReject:
 		var reject SessionReject
@@ -962,12 +967,13 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			State:             RequestStatePending,
 			IntroText:         req.IntroText,
 			Nickname:          req.Nickname,
+			Bio:               req.Bio,
 			RemoteChatKexPub:  req.ChatKexPub,
 			LastTransportMode: "relay",
 			CreatedAt:         time.UnixMilli(req.SentAtUnix),
 			UpdatedAt:         time.Now(),
 		}
-		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname)
+		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		return s.store.UpsertIncomingRequest(stored)
 	case MessageTypeSessionAccept:
 		var accept SessionAccept
@@ -975,7 +981,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
-			_ = s.store.UpsertPeer(accept.FromPeerID, "")
+			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 			return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
 		} else if err != sql.ErrNoRows {
 			return err
@@ -999,7 +1005,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if _, err := s.store.CreateConversation(conv, sess); err != nil {
 			return err
 		}
-		_ = s.store.UpsertPeer(accept.FromPeerID, "")
+		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 		return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
 	case MessageTypeSessionReject:
 		var reject SessionReject
@@ -1173,7 +1179,7 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
 		return err
 	}
-	_ = s.store.UpsertPeer(msg.FromPeerID, "")
+	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
@@ -1244,7 +1250,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 	if _, err := s.store.AddMessage(incoming, plain); err != nil {
 		return err
 	}
-	_ = s.store.UpsertPeer(msg.FromPeerID, "")
+	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
