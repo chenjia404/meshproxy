@@ -80,7 +80,14 @@
     .badge.msg-retry { background: rgba(210,153,34,0.14); color: var(--warn); border-color: rgba(210,153,34,0.30); }
     .refresh-bar { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; margin: 0 0 1rem; color: var(--muted); font-size: 0.82rem; }
     .refresh-pill { padding: 0.24rem 0.6rem; border-radius: 999px; background: rgba(255,255,255,0.04); }
-    .contact-actions { margin-top: 0.65rem; display: grid; gap: 0.45rem; }
+    .contact-kv { margin-top: 0.65rem; grid-template-columns: 112px minmax(0, 1fr); }
+    .contact-kv dd { line-height: 1.45; }
+    .contact-actions { margin-top: 0.7rem; display: grid; gap: 0.45rem; }
+    .contact-header { display: grid; gap: 0.25rem; }
+    .contact-header-top { display: flex; justify-content: space-between; gap: 0.65rem; align-items: flex-start; }
+    .contact-header-title { display: grid; gap: 0.16rem; min-width: 0; }
+    .contact-header-title h3 { margin: 0; }
+    .contact-chip-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
     .contact-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
     .retention-box, .group-panel { margin-top: 0.85rem; padding-top: 0.85rem; border-top: 1px solid var(--border); }
     .retention-row, .inline-form, .group-toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.45rem; }
@@ -501,7 +508,7 @@
 
     function shortPeer(peerID) {
       if (!peerID) return '-';
-      return peerID.length > 20 ? peerID.slice(0, 20) + '…' : peerID;
+      return peerID.length > 20 ? '…' + peerID.slice(-12) : peerID;
     }
 
     function displayName(peerID, fallback) {
@@ -1211,15 +1218,24 @@
         html += '<div class="list">';
         html += list.map(contact => (
           '<div class="item">' +
-            '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
-            ((contact.remote_nickname && contact.remote_nickname !== contact.nickname)
-              ? '<div class="muted">对方昵称：' + escapeHtml(contact.remote_nickname) + '</div>'
-              : '') +
-            (contact.bio ? '<div class="muted">简介：' + escapeHtml(contact.bio) + '</div>' : '') +
-            '<div class="muted">自动删除：' + (contact.retention_minutes > 0 ? escapeHtml(String(contact.retention_minutes)) + ' 分钟' : '关闭') + '</div>' +
-            '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
-            '<div class="muted">最后活跃：' + escapeHtml(formatTime(contact.last_seen_at)) + '</div>' +
-            '<div class="muted">状态：' + (contact.blocked ? '已拉黑' : '正常') + '</div>' +
+            '<div class="contact-header">' +
+              '<div class="contact-header-top">' +
+                '<div class="contact-header-title">' +
+                  '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
+                  '<div class="contact-chip-row">' +
+                    '<span class="badge msg-local">' + escapeHtml(contact.blocked ? '已拉黑' : '正常') + '</span>' +
+                    '<span class="badge msg-sent">' + escapeHtml(contact.retention_minutes > 0 ? (contact.retention_minutes + ' 分钟自动删除') : '自动删除关闭') + '</span>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
+              '</div>' +
+            '</div>' +
+            '<dl class="kv contact-kv">' +
+              '<dt>对方昵称</dt><dd>' + escapeHtml(contact.remote_nickname || '-') + '</dd>' +
+              '<dt>简介</dt><dd>' + escapeHtml(contact.bio || '-') + '</dd>' +
+              '<dt>最后活跃</dt><dd>' + escapeHtml(formatTime(contact.last_seen_at)) + '</dd>' +
+              '<dt>状态</dt><dd>' + escapeHtml(contact.blocked ? '已拉黑' : '正常') + '</dd>' +
+            '</dl>' +
             '<div class="contact-actions">' +
               '<input type="text" data-contact-nickname="' + escapeHtml(contact.peer_id) + '" value="' + escapeHtml((state.contactNicknameDrafts[contact.peer_id] != null ? state.contactNicknameDrafts[contact.peer_id] : (contact.nickname || ''))) + '" placeholder="修改备注名">' +
               '<div class="actions">' +

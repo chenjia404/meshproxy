@@ -113,6 +113,10 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.upgradeLegacyAutoNicknames(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureProfile(localPeerID); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -532,7 +536,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
-			c.retention_minutes,
+			COALESCE(c.retention_minutes, 0),
 			COALESCE((
 				SELECT r.nickname
 				FROM requests r
@@ -542,7 +546,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 				LIMIT 1
 			), '')
 		FROM peers p
-		INNER JOIN conversations c ON c.peer_id = p.peer_id
+		LEFT JOIN conversations c ON c.peer_id = p.peer_id
 		WHERE p.peer_id=?
 	`, s.localPeerID, s.localPeerID, peerID).
 		Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
@@ -667,6 +671,85 @@ func (s *Store) ensureRequestRetentionColumn() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE requests ADD COLUMN retention_minutes INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+func (s *Store) upgradeLegacyAutoNicknames() error {
+	rows, err := s.db.Query(`SELECT peer_id, nickname, chat_kex_priv, chat_kex_pub, created_at FROM profile`)
+	if err != nil {
+		return err
+	}
+	var profileUpdates []struct {
+		peerID   string
+		nickname string
+	}
+	for rows.Next() {
+		var peerID, nickname, priv, pub, createdAt string
+		if err := rows.Scan(&peerID, &nickname, &priv, &pub, &createdAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if isLegacyAutoNickname(peerID, nickname) {
+			profileUpdates = append(profileUpdates, struct {
+				peerID   string
+				nickname string
+			}{peerID: peerID, nickname: "peer-" + shortPeerID(peerID)})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, upd := range profileUpdates {
+		if _, err := s.db.Exec(`UPDATE profile SET nickname=?, updated_at=? WHERE peer_id=?`, upd.nickname, time.Now().UTC().Format(time.RFC3339Nano), upd.peerID); err != nil {
+			return err
+		}
+	}
+
+	rows, err = s.db.Query(`SELECT peer_id, nickname FROM peers`)
+	if err != nil {
+		return err
+	}
+	var peerUpdates []struct {
+		peerID   string
+		nickname string
+	}
+	for rows.Next() {
+		var peerID, nickname string
+		if err := rows.Scan(&peerID, &nickname); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if isLegacyAutoNickname(peerID, nickname) {
+			peerUpdates = append(peerUpdates, struct {
+				peerID   string
+				nickname string
+			}{peerID: peerID, nickname: "peer-" + shortPeerID(peerID)})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, upd := range peerUpdates {
+		if _, err := s.db.Exec(`UPDATE peers SET nickname=?, updated_at=? WHERE peer_id=?`, upd.nickname, time.Now().UTC().Format(time.RFC3339Nano), upd.peerID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isLegacyAutoNickname(peerID, nickname string) bool {
+	if peerID == "" || nickname == "" {
+		return false
+	}
+	if len(peerID) <= 8 {
+		return false
+	}
+	return nickname == "peer-"+peerID[:8]
 }
 
 func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
@@ -1336,7 +1419,7 @@ func shortPeerID(v string) string {
 	if len(v) <= 8 {
 		return v
 	}
-	return v[:8]
+	return v[len(v)-8:]
 }
 
 func deriveConversationID(a, b, requestID string) string {
