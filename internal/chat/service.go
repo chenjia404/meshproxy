@@ -222,10 +222,16 @@ func (s *Service) maybeSyncProfile(peerID string) {
 	if err != nil {
 		return
 	}
+	if !s.peerSupportsChatRequest(peerID) {
+		return
+	}
 	if !s.peerHasActiveConnection(pid) {
 		return
 	}
 	if !s.chatRequestProbeAllowed(peerID) {
+		return
+	}
+	if _, err := s.store.GetConversationByPeer(peerID); err != nil {
 		return
 	}
 	profile, err := s.GetProfile()
@@ -254,6 +260,8 @@ func (s *Service) maybeSyncProfile(peerID string) {
 			return
 		}
 		s.finishProfileSync(peerID, key, true, nil)
+
+		s.syncPeerAvatar(peerID)
 	})
 }
 
@@ -393,6 +401,12 @@ func (s *Service) handleProfileSync(sync ProfileSync) error {
 		return nil
 	}
 	if sync.FromPeerID == "" {
+		return nil
+	}
+	if _, err := s.store.GetConversationByPeer(sync.FromPeerID); err != nil {
+		return nil
+	}
+	if !s.peerSupportsChatRequest(sync.FromPeerID) {
 		return nil
 	}
 	avatarName := NormalizeAvatarFileName(sync.AvatarName)
@@ -981,7 +995,6 @@ func (s *Service) OnPeerConnected(peerID string) {
 			}
 		}
 		s.maybeSyncProfile(peerID)
-		s.syncPeerAvatar(peerID)
 		conv, err := s.store.GetConversationByPeer(peerID)
 		if err == nil {
 			if err := s.SyncConversation(conv.ConversationID); err != nil {
