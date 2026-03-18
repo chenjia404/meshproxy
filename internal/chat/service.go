@@ -36,18 +36,25 @@ type Service struct {
 	localPeer string
 	avatarDir string
 
-	autoConnectSeen sync.Map
-	profileSyncSeen sync.Map
-	avatarFetchSeen sync.Map
+	autoConnectSeen      sync.Map
+	profileSyncSeen      sync.Map
+	avatarFetchSeen      sync.Map
+	chatRequestProbeSeen sync.Map
+}
+
+type chatRequestProbeState struct {
+	supported bool
+	at        time.Time
 }
 
 const (
-	directRetryBatchSize = 64
-	directAckWait        = 20 * time.Second
-	directSyncBatchSize  = 256
-	directAutoConnectTTL = 30 * time.Second
-	directProfileSyncTTL = 1 * time.Minute
-	directAvatarFetchTTL = 1 * time.Minute
+	directRetryBatchSize      = 64
+	directAckWait             = 20 * time.Second
+	directSyncBatchSize       = 256
+	directAutoConnectTTL      = 30 * time.Second
+	directChatRequestProbeTTL = 1 * time.Minute
+	directProfileSyncTTL      = 1 * time.Minute
+	directAvatarFetchTTL      = 1 * time.Minute
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -155,6 +162,9 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 	if peerID == "" || avatarName == "" {
 		return
 	}
+	if !s.chatRequestProbeAllowed(peerID) {
+		return
+	}
 	if s.avatarExists(avatarName) {
 		return
 	}
@@ -174,14 +184,24 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 			SentAtUnix: time.Now().UnixMilli(),
 		}
 		if err := s.sendEnvelope(peerID, req); err != nil {
-			log.Printf("[chat] request avatar fetch failed peer=%s avatar=%s err=%v", peerID, avatarName, err)
+			if isIgnorableChatRequestError(err) {
+				s.markChatRequestProbeResult(peerID, false)
+			}
+			if !isIgnorableChatRequestError(err) {
+				log.Printf("[chat] request avatar fetch failed peer=%s avatar=%s err=%v", peerID, avatarName, err)
+			}
+			return
 		}
+		s.markChatRequestProbeResult(peerID, true)
 	})
 }
 
 func (s *Service) maybeSyncProfile(peerID string) {
 	peerID = strings.TrimSpace(peerID)
 	if peerID == "" || peerID == s.localPeer {
+		return
+	}
+	if !s.chatRequestProbeAllowed(peerID) {
 		return
 	}
 	profile, err := s.GetProfile()
@@ -206,14 +226,46 @@ func (s *Service) maybeSyncProfile(peerID string) {
 			SentAtUnix: time.Now().UnixMilli(),
 		}
 		if err := s.sendEnvelope(peerID, wire); err != nil {
+			if isIgnorableChatRequestError(err) {
+				s.markChatRequestProbeResult(peerID, false)
+			}
 			if !isIgnorableProfileSyncError(err) {
 				log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
 			}
+			return
 		}
+		s.markChatRequestProbeResult(peerID, true)
 	})
 }
 
-func isIgnorableProfileSyncError(err error) bool {
+func (s *Service) chatRequestProbeAllowed(peerID string) bool {
+	if s == nil || peerID == "" {
+		return false
+	}
+	if last, ok := s.chatRequestProbeSeen.Load(peerID); ok {
+		if probe, ok := last.(chatRequestProbeState); ok {
+			if time.Since(probe.at) < directChatRequestProbeTTL && !probe.supported {
+				return false
+			}
+			if time.Since(probe.at) < directChatRequestProbeTTL && probe.supported {
+				return true
+			}
+		}
+	}
+	return true
+}
+
+func (s *Service) markChatRequestProbeResult(peerID string, supported bool) {
+	if s == nil || peerID == "" {
+		return
+	}
+	s.chatRequestProbeSeen.Store(peerID, chatRequestProbeState{
+		supported: supported,
+		at:        time.Now(),
+	})
+}
+
+func isIgnorableChatRequestError(err error) bool {
 	if err == nil {
 		return true
 	}
@@ -223,6 +275,22 @@ func isIgnorableProfileSyncError(err error) bool {
 		strings.Contains(msg, "connection closed") ||
 		strings.Contains(msg, "unknown protocol") ||
 		strings.Contains(msg, "protocol not supported")
+}
+
+func isIgnorableProfileSyncError(err error) bool {
+	return isIgnorableChatRequestError(err)
+}
+
+func (s *Service) peerSupportsChatRequest(peerID string) bool {
+	if s == nil || s.host == nil || peerID == "" {
+		return false
+	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return false
+	}
+	supported, err := s.host.Peerstore().SupportsProtocols(pid, p2p.ProtocolChatRequest)
+	return err == nil && len(supported) > 0
 }
 
 func (s *Service) syncPeerAvatar(peerID string) {
