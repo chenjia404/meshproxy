@@ -65,6 +65,13 @@ type outboxRecoveryItem struct {
 	CreatedAt      time.Time
 }
 
+type messageRevokeRetryItem struct {
+	MsgID          string
+	ConversationID string
+	PeerID         string
+	RetryCount     int
+}
+
 type Store struct {
 	db          *sql.DB
 	localPeerID string
@@ -240,6 +247,17 @@ func (s *Store) migrate() error {
 			retry_count INTEGER NOT NULL,
 			next_retry_at TEXT NOT NULL,
 			last_transport_attempt TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS message_revoke_jobs (
+			job_id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			peer_id TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			retry_count INTEGER NOT NULL,
+			next_retry_at TEXT NOT NULL,
+			last_transport_attempt TEXT NOT NULL,
+			created_at TEXT NOT NULL
 		);`,
 	}
 	for _, stmt := range stmts {
@@ -1177,6 +1195,77 @@ func (s *Store) DeleteOutboxJob(msgID string) error {
 	return err
 }
 
+func (s *Store) QueueMessageRevoke(conversationID, peerID, msgID string) error {
+	if conversationID == "" || peerID == "" || msgID == "" {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+	now := time.Now().UTC()
+	if _, err := tx.Exec(`
+		INSERT INTO message_revoke_jobs(job_id,conversation_id,peer_id,msg_id,status,retry_count,next_retry_at,last_transport_attempt,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(job_id) DO UPDATE SET
+			conversation_id=excluded.conversation_id,
+			peer_id=excluded.peer_id,
+			msg_id=excluded.msg_id,
+			status=excluded.status,
+			retry_count=excluded.retry_count,
+			next_retry_at=excluded.next_retry_at,
+			last_transport_attempt=excluded.last_transport_attempt,
+			created_at=excluded.created_at
+	`, msgID, conversationID, peerID, msgID, MessageStateQueuedForRetry, 0, formatDBTime(now), formatDBTime(time.Time{}), formatDBTime(now)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM outbox_jobs WHERE job_id=? OR msg_id=?`, msgID, msgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_id=? AND msg_id=?`, conversationID, msgID); err != nil {
+		return err
+	}
+	if err := refreshConversationMessageSummaryTx(tx, conversationID, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteMessageRevokeJob(msgID string) error {
+	if msgID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM message_revoke_jobs WHERE job_id=? OR msg_id=?`, msgID, msgID)
+	return err
+}
+
+func (s *Store) ListMessageRevokeJobsForPeer(peerID string, limit int) ([]messageRevokeRetryItem, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.Query(`
+		SELECT msg_id, conversation_id, peer_id, retry_count
+		FROM message_revoke_jobs
+		WHERE peer_id=? AND status IN (?, ?)
+		ORDER BY next_retry_at ASC, last_transport_attempt ASC, created_at ASC
+		LIMIT ?
+	`, peerID, MessageStateQueuedForRetry, MessageStateSentToTransport, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []messageRevokeRetryItem
+	for rows.Next() {
+		var item messageRevokeRetryItem
+		if err := rows.Scan(&item.MsgID, &item.ConversationID, &item.PeerID, &item.RetryCount); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListOutboxJobsForRetry(now time.Time, limit int) ([]outboxRetryItem, error) {
 	if limit <= 0 {
 		limit = 32
@@ -1504,12 +1593,24 @@ func (s *Store) cleanupConversationExpiredMessages(conversationID string, minute
 }
 
 func (s *Store) refreshConversationMessageSummary(conversationID string) error {
-	var lastMessageAt sql.NullString
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(created_at), '') FROM messages WHERE conversation_id=?`, conversationID).Scan(&lastMessageAt); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE conversations SET last_message_at=?, updated_at=? WHERE conversation_id=?`,
-		lastMessageAt.String, time.Now().UTC().Format(time.RFC3339Nano), conversationID)
+	defer rollbackTx(tx)
+	if err := refreshConversationMessageSummaryTx(tx, conversationID, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func refreshConversationMessageSummaryTx(tx *sql.Tx, conversationID string, updatedAt time.Time) error {
+	var lastMessageAt sql.NullString
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(created_at), '') FROM messages WHERE conversation_id=?`, conversationID).Scan(&lastMessageAt); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=? WHERE conversation_id=?`,
+		lastMessageAt.String, formatDBTime(updatedAt), conversationID)
 	return err
 }
 

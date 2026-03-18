@@ -587,6 +587,9 @@ func (s *Service) RevokeGroupMessage(groupID, msgID string) error {
 	if msg.GroupID != groupID {
 		return errors.New("message does not belong to group")
 	}
+	if msg.State == GroupMessageStateLocalOnly || msg.State == GroupMessageStateQueuedForRetry {
+		return s.store.DeleteGroupMessage(groupID, msgID)
+	}
 	if err := s.ensureLocalGroupMessageRevokeAllowed(groupID, member, msg); err != nil {
 		return err
 	}

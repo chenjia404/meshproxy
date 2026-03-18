@@ -508,6 +508,27 @@ func (s *Store) GetGroupMessage(msgID string) (GroupMessage, error) {
 	return msg, nil
 }
 
+func (s *Store) DeleteGroupMessage(groupID, msgID string) error {
+	if groupID == "" || msgID == "" {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+	if _, err := tx.Exec(`DELETE FROM group_message_deliveries WHERE msg_id=?`, msgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM group_messages WHERE group_id=? AND msg_id=?`, groupID, msgID); err != nil {
+		return err
+	}
+	if err := refreshGroupMessageSummaryTx(tx, groupID, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetGroupMessageBlob(msgID string) ([]byte, error) {
 	var blob []byte
 	if err := s.db.QueryRow(`SELECT ciphertext_blob FROM group_messages WHERE msg_id=?`, msgID).Scan(&blob); err != nil {

@@ -606,6 +606,10 @@ func (s *Service) RevokeMessage(conversationID, msgID string) error {
 	if msg.ConversationID != conversationID {
 		return errors.New("message does not belong to conversation")
 	}
+	if msg.State == MessageStateLocalOnly || msg.State == MessageStateQueuedForRetry {
+		_ = s.store.DeleteOutboxJob(msgID)
+		return s.store.DeleteMessage(conversationID, msgID)
+	}
 	if msg.Direction != "outbound" || msg.SenderPeerID != s.localPeer {
 		return errors.New("only outbound local messages can be revoked")
 	}
@@ -617,10 +621,14 @@ func (s *Service) RevokeMessage(conversationID, msgID string) error {
 		ToPeerID:       msg.ReceiverPeerID,
 		RevokedAtUnix:  time.Now().UnixMilli(),
 	}
-	if err := s.sendEnvelope(msg.ReceiverPeerID, revoke); err != nil {
+	if err := s.sendEnvelope(msg.ReceiverPeerID, revoke); err == nil {
+		_ = s.store.DeleteOutboxJob(msgID)
+		return s.store.DeleteMessage(conversationID, msgID)
+	}
+	if err := s.store.QueueMessageRevoke(conversationID, msg.ReceiverPeerID, msgID); err != nil {
 		return err
 	}
-	return s.store.DeleteMessage(conversationID, msgID)
+	return nil
 }
 
 func (s *Service) GetMessageFile(conversationID, msgID string) (Message, []byte, error) {
@@ -977,6 +985,9 @@ func (s *Service) OnPeerConnected(peerID string) {
 		return
 	}
 	safe.Go("chat.onPeerConnected", func() {
+		if err := s.sendPendingMessageRevokes(peerID); err != nil {
+			log.Printf("[chat] send pending revokes on connect peer=%s failed: %v", peerID, err)
+		}
 		if err := s.recoverMissingOutboxJobs(); err != nil {
 			log.Printf("[chat] recover outbox on connect peer=%s failed: %v", peerID, err)
 			return
@@ -1002,6 +1013,30 @@ func (s *Service) OnPeerConnected(peerID string) {
 			}
 		}
 	})
+}
+
+func (s *Service) sendPendingMessageRevokes(peerID string) error {
+	items, err := s.store.ListMessageRevokeJobsForPeer(peerID, directRetryBatchSize)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		revoke := MessageRevoke{
+			Type:           MessageTypeMessageRevoke,
+			ConversationID: item.ConversationID,
+			MsgID:          item.MsgID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       peerID,
+			RevokedAtUnix:  time.Now().UTC().UnixMilli(),
+		}
+		if err := s.sendEnvelope(peerID, revoke); err != nil {
+			return err
+		}
+		if err := s.store.DeleteMessageRevokeJob(item.MsgID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) handleRequestStream(str network.Stream) {
