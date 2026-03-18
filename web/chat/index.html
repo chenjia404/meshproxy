@@ -61,9 +61,31 @@
     .msg.err { background: rgba(248,81,73,0.12); color: var(--err); }
     .msg.info { background: rgba(88,166,255,0.12); color: var(--accent); }
     .chat-layout { display: grid; grid-template-rows: auto 1fr auto; min-height: 76vh; }
-    .messages { display: grid; gap: 0.7rem; max-height: min(62vh, 62dvh); overflow: auto; padding-right: 0.2rem; min-width: 0; }
-    .bubble { border: 1px solid var(--border); border-radius: 12px; padding: 0.8rem; background: rgba(255,255,255,0.03); min-width: 0; }
-    .bubble.outbound { background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.25);max-width: 100vw; }
+    .messages { display: grid; gap: 0.75rem; max-height: min(62vh, 62dvh); overflow: auto; padding-right: 0.2rem; min-width: 0; }
+    .message-row { display: flex; gap: 0.65rem; align-items: flex-end; min-width: 0; }
+    .message-row.outbound { flex-direction: row-reverse; }
+    .message-row.inbound { flex-direction: row; }
+    .message-avatar { flex: 0 0 auto; }
+    .message-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      min-width: 0;
+      max-width: min(76%, 740px);
+    }
+    .message-row.outbound .message-stack { align-items: flex-end; margin-left: auto; }
+    .message-row.inbound .message-stack { align-items: flex-start; margin-right: auto; }
+    .bubble {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0.82rem 0.92rem;
+      background: rgba(255,255,255,0.03);
+      min-width: 0;
+      width: fit-content;
+      max-width: 100%;
+      box-shadow: 0 10px 28px rgba(0,0,0,0.10);
+    }
+    .bubble.outbound { background: rgba(88,166,255,0.10); border-color: rgba(88,166,255,0.25); }
     .bubble .meta { color: var(--muted); font-size: 0.78rem; margin-bottom: 0.4rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
     .composer textarea { min-height: 100px; }
     code { font-family: ui-monospace, monospace; }
@@ -130,7 +152,7 @@
     .avatar-xs { width: 24px; height: 24px; }
     .avatar-sm { width: 32px; height: 32px; }
     .avatar-md { width: 40px; height: 40px; }
-    .avatar-lg { width: 52px; height: 52px; }
+    .avatar-lg { width: 60px; height: 60px; }
     .avatar-xl { width: 72px; height: 72px; }
     .profile-hero {
       display: flex;
@@ -422,6 +444,12 @@
         gap: 0.55rem;
         padding-right: 0;
       }
+      .message-row { gap: 0.45rem; }
+      .message-stack { max-width: 86%; }
+      .avatar-lg { width: 54px; height: 54px; }
+      .avatar-md { width: 38px; height: 38px; }
+      .avatar-sm { width: 30px; height: 30px; }
+      .avatar-xs { width: 22px; height: 22px; }
       .bubble { padding: 0.72rem; }
       .bubble .meta { font-size: 0.74rem; }
       .composer {
@@ -486,6 +514,7 @@
       .kv { grid-template-columns: 1fr; }
       .kv dt { margin-top: 0.3rem; }
       .thread-subline { gap: 0.22rem; }
+      .message-stack { max-width: 90%; }
     }
   </style>
 </head>
@@ -2089,22 +2118,25 @@
               && (msg.msg_type === 'chat_text' || msg.msg_type === 'chat_file');
             const senderName = msg.direction === 'outbound' ? '我' : displayName(msg.sender_peer_id, shortPeer(msg.sender_peer_id));
             const senderAvatarName = peerAvatar(msg.sender_peer_id);
-            return '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
-              '<div class="meta">' +
-                '<div class="message-meta-row">' +
-                  renderAvatar(senderAvatarName, senderName, 'avatar-xs') +
-                  '<div class="message-meta-text">' +
-                    '<span class="message-meta-name">' + escapeHtml(senderName) + '</span>' +
-                    '<span class="muted">' + escapeHtml(msg.direction) + '</span>' +
-                    threadMessageStateBadge(msg.state) +
-                    '<span class="muted">' + escapeHtml(formatTime(msg.created_at)) + '</span>' +
+            return '<div class="message-row ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
+              '<div class="message-avatar">' + renderAvatar(senderAvatarName, senderName, 'avatar-lg') + '</div>' +
+              '<div class="message-stack">' +
+                '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
+                  '<div class="meta">' +
+                    '<div class="message-meta-row">' +
+                      '<div class="message-meta-text">' +
+                        '<span class="message-meta-name">' + escapeHtml(senderName) + '</span>' +
+                        threadMessageStateBadge(msg.state) +
+                        '<span class="muted">' + escapeHtml(formatTime(msg.created_at)) + '</span>' +
+                      '</div>' +
+                    '</div>' +
                   '</div>' +
+                  renderDirectMessageBody(msg) +
                 '</div>' +
+                (canRevoke
+                  ? '<div class="actions message-actions"><button type="button" class="btn btn-danger message-revoke-btn" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+                  : '') +
               '</div>' +
-              renderDirectMessageBody(msg) +
-              (canRevoke
-                ? '<div class="actions message-actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger message-revoke-btn" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
-                : '') +
             '</div>';
           }).join('');
         }
@@ -2154,18 +2186,28 @@
           wrap.innerHTML = state.groupMessages.map(msg => {
             const outbound = msg.sender_peer_id === state.me?.peer_id;
             const senderName = outbound ? '我' : displayName(msg.sender_peer_id, shortPeer(msg.sender_peer_id));
+            const senderAvatarName = peerAvatar(msg.sender_peer_id);
             const canRevoke = canRevokeGroupMessage(msg, group, groupDetails);
-            return '<div class="bubble ' + escapeHtml(outbound ? 'outbound' : 'inbound') + '">' +
-              '<div class="meta">' +
-                escapeHtml(senderName) + ' · ' +
-                threadMessageStateBadge(msg.state) + ' ' +
-                renderGroupDeliverySummary(msg.delivery_summary) + ' · ' +
-                escapeHtml(formatTime(msg.created_at)) +
+            return '<div class="message-row ' + escapeHtml(outbound ? 'outbound' : 'inbound') + '">' +
+              '<div class="message-avatar">' + renderAvatar(senderAvatarName, senderName, 'avatar-lg') + '</div>' +
+              '<div class="message-stack">' +
+                '<div class="bubble ' + escapeHtml(outbound ? 'outbound' : 'inbound') + '">' +
+                  '<div class="meta">' +
+                    '<div class="message-meta-row">' +
+                      '<div class="message-meta-text">' +
+                        '<span class="message-meta-name">' + escapeHtml(senderName) + '</span>' +
+                        threadMessageStateBadge(msg.state) +
+                        renderGroupDeliverySummary(msg.delivery_summary) +
+                        '<span class="muted">' + escapeHtml(formatTime(msg.created_at)) + '</span>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+                  renderGroupMessageBody(msg) +
+                '</div>' +
+                (canRevoke
+                  ? '<div class="actions message-actions"><button type="button" class="btn btn-danger message-revoke-btn" data-group-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
+                  : '') +
               '</div>' +
-              renderGroupMessageBody(msg) +
-              (canRevoke
-                ? '<div class="actions message-actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger message-revoke-btn" data-group-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
-                : '') +
             '</div>';
           }).join('');
         }
