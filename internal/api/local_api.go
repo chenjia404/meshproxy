@@ -378,6 +378,7 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"socks5_listen":    p.Socks5Listen(),
 		"p2p_listen_addrs": p.P2PListenAddrs(),
 		"uptime_seconds":   int64(time.Since(p.StartTime()).Seconds()),
+		"version":          update.Version,
 	}
 	if a.opts != nil && a.opts.Relays != nil {
 		resp["relays_known"] = len(a.opts.Relays.ListRelays())

@@ -515,6 +515,7 @@
       setTimeout(refreshAutoUpdateSettings, 0);
       return '<h1>节点状态</h1><div class="card"><h3>基本信息</h3><dl class="kv">' +
         '<dt>Peer ID</dt><dd><code>' + escapeHtml(data.peer_id || '-') + '</code></dd>' +
+        '<dt>版本</dt><dd>' + escapeHtml(data.version || 'devel') + '</dd>' +
         '<dt>模式</dt><dd><span class="badge ok">' + escapeHtml(data.mode || '-') + '</span></dd>' +
         '<dt>SOCKS5</dt><dd>' + escapeHtml(data.socks5_listen || '-') + '</dd>' +
         '<dt>运行时长</dt><dd>' + formatUptime(data.uptime_seconds) + '</dd>' +
