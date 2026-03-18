@@ -172,6 +172,13 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 	if peerID == "" || avatarName == "" {
 		return
 	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return
+	}
+	if s.host == nil || s.host.Network().Connectedness(pid) != network.Connected {
+		return
+	}
 	if !s.chatRequestProbeAllowed(peerID) {
 		return
 	}
