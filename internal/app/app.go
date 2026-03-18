@@ -540,6 +540,9 @@ func (a *App) autoUpdateOnce(ctx context.Context) {
 	if a == nil || a.updater == nil || !a.GetAutoUpdate() {
 		return
 	}
+	if update.Version == "" || update.Version == "devel" || update.Version == "(devel)" {
+		return
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	info, err := a.CheckForUpdate(checkCtx)
