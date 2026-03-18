@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -163,10 +164,16 @@ func (s *Service) Apply(ctx context.Context) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	workDir := filepath.Dir(exePath)
+	cleanupOldUpdateDirs(workDir)
 	tmpDir, err := os.MkdirTemp(workDir, "meshproxy-update-*")
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Printf("[update] cleanup temp dir failed: %v", err)
+		}
+	}()
 	archivePath := filepath.Join(tmpDir, filepath.Base(info.AssetName))
 	if err := s.downloadAsset(ctx, info.AssetURL, archivePath, info.assetDigest); err != nil {
 		return ApplyResult{}, err
@@ -194,6 +201,26 @@ func (s *Service) Apply(ctx context.Context) (ApplyResult, error) {
 	result.Status = "scheduled"
 	result.RestartScheduled = true
 	return result, nil
+}
+
+func cleanupOldUpdateDirs(workDir string) {
+	if workDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		log.Printf("[update] scan temp dirs failed: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "meshproxy-update-") {
+			continue
+		}
+		path := filepath.Join(workDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			log.Printf("[update] remove stale temp dir %s failed: %v", path, err)
+		}
+	}
 }
 
 func (s *Service) fetchLatestRelease(ctx context.Context) (githubRelease, error) {
