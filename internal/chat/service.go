@@ -267,6 +267,10 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	if err != nil {
 		return Request{}, err
 	}
+	retentionMinutes := 0
+	if conv, err := s.store.GetConversationByPeer(toPeerID); err == nil {
+		retentionMinutes = conv.RetentionMinutes
+	}
 	if err := s.ensurePeerConnected(toPeerID); err != nil {
 		return Request{}, err
 	}
@@ -278,20 +282,22 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		IntroText:         strings.TrimSpace(introText),
 		Nickname:          profile.Nickname,
 		Bio:               profile.Bio,
+		RetentionMinutes:  retentionMinutes,
 		LastTransportMode: TransportModeDirect,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 	}
 	wire := SessionRequest{
-		Type:       MessageTypeSessionRequest,
-		RequestID:  req.RequestID,
-		FromPeerID: req.FromPeerID,
-		ToPeerID:   req.ToPeerID,
-		Nickname:   profile.Nickname,
-		Bio:        profile.Bio,
-		IntroText:  req.IntroText,
-		ChatKexPub: profile.ChatKexPub,
-		SentAtUnix: time.Now().UnixMilli(),
+		Type:             MessageTypeSessionRequest,
+		RequestID:        req.RequestID,
+		FromPeerID:       req.FromPeerID,
+		ToPeerID:         req.ToPeerID,
+		Nickname:         profile.Nickname,
+		Bio:              profile.Bio,
+		RetentionMinutes: retentionMinutes,
+		IntroText:        req.IntroText,
+		ChatKexPub:       profile.ChatKexPub,
+		SentAtUnix:       time.Now().UnixMilli(),
 	}
 	req.RemoteChatKexPub = profile.ChatKexPub
 	if err := s.store.SaveOutgoingRequest(req); err != nil {
@@ -316,21 +322,31 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	if err != nil {
 		return Conversation{}, err
 	}
+	retentionMinutes := req.RetentionMinutes
 	if existingConv, err := s.store.GetConversationByPeer(req.FromPeerID); err == nil {
+		if existingConv.RetentionMinutes > retentionMinutes {
+			retentionMinutes = existingConv.RetentionMinutes
+		}
 		if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
 			return Conversation{}, err
 		}
 		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
+		if retentionMinutes != existingConv.RetentionMinutes {
+			if updatedConv, err := s.store.UpdateConversationRetention(existingConv.ConversationID, retentionMinutes); err == nil {
+				existingConv = updatedConv
+			}
+		}
 		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
 			wire := SessionAccept{
-				Type:           MessageTypeSessionAccept,
-				RequestID:      req.RequestID,
-				ConversationID: existingConv.ConversationID,
-				FromPeerID:     s.localPeer,
-				ToPeerID:       req.FromPeerID,
-				Bio:            profile.Bio,
-				ChatKexPub:     profile.ChatKexPub,
-				SentAtUnix:     time.Now().UnixMilli(),
+				Type:             MessageTypeSessionAccept,
+				RequestID:        req.RequestID,
+				ConversationID:   existingConv.ConversationID,
+				FromPeerID:       s.localPeer,
+				ToPeerID:         req.FromPeerID,
+				Bio:              profile.Bio,
+				RetentionMinutes: retentionMinutes,
+				ChatKexPub:       profile.ChatKexPub,
+				SentAtUnix:       time.Now().UnixMilli(),
 			}
 			if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
 				log.Printf("[chat] send accept for existing conversation failed request=%s err=%v", requestID, err)
@@ -357,6 +373,11 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	if err != nil {
 		return Conversation{}, err
 	}
+	if retentionMinutes != conv.RetentionMinutes {
+		if updatedConv, err := s.store.UpdateConversationRetention(conv.ConversationID, retentionMinutes); err == nil {
+			conv = updatedConv
+		}
+	}
 	if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, convID); err != nil {
 		return Conversation{}, err
 	}
@@ -365,14 +386,15 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		return conv, nil
 	}
 	wire := SessionAccept{
-		Type:           MessageTypeSessionAccept,
-		RequestID:      req.RequestID,
-		ConversationID: convID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       req.FromPeerID,
-		Bio:            profile.Bio,
-		ChatKexPub:     profile.ChatKexPub,
-		SentAtUnix:     time.Now().UnixMilli(),
+		Type:             MessageTypeSessionAccept,
+		RequestID:        req.RequestID,
+		ConversationID:   convID,
+		FromPeerID:       s.localPeer,
+		ToPeerID:         req.FromPeerID,
+		Bio:              profile.Bio,
+		RetentionMinutes: retentionMinutes,
+		ChatKexPub:       profile.ChatKexPub,
+		SentAtUnix:       time.Now().UnixMilli(),
 	}
 	if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
 		log.Printf("[chat] send accept failed request=%s err=%v", requestID, err)
@@ -636,6 +658,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			IntroText:         req.IntroText,
 			Nickname:          req.Nickname,
 			Bio:               req.Bio,
+			RetentionMinutes:  req.RetentionMinutes,
 			RemoteChatKexPub:  req.ChatKexPub,
 			LastTransportMode: TransportModeDirect,
 			CreatedAt:         time.UnixMilli(req.SentAtUnix),
@@ -652,6 +675,15 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		}
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
 			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+			targetRetention := accept.RetentionMinutes
+			if existingConv.RetentionMinutes > targetRetention {
+				targetRetention = existingConv.RetentionMinutes
+			}
+			if targetRetention != existingConv.RetentionMinutes {
+				if updatedConv, err := s.store.UpdateConversationRetention(existingConv.ConversationID, targetRetention); err == nil {
+					existingConv = updatedConv
+				}
+			}
 			_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
 			return
 		} else if err != sql.ErrNoRows {
@@ -679,6 +711,11 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			return
 		}
 		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+		if accept.RetentionMinutes > 0 {
+			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
+				log.Printf("[chat] apply accepted retention failed: %v", err)
+			}
+		}
 		_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
 	case MessageTypeSessionReject:
 		var reject SessionReject
@@ -982,6 +1019,17 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		}
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
 			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+			targetRetention := accept.RetentionMinutes
+			if existingConv.RetentionMinutes > targetRetention {
+				targetRetention = existingConv.RetentionMinutes
+			}
+			if targetRetention != existingConv.RetentionMinutes {
+				var err error
+				existingConv, err = s.store.UpdateConversationRetention(existingConv.ConversationID, targetRetention)
+				if err != nil {
+					return err
+				}
+			}
 			return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
 		} else if err != sql.ErrNoRows {
 			return err
@@ -1006,6 +1054,11 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+		if accept.RetentionMinutes > 0 {
+			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
+				return err
+			}
+		}
 		return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
 	case MessageTypeSessionReject:
 		var reject SessionReject

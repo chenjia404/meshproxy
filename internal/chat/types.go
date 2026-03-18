@@ -52,13 +52,14 @@ type Profile struct {
 }
 
 type Contact struct {
-	PeerID         string    `json:"peer_id"`
-	Nickname       string    `json:"nickname"`
-	Bio            string    `json:"bio"`
-	RemoteNickname string    `json:"remote_nickname,omitempty"`
-	Blocked        bool      `json:"blocked"`
-	LastSeenAt     time.Time `json:"last_seen_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	PeerID           string    `json:"peer_id"`
+	Nickname         string    `json:"nickname"`
+	Bio              string    `json:"bio"`
+	RemoteNickname   string    `json:"remote_nickname,omitempty"`
+	RetentionMinutes int       `json:"retention_minutes"`
+	Blocked          bool      `json:"blocked"`
+	LastSeenAt       time.Time `json:"last_seen_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type Request struct {
@@ -69,6 +70,7 @@ type Request struct {
 	IntroText         string    `json:"intro_text"`
 	Nickname          string    `json:"nickname"`
 	Bio               string    `json:"bio"`
+	RetentionMinutes  int       `json:"retention_minutes"`
 	RemoteChatKexPub  string    `json:"remote_chat_kex_pub"`
 	ConversationID    string    `json:"conversation_id,omitempty"`
 	LastTransportMode string    `json:"last_transport_mode"`
@@ -109,26 +111,28 @@ type Message struct {
 }
 
 type SessionRequest struct {
-	Type       string `json:"type"`
-	RequestID  string `json:"request_id"`
-	FromPeerID string `json:"from_peer_id"`
-	ToPeerID   string `json:"to_peer_id"`
-	Nickname   string `json:"nickname"`
-	Bio        string `json:"bio"`
-	IntroText  string `json:"intro_text"`
-	ChatKexPub string `json:"chat_kex_pub"`
-	SentAtUnix int64  `json:"sent_at_unix"`
+	Type             string `json:"type"`
+	RequestID        string `json:"request_id"`
+	FromPeerID       string `json:"from_peer_id"`
+	ToPeerID         string `json:"to_peer_id"`
+	Nickname         string `json:"nickname"`
+	Bio              string `json:"bio"`
+	RetentionMinutes int    `json:"retention_minutes"`
+	IntroText        string `json:"intro_text"`
+	ChatKexPub       string `json:"chat_kex_pub"`
+	SentAtUnix       int64  `json:"sent_at_unix"`
 }
 
 type SessionAccept struct {
-	Type           string `json:"type"`
-	RequestID      string `json:"request_id"`
-	ConversationID string `json:"conversation_id"`
-	FromPeerID     string `json:"from_peer_id"`
-	ToPeerID       string `json:"to_peer_id"`
-	Bio            string `json:"bio"`
-	ChatKexPub     string `json:"chat_kex_pub"`
-	SentAtUnix     int64  `json:"sent_at_unix"`
+	Type             string `json:"type"`
+	RequestID        string `json:"request_id"`
+	ConversationID   string `json:"conversation_id"`
+	FromPeerID       string `json:"from_peer_id"`
+	ToPeerID         string `json:"to_peer_id"`
+	Bio              string `json:"bio"`
+	RetentionMinutes int    `json:"retention_minutes"`
+	ChatKexPub       string `json:"chat_kex_pub"`
+	SentAtUnix       int64  `json:"sent_at_unix"`
 }
 
 type SessionReject struct {

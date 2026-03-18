@@ -1119,6 +1119,7 @@
           return '<div class="item">' +
             '<h3>' + escapeHtml(inbound ? displayName(req.from_peer_id, req.nickname || req.from_peer_id) : displayName(req.to_peer_id, req.to_peer_id)) + '</h3>' +
             (req.bio ? '<div class="muted">简介：' + escapeHtml(req.bio) + '</div>' : '') +
+            '<div class="muted">自动删除：' + (req.retention_minutes > 0 ? escapeHtml(String(req.retention_minutes)) + ' 分钟' : '关闭') + '</div>' +
             '<div class="muted">状态：' + escapeHtml(req.state) + '</div>' +
             '<div class="muted">时间：' + escapeHtml(formatTime(req.created_at)) + '</div>' +
             '<p>' + escapeHtml(req.intro_text || '') + '</p>' +
@@ -1215,6 +1216,7 @@
               ? '<div class="muted">对方昵称：' + escapeHtml(contact.remote_nickname) + '</div>'
               : '') +
             (contact.bio ? '<div class="muted">简介：' + escapeHtml(contact.bio) + '</div>' : '') +
+            '<div class="muted">自动删除：' + (contact.retention_minutes > 0 ? escapeHtml(String(contact.retention_minutes)) + ' 分钟' : '关闭') + '</div>' +
             '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
             '<div class="muted">最后活跃：' + escapeHtml(formatTime(contact.last_seen_at)) + '</div>' +
             '<div class="muted">状态：' + (contact.blocked ? '已拉黑' : '正常') + '</div>' +

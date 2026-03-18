@@ -109,6 +109,10 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureRequestRetentionColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureProfile(localPeerID); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -163,6 +167,7 @@ func (s *Store) migrate() error {
 			intro_text TEXT NOT NULL,
 			nickname TEXT NOT NULL,
 			bio TEXT NOT NULL DEFAULT '',
+			retention_minutes INTEGER NOT NULL DEFAULT 0,
 			remote_chat_kex_pub TEXT NOT NULL,
 			conversation_id TEXT NOT NULL DEFAULT '',
 			last_transport_mode TEXT NOT NULL,
@@ -481,6 +486,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
+			c.retention_minutes,
 			COALESCE((
 				SELECT r.nickname
 				FROM requests r
@@ -503,7 +509,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname); err != nil {
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
@@ -526,6 +532,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
+			c.retention_minutes,
 			COALESCE((
 				SELECT r.nickname
 				FROM requests r
@@ -535,9 +542,10 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 				LIMIT 1
 			), '')
 		FROM peers p
+		INNER JOIN conversations c ON c.peer_id = p.peer_id
 		WHERE p.peer_id=?
 	`, s.localPeerID, s.localPeerID, peerID).
-		Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RemoteNickname)
+		Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
 	}
@@ -628,6 +636,39 @@ func (s *Store) ensureRequestBioColumn() error {
 	return err
 }
 
+func (s *Store) ensureRequestRetentionColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(requests)`)
+	if err != nil {
+		return err
+	}
+	hasRetention := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "retention_minutes" {
+			hasRetention = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasRetention {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE requests ADD COLUMN retention_minutes INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
 func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
 	if peerID == "" {
 		return Contact{}, sql.ErrNoRows
@@ -646,30 +687,31 @@ func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
 func (s *Store) UpsertIncomingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			state=excluded.state,
 			intro_text=excluded.intro_text,
 			nickname=excluded.nickname,
 			bio=excluded.bio,
+			retention_minutes=excluded.retention_minutes,
 			remote_chat_kex_pub=excluded.remote_chat_kex_pub,
 			updated_at=excluded.updated_at
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) SaveOutgoingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
-	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
+	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +720,7 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 	for rows.Next() {
 		var r Request
 		var createdAt, updatedAt string
-		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = parseDBTime(createdAt)
@@ -691,8 +733,8 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 func (s *Store) GetRequest(requestID string) (Request, error) {
 	var r Request
 	var createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
-		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
+		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
 	if err != nil {
 		return Request{}, err
 	}
