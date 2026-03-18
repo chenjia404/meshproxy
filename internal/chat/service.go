@@ -176,7 +176,7 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 	if err != nil {
 		return
 	}
-	if s.host == nil || s.host.Network().Connectedness(pid) != network.Connected {
+	if !s.peerHasActiveConnection(pid) {
 		return
 	}
 	if !s.chatRequestProbeAllowed(peerID) {
@@ -200,7 +200,7 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 			AvatarName: avatarName,
 			SentAtUnix: time.Now().UnixMilli(),
 		}
-		if err := s.sendEnvelope(peerID, req); err != nil {
+		if err := s.sendEnvelopeConnectedOnly(peerID, req); err != nil {
 			if isIgnorableChatRequestError(err) {
 				s.markChatRequestProbeResult(peerID, false)
 			}
@@ -222,7 +222,7 @@ func (s *Service) maybeSyncProfile(peerID string) {
 	if err != nil {
 		return
 	}
-	if s.host == nil || s.host.Network().Connectedness(pid) != network.Connected {
+	if !s.peerHasActiveConnection(pid) {
 		return
 	}
 	if !s.chatRequestProbeAllowed(peerID) {
@@ -246,7 +246,7 @@ func (s *Service) maybeSyncProfile(peerID string) {
 			AvatarName: profile.Avatar,
 			SentAtUnix: time.Now().UnixMilli(),
 		}
-		if err := s.sendEnvelope(peerID, wire); err != nil {
+		if err := s.sendEnvelopeConnectedOnly(peerID, wire); err != nil {
 			s.finishProfileSync(peerID, key, false, err)
 			if !isIgnorableProfileSyncError(err) {
 				log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
@@ -345,6 +345,13 @@ func (s *Service) markChatRequestProbeResult(peerID string, supported bool) {
 	})
 }
 
+func (s *Service) peerHasActiveConnection(pid peer.ID) bool {
+	if s == nil || s.host == nil || pid == "" {
+		return false
+	}
+	return len(s.host.Network().ConnsToPeer(pid)) > 0
+}
+
 func isIgnorableChatRequestError(err error) bool {
 	if err == nil {
 		return true
@@ -429,7 +436,7 @@ func (s *Service) handleAvatarRequest(req AvatarRequest) error {
 		AvatarData: data,
 		SentAtUnix: time.Now().UnixMilli(),
 	}
-	return s.sendEnvelope(req.FromPeerID, resp)
+	return s.sendEnvelopeConnectedOnly(req.FromPeerID, resp)
 }
 
 func (s *Service) handleAvatarResponse(resp AvatarResponse) error {
@@ -1269,12 +1276,38 @@ func (s *Service) sendJSON(peerID string, protocolID coreprotocol.ID, v any) err
 	return tunnel.WriteJSONFrame(str, v)
 }
 
+func (s *Service) sendJSONConnectedOnly(peerID string, protocolID coreprotocol.ID, v any) error {
+	if s == nil || s.host == nil || peerID == "" {
+		return errors.New("peer not connected")
+	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return err
+	}
+	if !s.peerHasActiveConnection(pid) {
+		return errors.New("peer not connected")
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	defer cancel()
+	str, err := s.host.NewStream(ctx, pid, protocolID)
+	if err != nil {
+		return err
+	}
+	defer str.Close()
+	return tunnel.WriteJSONFrame(str, v)
+}
+
 func (s *Service) sendEnvelope(peerID string, v any) error {
 	protoID := protocolForEnvelope(v)
 	if err := s.sendJSON(peerID, protoID, v); err == nil {
 		return nil
 	}
 	return s.sendViaRelay(peerID, v)
+}
+
+func (s *Service) sendEnvelopeConnectedOnly(peerID string, v any) error {
+	protoID := protocolForEnvelope(v)
+	return s.sendJSONConnectedOnly(peerID, protoID, v)
 }
 
 func isProfileSyncEnvelope(v any) bool {
