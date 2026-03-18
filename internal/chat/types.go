@@ -6,6 +6,7 @@ const (
 	MessageTypeSessionRequest    = "session_request"
 	MessageTypeSessionAccept     = "session_accept"
 	MessageTypeSessionReject     = "session_reject"
+	MessageTypeProfileSync       = "profile_sync"
 	MessageTypeAvatarRequest     = "avatar_request"
 	MessageTypeAvatarResponse    = "avatar_response"
 	MessageTypeChatText          = "chat_text"
@@ -151,6 +152,16 @@ type SessionReject struct {
 	RequestID  string `json:"request_id"`
 	FromPeerID string `json:"from_peer_id"`
 	ToPeerID   string `json:"to_peer_id"`
+	SentAtUnix int64  `json:"sent_at_unix"`
+}
+
+type ProfileSync struct {
+	Type       string `json:"type"`
+	FromPeerID string `json:"from_peer_id"`
+	ToPeerID   string `json:"to_peer_id"`
+	Nickname   string `json:"nickname"`
+	Bio        string `json:"bio"`
+	AvatarName string `json:"avatar_name"`
 	SentAtUnix int64  `json:"sent_at_unix"`
 }
 

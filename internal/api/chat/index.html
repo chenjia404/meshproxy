@@ -2460,6 +2460,7 @@
         flashRefreshHint(newest && newest.direction === 'inbound' ? '检测到新的单聊消息' : '单聊消息已更新');
       }
       state.previousThreadCounts[key] = state.messages.length;
+      await refreshContacts();
     }
 
     async function refreshGroupThread() {
@@ -2479,6 +2480,7 @@
         flashRefreshHint(newest && newest.sender_peer_id !== state.me?.peer_id ? '检测到新的群消息' : '群消息已更新');
       }
       state.previousThreadCounts[key] = state.groupMessages.length;
+      await refreshContacts();
     }
 
     async function refreshCurrentThread() {

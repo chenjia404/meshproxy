@@ -37,6 +37,7 @@ type Service struct {
 	avatarDir string
 
 	autoConnectSeen sync.Map
+	profileSyncSeen sync.Map
 	avatarFetchSeen sync.Map
 }
 
@@ -45,6 +46,7 @@ const (
 	directAckWait        = 20 * time.Second
 	directSyncBatchSize  = 256
 	directAutoConnectTTL = 30 * time.Second
+	directProfileSyncTTL = 1 * time.Minute
 	directAvatarFetchTTL = 1 * time.Minute
 )
 
@@ -175,6 +177,67 @@ func (s *Service) requestAvatarFetch(peerID, avatarName string) {
 			log.Printf("[chat] request avatar fetch failed peer=%s avatar=%s err=%v", peerID, avatarName, err)
 		}
 	})
+}
+
+func (s *Service) maybeSyncProfile(peerID string) {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" || peerID == s.localPeer {
+		return
+	}
+	profile, err := s.GetProfile()
+	if err != nil {
+		return
+	}
+	key := peerID + "\x00" + profile.Nickname + "\x00" + profile.Bio + "\x00" + profile.Avatar
+	if last, ok := s.profileSyncSeen.Load(key); ok {
+		if ts, ok := last.(time.Time); ok && time.Since(ts) < directProfileSyncTTL {
+			return
+		}
+	}
+	s.profileSyncSeen.Store(key, time.Now())
+	safe.Go("chat.profileSync", func() {
+		wire := ProfileSync{
+			Type:       MessageTypeProfileSync,
+			FromPeerID: s.localPeer,
+			ToPeerID:   peerID,
+			Nickname:   profile.Nickname,
+			Bio:        profile.Bio,
+			AvatarName: profile.Avatar,
+			SentAtUnix: time.Now().UnixMilli(),
+		}
+		if err := s.sendEnvelope(peerID, wire); err != nil {
+			log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
+		}
+	})
+}
+
+func (s *Service) syncPeerAvatar(peerID string) {
+	contact, err := s.store.GetPeer(peerID)
+	if err != nil || contact.Avatar == "" {
+		return
+	}
+	s.requestAvatarFetch(peerID, contact.Avatar)
+}
+
+func (s *Service) handleProfileSync(sync ProfileSync) error {
+	if sync.ToPeerID != "" && sync.ToPeerID != s.localPeer {
+		return nil
+	}
+	if sync.FromPeerID == "" {
+		return nil
+	}
+	avatarName := NormalizeAvatarFileName(sync.AvatarName)
+	if err := s.store.UpsertPeer(sync.FromPeerID, sync.Nickname, sync.Bio); err != nil {
+		return err
+	}
+	if avatarName != "" {
+		if err := s.store.UpdatePeerAvatar(sync.FromPeerID, avatarName); err != nil {
+			return err
+		}
+		_ = s.store.UpdateRequestsAvatar(sync.FromPeerID, avatarName)
+		s.requestAvatarFetch(sync.FromPeerID, avatarName)
+	}
+	return nil
 }
 
 func (s *Service) loadAvatarData(fileName string) ([]byte, error) {
@@ -748,6 +811,8 @@ func (s *Service) OnPeerConnected(peerID string) {
 				log.Printf("[chat] immediate retry on connect msg=%s peer=%s failed: %v", item.MsgID, item.PeerID, err)
 			}
 		}
+		s.maybeSyncProfile(peerID)
+		s.syncPeerAvatar(peerID)
 		conv, err := s.store.GetConversationByPeer(peerID)
 		if err == nil {
 			if err := s.SyncConversation(conv.ConversationID); err != nil {
@@ -888,6 +953,14 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			return
 		}
 		_ = s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+	case MessageTypeProfileSync:
+		var sync ProfileSync
+		if err := remarshal(env, &sync); err != nil {
+			return
+		}
+		if err := s.handleProfileSync(sync); err != nil {
+			log.Printf("[chat] handle profile sync failed peer=%s err=%v", sync.FromPeerID, err)
+		}
 	case MessageTypeAvatarRequest:
 		var req AvatarRequest
 		if err := remarshal(env, &req); err != nil {
@@ -1035,11 +1108,32 @@ func (s *Service) sendJSON(peerID string, protocolID coreprotocol.ID, v any) err
 }
 
 func (s *Service) sendEnvelope(peerID string, v any) error {
+	if !isProfileSyncEnvelope(v) && !isAvatarEnvelope(v) {
+		s.maybeSyncProfile(peerID)
+	}
 	protoID := protocolForEnvelope(v)
 	if err := s.sendJSON(peerID, protoID, v); err == nil {
 		return nil
 	}
 	return s.sendViaRelay(peerID, v)
+}
+
+func isProfileSyncEnvelope(v any) bool {
+	switch v.(type) {
+	case ProfileSync, *ProfileSync:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAvatarEnvelope(v any) bool {
+	switch v.(type) {
+	case AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) sendViaRelay(peerID string, v any) error {
@@ -1106,7 +1200,7 @@ func (s *Service) buildRelayPath(targetPeerID string) ([]string, peer.ID, string
 
 func protocolForEnvelope(v any) coreprotocol.ID {
 	switch v.(type) {
-	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
+	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, ProfileSync, *ProfileSync, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
 		return p2p.ProtocolChatRequest
 	case ChatText, *ChatText:
 		return p2p.ProtocolChatMsg
@@ -1266,6 +1360,12 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+	case MessageTypeProfileSync:
+		var sync ProfileSync
+		if err := remarshal(env, &sync); err != nil {
+			return err
+		}
+		return s.handleProfileSync(sync)
 	case MessageTypeAvatarRequest:
 		var req AvatarRequest
 		if err := remarshal(env, &req); err != nil {
@@ -1389,6 +1489,12 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 			return err
 		}
 		return s.handleIncomingDeliveryAck(ack)
+	case MessageTypeProfileSync:
+		var sync ProfileSync
+		if err := remarshal(env, &sync); err != nil {
+			return err
+		}
+		return s.handleProfileSync(sync)
 	case MessageTypeAvatarRequest:
 		var req AvatarRequest
 		if err := remarshal(env, &req); err != nil {
