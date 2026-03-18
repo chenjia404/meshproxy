@@ -161,11 +161,17 @@ type LocalAPIOpts struct {
 	// ChatService provides first-stage direct chat APIs.
 	ChatService   ChatProvider
 	UpdateService UpdateProvider
+	UpdateSettings UpdateSettingsProvider
 }
 
 type UpdateProvider interface {
 	CheckForUpdate(ctx context.Context) (update.Info, error)
 	ApplyUpdate(ctx context.Context) (update.ApplyResult, error)
+}
+
+type UpdateSettingsProvider interface {
+	GetAutoUpdate() bool
+	SetAutoUpdate(enabled bool) error
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -271,6 +277,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
 	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
 	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
+	mux.HandleFunc("/api/v1/update/settings", api.handleUpdateSettings)
 	if opts != nil && opts.ExitService != nil && opts.ExitService.Policy != nil {
 		mux.HandleFunc("/api/v1/exit/policy", api.handleExitPolicy)
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
@@ -418,6 +425,36 @@ func (a *LocalAPI) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, result)
+}
+
+func (a *LocalAPI) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.UpdateSettings == nil {
+		http.Error(w, "update settings not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{
+			"auto_update": a.opts.UpdateSettings.GetAutoUpdate(),
+		})
+	case http.MethodPost:
+		var payload struct {
+			AutoUpdate bool `json:"auto_update"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.opts.UpdateSettings.SetAutoUpdate(payload.AutoUpdate); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"auto_update": a.opts.UpdateSettings.GetAutoUpdate(),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (a *LocalAPI) handleNodes(w http.ResponseWriter, r *http.Request) {

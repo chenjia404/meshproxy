@@ -64,6 +64,8 @@ type App struct {
 	bootstrapCache *relaycache.Cache
 	selfDesc       *discovery.NodeDescriptor
 	updater        *update.Service
+	autoUpdateMu   sync.RWMutex
+	autoUpdate     bool
 
 	peerExchangeOnce sync.Map
 	peerExchangeDial sync.Map
@@ -127,6 +129,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		relayCache:     relayCache,
 		bootstrapCache: bootstrapCache,
 		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
+		autoUpdate:     cfg.AutoUpdate,
 	}
 
 	// Identity
@@ -370,11 +373,14 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			ExitService:         exitSvc,
 			ChatService:         chatSvc,
 			UpdateService:       a,
+			UpdateSettings:      a,
 		}
 		localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, apiOpts)
 		localAPI.Start()
 		a.localAPI = localAPI
 	}
+
+	safe.Go("app.autoUpdateLoop", func() { a.runAutoUpdateLoop(ctx) })
 
 	return a, nil
 }
@@ -481,6 +487,77 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 		return update.ApplyResult{}, fmt.Errorf("updater not available")
 	}
 	return a.updater.Apply(ctx)
+}
+
+func (a *App) GetAutoUpdate() bool {
+	if a == nil {
+		return false
+	}
+	a.autoUpdateMu.RLock()
+	defer a.autoUpdateMu.RUnlock()
+	return a.autoUpdate
+}
+
+func (a *App) SetAutoUpdate(enabled bool) error {
+	if a == nil {
+		return fmt.Errorf("app is nil")
+	}
+	if a.cfg.ConfigFilePath != "" {
+		if err := config.SaveAutoUpdateSettings(a.cfg.ConfigFilePath, enabled); err != nil {
+			return err
+		}
+	}
+	a.autoUpdateMu.Lock()
+	a.autoUpdate = enabled
+	a.autoUpdateMu.Unlock()
+	if enabled {
+		safe.Go("app.autoUpdateTriggeredCheck", func() {
+			ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+			defer cancel()
+			a.autoUpdateOnce(ctx)
+		})
+	}
+	return nil
+}
+
+func (a *App) runAutoUpdateLoop(ctx context.Context) {
+	startupDelay := 90 * time.Second
+	period := 6 * time.Hour
+	timer := time.NewTimer(startupDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			a.autoUpdateOnce(ctx)
+			timer.Reset(period)
+		}
+	}
+}
+
+func (a *App) autoUpdateOnce(ctx context.Context) {
+	if a == nil || a.updater == nil || !a.GetAutoUpdate() {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	info, err := a.CheckForUpdate(checkCtx)
+	if err != nil {
+		log.Printf("[update] auto check failed: %v", err)
+		return
+	}
+	if !info.UpdateAvailable || !info.AssetAvailable {
+		return
+	}
+	applyCtx, applyCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer applyCancel()
+	result, err := a.ApplyUpdate(applyCtx)
+	if err != nil {
+		log.Printf("[update] auto apply failed: %v", err)
+		return
+	}
+	log.Printf("[update] auto update scheduled: status=%s restart=%v version=%s", result.Status, result.RestartScheduled, result.LatestVersion)
 }
 
 // Host returns the underlying libp2p host, mainly for internal usage.

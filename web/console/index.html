@@ -87,6 +87,37 @@
     .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
     .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+    .update-settings {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-top: 0.8rem;
+      padding: 0.75rem;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .update-settings label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.88rem;
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+    }
+    .update-settings input[type=checkbox] {
+      width: 1rem;
+      height: 1rem;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .update-settings .hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
     .update-note { white-space: pre-wrap; font-size: 0.82rem; color: var(--muted); margin-top: 0.6rem; }
     .exit-candidates { margin-top: 1rem; }
     .exit-candidates table { font-size: 0.8rem; }
@@ -271,6 +302,12 @@
       '当前可选出口': 'Available exits',
       '暂无符合当前规则的出口节点，或尚未发现任何 Exit。': 'No exits match the current rules, or no exits have been discovered yet.',
       '已保存出口选择设置。': 'Exit selection saved.',
+      '自动更新': 'Auto Update',
+      '正在读取自动更新设置…': 'Loading auto-update settings…',
+      '开启后会定期检查 GitHub，并在发现新版本后自动下载安装。': 'When enabled, it periodically checks GitHub and automatically downloads and installs new releases.',
+      '关闭后只保留手动检查与手动更新。': 'When disabled, only manual check and manual update remain.',
+      '自动更新设置不可用': 'Auto-update settings unavailable',
+      '保存自动更新设置失败: ': 'Failed to save auto-update settings: ',
       '出口政策': 'Exit Policy',
       '运行状态': 'Runtime Status',
       '维护模式 (drain)': 'Drain Mode',
@@ -355,6 +392,7 @@
     }
 
     var lastUpdateInfo = null;
+    var lastAutoUpdateEnabled = null;
 
     function renderUpdateInfo(info, applying) {
       if (!info) return '<p class="empty">点击按钮后会从 GitHub 检查最新 release。</p>';
@@ -378,6 +416,56 @@
         html = '<div class="msg ok">更新包已下载，节点即将重启到新版本。</div>' + html;
       }
       return html;
+    }
+
+    function renderAutoUpdateSettings(enabled) {
+      if (enabled === null || enabled === undefined) {
+        return '<div class="update-settings" id="update-settings"><label><input type="checkbox" id="auto-update-toggle" disabled> 自动更新</label><span class="hint">正在读取自动更新设置…</span></div>';
+      }
+      return '<div class="update-settings" id="update-settings">' +
+        '<label><input type="checkbox" id="auto-update-toggle"' + (enabled ? ' checked' : '') + '> 自动更新</label>' +
+        '<span class="hint">' + escapeHtml(enabled ? '开启后会定期检查 GitHub，并在发现新版本后自动下载安装。' : '关闭后只保留手动检查与手动更新。') + '</span>' +
+        '</div>';
+    }
+
+    function refreshAutoUpdateSettings() {
+      return get('/api/v1/update/settings').then(function(info) {
+        lastAutoUpdateEnabled = !!(info && info.auto_update);
+        var box = document.getElementById('update-settings');
+        if (!box) return info;
+        box.outerHTML = renderAutoUpdateSettings(lastAutoUpdateEnabled);
+        bindAutoUpdateToggle();
+        return info;
+      }).catch(function() {
+        var box = document.getElementById('update-settings');
+        if (box) {
+          box.outerHTML = '<div class="update-settings" id="update-settings"><label><input type="checkbox" id="auto-update-toggle" disabled> 自动更新</label><span class="hint">自动更新设置不可用</span></div>';
+        }
+      });
+    }
+
+    function bindAutoUpdateToggle() {
+      var toggle = document.getElementById('auto-update-toggle');
+      if (!toggle) return;
+      toggle.onchange = function() {
+        var enabled = !!toggle.checked;
+        toggle.disabled = true;
+        post('/api/v1/update/settings', { auto_update: enabled }).then(function(info) {
+          lastAutoUpdateEnabled = !!(info && info.auto_update);
+          var box = document.getElementById('update-settings');
+          if (box) {
+            box.outerHTML = renderAutoUpdateSettings(lastAutoUpdateEnabled);
+            bindAutoUpdateToggle();
+          }
+        }).catch(function(err) {
+          alert('保存自动更新设置失败: ' + err.message);
+          var box = document.getElementById('update-settings');
+          if (box) {
+            box.outerHTML = renderAutoUpdateSettings(lastAutoUpdateEnabled);
+            bindAutoUpdateToggle();
+          }
+        });
+      };
     }
 
     function bindUpdateControls() {
@@ -424,6 +512,7 @@
         ? '<dl class="kv"><dt>电路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(pool.kinds, null, 2) + '</pre></dd></dl>'
         : '';
       setTimeout(bindUpdateControls, 0);
+      setTimeout(refreshAutoUpdateSettings, 0);
       return '<h1>节点状态</h1><div class="card"><h3>基本信息</h3><dl class="kv">' +
         '<dt>Peer ID</dt><dd><code>' + escapeHtml(data.peer_id || '-') + '</code></dd>' +
         '<dt>模式</dt><dd><span class="badge ok">' + escapeHtml(data.mode || '-') + '</span></dd>' +
@@ -432,7 +521,7 @@
         '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
         '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
         '<dt>P2P 监听</dt><dd><pre style="margin:0;font-size:0.8rem">' + (data.p2p_listen_addrs || []).map(escapeHtml).join('\n') + '</pre></dd></dl>' + poolHtml + '</div>' +
-        '<div class="card"><h3>程序更新</h3><div id="update-result">' + renderUpdateInfo(lastUpdateInfo, false) + '</div><div class="actions"><button class="btn btn-primary" id="check-update-btn">检查更新</button><button class="btn btn-secondary" id="apply-update-btn">立即更新</button></div></div>';
+        '<div class="card"><h3>程序更新</h3><div id="update-result">' + renderUpdateInfo(lastUpdateInfo, false) + '</div>' + renderAutoUpdateSettings(lastAutoUpdateEnabled) + '<div class="actions"><button class="btn btn-primary" id="check-update-btn">检查更新</button><button class="btn btn-secondary" id="apply-update-btn">立即更新</button></div></div>';
     }
     function renderNodeTable(list, title) {
       if (!list.length) return '<div class="card"><h3>' + title + '</h3><p class="empty">尚无节点</p></div>';

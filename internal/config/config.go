@@ -40,6 +40,10 @@ type Config struct {
 	// API configures the local management HTTP API.
 	API APIConfig `yaml:"api"`
 
+	// AutoUpdate controls whether meshproxy periodically checks GitHub releases
+	// and automatically applies updates when a newer compatible asset is found.
+	AutoUpdate bool `yaml:"auto_update"`
+
 	// CircuitPool configures pre-built circuit pool (low latency / anonymous / country).
 	CircuitPool CircuitPoolConfig `yaml:"circuit_pool"`
 
@@ -223,6 +227,7 @@ func Default() Config {
 		API: APIConfig{
 			Listen: "127.0.0.1:19080",
 		},
+		AutoUpdate: true,
 		CircuitPool: CircuitPoolConfig{
 			MinPerPool:               1,
 			MaxPerPool:               3,
@@ -479,5 +484,18 @@ func SaveCircuitPoolConfig(path string, cp CircuitPoolConfig) error {
 		return fmt.Errorf("load config for save: %w", err)
 	}
 	c.CircuitPool = cp
+	return Write(path, &c)
+}
+
+// SaveAutoUpdateSettings updates the root auto_update flag and persists it to the config file.
+func SaveAutoUpdateSettings(path string, enabled bool) error {
+	if path == "" {
+		return nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.AutoUpdate = enabled
 	return Write(path, &c)
 }
