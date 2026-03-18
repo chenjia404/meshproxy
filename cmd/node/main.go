@@ -29,6 +29,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
+	baseDataDir := cfg.DataDir
+	baseIdentityKeyPath := cfg.IdentityKeyPath
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.SetOutput(os.Stderr)
@@ -38,6 +40,12 @@ func main() {
 	}
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		log.Fatalf("parse flags failed: %v", err)
+	}
+	if flagWasSet(fs, "data_dir") && !flagWasSet(fs, "identity_key_path") && baseIdentityKeyPath == filepath.Join(baseDataDir, "identity.key") {
+		cfg.IdentityKeyPath = filepath.Join(cfg.DataDir, "identity.key")
+	}
+	if err := cfg.Normalize(); err != nil {
+		log.Fatalf("normalize config failed: %v", err)
 	}
 	cfg.ConfigFilePath = *cfgFileFlag
 	if err := cfg.Validate(); err != nil {
@@ -65,6 +73,16 @@ func main() {
 	}
 
 	log.Printf("meshproxy stopped, uptime=%s", time.Since(application.StartTime()).String())
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	wasSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			wasSet = true
+		}
+	})
+	return wasSet
 }
 
 func findConfigPath(args []string, fallback string) string {

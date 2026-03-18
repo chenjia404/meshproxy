@@ -265,109 +265,111 @@ func main() {
 
 下面是 `sdk.RegisterFlags(...)` 目前自动映射出来的参数。数组类型用英文逗号分隔。
 
+默认值来自 `config.Default()`，并在启动后做一次归一化。`identity_key_path` 会按 `data_dir` 派生为 `<data_dir>/identity.key`；如果你在命令行里只改了 `--data_dir`，程序也会跟着重算默认身份路径。
+
 ### 顶层参数
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--config` | string | 配置文件路径 |
-| `--mode` | string | 节点模式，`relay` 或 `relay+exit` |
-| `--data_dir` | string | 数据目录 |
-| `--identity_key_path` | string | 身份私钥路径 |
-| `--auto_update` | bool | 是否开启自动更新 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--config` | string | `config.yaml` | 配置文件路径 |
+| `--mode` | string | `relay` | 节点模式，`relay` 或 `relay+exit` |
+| `--data_dir` | string | `data` | 数据目录 |
+| `--identity_key_path` | string | `<data_dir>/identity.key` | 身份私钥路径 |
+| `--auto_update` | bool | `true` | 是否开启自动更新 |
 
 ### P2P
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--p2p.listen_addrs` | []string | libp2p 监听地址 |
-| `--p2p.bootstrap_peers` | []string | 启动时连接的 bootstrap peers |
-| `--p2p.nodisc` | bool | 关闭 DHT rendezvous 发现 |
-| `--p2p.discovery_tag` | string | 发现标签 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--p2p.listen_addrs` | []string | `/ip4/0.0.0.0/tcp/4001,/ip6/::/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1,/ip6/::/udp/4001/quic-v1` | libp2p 监听地址 |
+| `--p2p.bootstrap_peers` | []string | 5 个内置 bootstrap peers | 启动时连接的 bootstrap peers |
+| `--p2p.nodisc` | bool | `false` | 关闭 DHT rendezvous 发现 |
+| `--p2p.discovery_tag` | string | `meshproxy` | 发现标签 |
 
 ### SOCKS5
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--socks5.listen` | string | 本地 SOCKS5 监听地址 |
-| `--socks5.tunnel_to_exit` | bool | 是否透传到 exit 的 SOCKS5 |
-| `--socks5.exit_upstream` | string | exit 节点上游 SOCKS5 地址 |
-| `--socks5.allow_udp_associate` | bool | 是否允许 UDP ASSOCIATE |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--socks5.listen` | string | `127.0.0.1:1080` | 本地 SOCKS5 监听地址 |
+| `--socks5.tunnel_to_exit` | bool | `true` | 是否透传到 exit 的 SOCKS5 |
+| `--socks5.exit_upstream` | string | `127.0.0.1:1081` | exit 节点上游 SOCKS5 地址 |
+| `--socks5.allow_udp_associate` | bool | `true` | 是否允许 UDP ASSOCIATE |
 
 ### API
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--api.listen` | string | 本地 API 监听地址 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--api.listen` | string | `127.0.0.1:19080` | 本地 API 监听地址 |
 
 ### CircuitPool
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--circuit_pool.min_per_pool` | int | 每个池最小电路数 |
-| `--circuit_pool.max_per_pool` | int | 每个池最大电路数 |
-| `--circuit_pool.min_total` | int | 总最小电路数 |
-| `--circuit_pool.max_total` | int | 总最大电路数 |
-| `--circuit_pool.idle_timeout_seconds` | int | 空闲电路超时时间 |
-| `--circuit_pool.replenish_interval_seconds` | int | 池维护周期 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--circuit_pool.min_per_pool` | int | `1` | 每个池最小电路数 |
+| `--circuit_pool.max_per_pool` | int | `3` | 每个池最大电路数 |
+| `--circuit_pool.min_total` | int | `3` | 总最小电路数 |
+| `--circuit_pool.max_total` | int | `5` | 总最大电路数 |
+| `--circuit_pool.idle_timeout_seconds` | int | `300` | 空闲电路超时时间 |
+| `--circuit_pool.replenish_interval_seconds` | int | `30` | 池维护周期 |
 
 ### Client
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--client.build_retries` | int | 构建 circuit 的重试次数 |
-| `--client.begin_tcp_retries` | int | BEGIN_TCP 重试次数 |
-| `--client.begin_connect_timeout_seconds` | int | 等待 CONNECTED 的超时 |
-| `--client.heartbeat_enabled` | bool | 是否启用心跳 |
-| `--client.heartbeat_interval_seconds` | int | 心跳间隔 |
-| `--client.heartbeat_timeout_seconds` | int | 心跳超时 |
-| `--client.heartbeat_failure_threshold` | int | 心跳失败阈值 |
-| `--client.skip_heartbeat_when_active_seconds` | int | 最近有流量时跳过心跳的秒数 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--client.build_retries` | int | `1` | 构建 circuit 的重试次数 |
+| `--client.begin_tcp_retries` | int | `1` | BEGIN_TCP 重试次数 |
+| `--client.begin_connect_timeout_seconds` | int | `30` | 等待 CONNECTED 的超时 |
+| `--client.heartbeat_enabled` | bool | `true` | 是否启用心跳 |
+| `--client.heartbeat_interval_seconds` | int | `30` | 心跳间隔 |
+| `--client.heartbeat_timeout_seconds` | int | `8` | 心跳超时 |
+| `--client.heartbeat_failure_threshold` | int | `5` | 心跳失败阈值 |
+| `--client.skip_heartbeat_when_active_seconds` | int | `30` | 最近有流量时跳过心跳的秒数 |
 
 ### Client Exit Selection
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--client.exit_selection.mode` | string | exit 选择策略 |
-| `--client.exit_selection.allowed_countries` | []string | 允许国家 |
-| `--client.exit_selection.preferred_countries` | []string | 优先国家 |
-| `--client.exit_selection.fixed_exit_peer_id` | string | 固定 exit peer |
-| `--client.exit_selection.exclude_countries` | []string | 排除国家 |
-| `--client.exit_selection.exclude_peer_ids` | []string | 排除 peer |
-| `--client.exit_selection.require_remote_dns` | bool | 是否要求远端 DNS |
-| `--client.exit_selection.require_tcp_support` | bool | 是否要求 TCP 支持 |
-| `--client.exit_selection.fallback_to_any` | bool | 是否允许回退到任意 exit |
-| `--client.exit_selection.allow_direct_exit` | bool | 是否允许直连出口 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--client.exit_selection.mode` | string | `auto` | exit 选择策略 |
+| `--client.exit_selection.allowed_countries` | []string | 空 | 允许国家 |
+| `--client.exit_selection.preferred_countries` | []string | 空 | 优先国家 |
+| `--client.exit_selection.fixed_exit_peer_id` | string | 空 | 固定 exit peer |
+| `--client.exit_selection.exclude_countries` | []string | 空 | 排除国家 |
+| `--client.exit_selection.exclude_peer_ids` | []string | 空 | 排除 peer |
+| `--client.exit_selection.require_remote_dns` | bool | `false` | 是否要求远端 DNS |
+| `--client.exit_selection.require_tcp_support` | bool | `true` | 是否要求 TCP 支持 |
+| `--client.exit_selection.fallback_to_any` | bool | `true` | 是否允许回退到任意 exit |
+| `--client.exit_selection.allow_direct_exit` | bool | `true` | 是否允许直连出口 |
 
 ### Client GeoIP
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--client.geoip.provider` | string | GeoIP 提供方 |
-| `--client.geoip.cache_ttl_minutes` | int | GeoIP 缓存时间 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--client.geoip.provider` | string | `none` | GeoIP 提供方 |
+| `--client.geoip.cache_ttl_minutes` | int | `1440` | GeoIP 缓存时间 |
 
 ### Exit
 
-> `--exit.*` 只有在需要出口策略配置时才会用到；如果 `mode=relay+exit` 且未显式配置 `exit`，程序会使用内置默认值。
+> `--exit.*` 只有在需要出口策略配置时才会用到；如果 `mode=relay+exit` 且未显式配置 `exit`，程序会生成下面这组默认值。
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--exit.enabled` | bool | 是否启用出口配置 |
-| `--exit.policy.allow_tcp` | bool | 是否允许 TCP |
-| `--exit.policy.allow_udp` | bool | 是否允许 UDP |
-| `--exit.policy.remote_dns` | bool | 是否允许远端 DNS |
-| `--exit.policy.allowed_ports` | []int | 允许端口 |
-| `--exit.policy.denied_ports` | []int | 拒绝端口 |
-| `--exit.policy.allowed_domains` | []string | 允许域名 |
-| `--exit.policy.denied_domains` | []string | 拒绝域名 |
-| `--exit.policy.allowed_domain_suffixes` | []string | 允许域名后缀 |
-| `--exit.policy.denied_domain_suffixes` | []string | 拒绝域名后缀 |
-| `--exit.policy.peer_whitelist` | []string | peer 白名单 |
-| `--exit.policy.peer_blacklist` | []string | peer 黑名单 |
-| `--exit.policy.allow_private_ip_targets` | bool | 是否允许私网目标 |
-| `--exit.policy.allow_loopback_targets` | bool | 是否允许回环目标 |
-| `--exit.policy.allow_link_local_targets` | bool | 是否允许链路本地目标 |
-| `--exit.runtime.drain_mode` | bool | 是否进入排空模式 |
-| `--exit.runtime.accept_new_streams` | bool | 是否接受新流 |
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--exit.enabled` | bool | `true` | 是否启用出口配置 |
+| `--exit.policy.allow_tcp` | bool | `true` | 是否允许 TCP |
+| `--exit.policy.allow_udp` | bool | `false` | 是否允许 UDP |
+| `--exit.policy.remote_dns` | bool | `true` | 是否允许远端 DNS |
+| `--exit.policy.allowed_ports` | []int | `80,443,8080` | 允许端口 |
+| `--exit.policy.denied_ports` | []int | `25,465,587,22,3389` | 拒绝端口 |
+| `--exit.policy.allowed_domains` | []string | 空 | 允许域名 |
+| `--exit.policy.denied_domains` | []string | 空 | 拒绝域名 |
+| `--exit.policy.allowed_domain_suffixes` | []string | 空 | 允许域名后缀 |
+| `--exit.policy.denied_domain_suffixes` | []string | 空 | 拒绝域名后缀 |
+| `--exit.policy.peer_whitelist` | []string | 空 | peer 白名单 |
+| `--exit.policy.peer_blacklist` | []string | 空 | peer 黑名单 |
+| `--exit.policy.allow_private_ip_targets` | bool | `false` | 是否允许私网目标 |
+| `--exit.policy.allow_loopback_targets` | bool | `false` | 是否允许回环目标 |
+| `--exit.policy.allow_link_local_targets` | bool | `false` | 是否允许链路本地目标 |
+| `--exit.runtime.drain_mode` | bool | `false` | 是否进入排空模式 |
+| `--exit.runtime.accept_new_streams` | bool | `true` | 是否接受新流 |
 
 ## 检查更新
 

@@ -288,10 +288,15 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unmarshal yaml: %w", err)
 	}
 
-	if err := cfg.postProcess(); err != nil {
+	if err := cfg.Normalize(); err != nil {
 		return Config{}, err
 	}
 	return cfg, cfg.Validate()
+}
+
+// Normalize fills derived fields and defaults that depend on others.
+func (c *Config) Normalize() error {
+	return c.postProcess()
 }
 
 // postProcess fills derived fields and defaults that depend on others.
