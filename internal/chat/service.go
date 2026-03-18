@@ -211,6 +211,13 @@ func (s *Service) maybeSyncProfile(peerID string) {
 	if peerID == "" || peerID == s.localPeer {
 		return
 	}
+	pid, err := peer.Decode(peerID)
+	if err != nil {
+		return
+	}
+	if s.host == nil || s.host.Network().Connectedness(pid) != network.Connected {
+		return
+	}
 	if !s.chatRequestProbeAllowed(peerID) {
 		return
 	}
@@ -1256,9 +1263,6 @@ func (s *Service) sendJSON(peerID string, protocolID coreprotocol.ID, v any) err
 }
 
 func (s *Service) sendEnvelope(peerID string, v any) error {
-	if !isProfileSyncEnvelope(v) && !isAvatarEnvelope(v) {
-		s.maybeSyncProfile(peerID)
-	}
 	protoID := protocolForEnvelope(v)
 	if err := s.sendJSON(peerID, protoID, v); err == nil {
 		return nil
