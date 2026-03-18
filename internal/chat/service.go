@@ -37,6 +37,7 @@ type Service struct {
 	avatarDir string
 
 	autoConnectSeen sync.Map
+	avatarFetchSeen sync.Map
 }
 
 const (
@@ -44,6 +45,7 @@ const (
 	directAckWait        = 20 * time.Second
 	directSyncBatchSize  = 256
 	directAutoConnectTTL = 30 * time.Second
+	directAvatarFetchTTL = 1 * time.Minute
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -113,20 +115,24 @@ func (s *Service) AvatarPath(fileName string) (string, error) {
 	return AvatarPath(s.avatarDir, fileName)
 }
 
-func (s *Service) profileAvatarPayload() (string, []byte) {
+func (s *Service) avatarExists(fileName string) bool {
+	if fileName == "" {
+		return false
+	}
+	path, err := s.AvatarPath(fileName)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+func (s *Service) profileAvatarName() string {
 	profile, _, err := s.store.GetProfile(s.localPeer)
-	if err != nil || profile.Avatar == "" {
-		return "", nil
-	}
-	path, err := s.AvatarPath(profile.Avatar)
 	if err != nil {
-		return "", nil
+		return ""
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", nil
-	}
-	return profile.Avatar, data
+	return profile.Avatar
 }
 
 func (s *Service) persistAvatarPayload(fileName string, data []byte) (string, error) {
@@ -134,7 +140,95 @@ func (s *Service) persistAvatarPayload(fileName string, data []byte) (string, er
 	if len(data) == 0 {
 		return fileName, nil
 	}
+	if path, err := AvatarPath(s.avatarDir, fileName); err == nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			return fileName, nil
+		}
+	}
 	return SaveAvatarFile(s.avatarDir, fileName, data)
+}
+
+func (s *Service) requestAvatarFetch(peerID, avatarName string) {
+	avatarName = NormalizeAvatarFileName(avatarName)
+	if peerID == "" || avatarName == "" {
+		return
+	}
+	if s.avatarExists(avatarName) {
+		return
+	}
+	key := peerID + "\x00" + avatarName
+	if last, ok := s.avatarFetchSeen.Load(key); ok {
+		if ts, ok := last.(time.Time); ok && time.Since(ts) < directAvatarFetchTTL {
+			return
+		}
+	}
+	s.avatarFetchSeen.Store(key, time.Now())
+	safe.Go("chat.avatarFetch", func() {
+		req := AvatarRequest{
+			Type:       MessageTypeAvatarRequest,
+			FromPeerID: s.localPeer,
+			ToPeerID:   peerID,
+			AvatarName: avatarName,
+			SentAtUnix: time.Now().UnixMilli(),
+		}
+		if err := s.sendEnvelope(peerID, req); err != nil {
+			log.Printf("[chat] request avatar fetch failed peer=%s avatar=%s err=%v", peerID, avatarName, err)
+		}
+	})
+}
+
+func (s *Service) loadAvatarData(fileName string) ([]byte, error) {
+	path, err := s.AvatarPath(fileName)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+func (s *Service) handleAvatarRequest(req AvatarRequest) error {
+	if req.ToPeerID != "" && req.ToPeerID != s.localPeer {
+		return nil
+	}
+	if req.FromPeerID == "" || req.AvatarName == "" {
+		return nil
+	}
+	data, err := s.loadAvatarData(req.AvatarName)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	resp := AvatarResponse{
+		Type:       MessageTypeAvatarResponse,
+		FromPeerID: s.localPeer,
+		ToPeerID:   req.FromPeerID,
+		AvatarName: NormalizeAvatarFileName(req.AvatarName),
+		AvatarData: data,
+		SentAtUnix: time.Now().UnixMilli(),
+	}
+	return s.sendEnvelope(req.FromPeerID, resp)
+}
+
+func (s *Service) handleAvatarResponse(resp AvatarResponse) error {
+	if resp.ToPeerID != "" && resp.ToPeerID != s.localPeer {
+		return nil
+	}
+	avatarName := NormalizeAvatarFileName(resp.AvatarName)
+	if avatarName == "" {
+		return nil
+	}
+	if len(resp.AvatarData) == 0 && !s.avatarExists(avatarName) {
+		return errors.New("avatar response is empty")
+	}
+	avatarName, err := s.persistAvatarPayload(avatarName, resp.AvatarData)
+	if err != nil || avatarName == "" {
+		return err
+	}
+	if resp.FromPeerID == "" {
+		return nil
+	}
+	_ = s.store.UpsertPeer(resp.FromPeerID, "", "")
+	_ = s.store.UpdatePeerAvatar(resp.FromPeerID, avatarName)
+	_ = s.store.UpdateRequestsAvatar(resp.FromPeerID, avatarName)
+	return nil
 }
 
 func (s *Service) ListRequests() ([]Request, error) {
@@ -313,7 +407,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	if err != nil {
 		return Request{}, err
 	}
-	avatarName, avatarData := s.profileAvatarPayload()
+	avatarName := profile.Avatar
 	retentionMinutes := 0
 	if conv, err := s.store.GetConversationByPeer(toPeerID); err == nil {
 		retentionMinutes = conv.RetentionMinutes
@@ -343,7 +437,6 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		Nickname:         profile.Nickname,
 		Bio:              profile.Bio,
 		AvatarName:       avatarName,
-		AvatarData:       avatarData,
 		RetentionMinutes: retentionMinutes,
 		IntroText:        req.IntroText,
 		ChatKexPub:       profile.ChatKexPub,
@@ -372,7 +465,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	if err != nil {
 		return Conversation{}, err
 	}
-	avatarName, avatarData := s.profileAvatarPayload()
+	avatarName := profile.Avatar
 	retentionMinutes := req.RetentionMinutes
 	if existingConv, err := s.store.GetConversationByPeer(req.FromPeerID); err == nil {
 		if existingConv.RetentionMinutes > retentionMinutes {
@@ -396,7 +489,6 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 				ToPeerID:         req.FromPeerID,
 				Bio:              profile.Bio,
 				AvatarName:       avatarName,
-				AvatarData:       avatarData,
 				RetentionMinutes: retentionMinutes,
 				ChatKexPub:       profile.ChatKexPub,
 				SentAtUnix:       time.Now().UnixMilli(),
@@ -446,7 +538,6 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		ToPeerID:         req.FromPeerID,
 		Bio:              profile.Bio,
 		AvatarName:       avatarName,
-		AvatarData:       avatarData,
 		RetentionMinutes: retentionMinutes,
 		ChatKexPub:       profile.ChatKexPub,
 		SentAtUnix:       time.Now().UnixMilli(),
@@ -705,11 +796,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
 			return
 		}
-		avatarName, err := s.persistAvatarPayload(req.AvatarName, req.AvatarData)
-		if err != nil {
-			log.Printf("[chat] persist request avatar failed: %v", err)
-			return
-		}
+		avatarName := NormalizeAvatarFileName(req.AvatarName)
 		stored := Request{
 			RequestID:         req.RequestID,
 			FromPeerID:        req.FromPeerID,
@@ -728,6 +815,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
+			s.requestAvatarFetch(req.FromPeerID, avatarName)
 		}
 		if err := s.store.UpsertIncomingRequest(stored); err != nil {
 			log.Printf("[chat] save request failed: %v", err)
@@ -737,15 +825,12 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if err := remarshal(env, &accept); err != nil {
 			return
 		}
-		avatarName, err := s.persistAvatarPayload(accept.AvatarName, accept.AvatarData)
-		if err != nil {
-			log.Printf("[chat] persist accept avatar failed: %v", err)
-			return
-		}
+		avatarName := NormalizeAvatarFileName(accept.AvatarName)
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
 			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 			if avatarName != "" {
 				_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
+				s.requestAvatarFetch(accept.FromPeerID, avatarName)
 			}
 			targetRetention := accept.RetentionMinutes
 			if existingConv.RetentionMinutes > targetRetention {
@@ -789,6 +874,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
 			_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
+			s.requestAvatarFetch(accept.FromPeerID, avatarName)
 		}
 		if accept.RetentionMinutes > 0 {
 			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
@@ -802,6 +888,24 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			return
 		}
 		_ = s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+	case MessageTypeAvatarRequest:
+		var req AvatarRequest
+		if err := remarshal(env, &req); err != nil {
+			return
+		}
+		safe.Go("chat.avatarRequest", func() {
+			if err := s.handleAvatarRequest(req); err != nil {
+				log.Printf("[chat] handle avatar request failed peer=%s avatar=%s err=%v", req.FromPeerID, req.AvatarName, err)
+			}
+		})
+	case MessageTypeAvatarResponse:
+		var resp AvatarResponse
+		if err := remarshal(env, &resp); err != nil {
+			return
+		}
+		if err := s.handleAvatarResponse(resp); err != nil {
+			log.Printf("[chat] handle avatar response failed peer=%s avatar=%s err=%v", resp.FromPeerID, resp.AvatarName, err)
+		}
 	}
 }
 
@@ -1002,7 +1106,7 @@ func (s *Service) buildRelayPath(targetPeerID string) ([]string, peer.ID, string
 
 func protocolForEnvelope(v any) coreprotocol.ID {
 	switch v.(type) {
-	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject:
+	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
 		return p2p.ProtocolChatRequest
 	case ChatText, *ChatText:
 		return p2p.ProtocolChatMsg
@@ -1076,10 +1180,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
 			return nil
 		}
-		avatarName, err := s.persistAvatarPayload(req.AvatarName, req.AvatarData)
-		if err != nil {
-			return err
-		}
+		avatarName := NormalizeAvatarFileName(req.AvatarName)
 		stored := Request{
 			RequestID:         req.RequestID,
 			FromPeerID:        req.FromPeerID,
@@ -1097,6 +1198,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
+			s.requestAvatarFetch(req.FromPeerID, avatarName)
 		}
 		return s.store.UpsertIncomingRequest(stored)
 	case MessageTypeSessionAccept:
@@ -1104,15 +1206,13 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &accept); err != nil {
 			return err
 		}
-		avatarName, err := s.persistAvatarPayload(accept.AvatarName, accept.AvatarData)
-		if err != nil {
-			return err
-		}
+		avatarName := NormalizeAvatarFileName(accept.AvatarName)
 		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
 			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 			if avatarName != "" {
 				_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
 				_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
+				s.requestAvatarFetch(accept.FromPeerID, avatarName)
 			}
 			targetRetention := accept.RetentionMinutes
 			if existingConv.RetentionMinutes > targetRetention {
@@ -1152,6 +1252,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
 			_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
+			s.requestAvatarFetch(accept.FromPeerID, avatarName)
 		}
 		if accept.RetentionMinutes > 0 {
 			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
@@ -1165,6 +1266,18 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+	case MessageTypeAvatarRequest:
+		var req AvatarRequest
+		if err := remarshal(env, &req); err != nil {
+			return err
+		}
+		return s.handleAvatarRequest(req)
+	case MessageTypeAvatarResponse:
+		var resp AvatarResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		return s.handleAvatarResponse(resp)
 	case MessageTypeChatText, MessageTypeGroupInviteNote:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {
@@ -1276,6 +1389,18 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 			return err
 		}
 		return s.handleIncomingDeliveryAck(ack)
+	case MessageTypeAvatarRequest:
+		var req AvatarRequest
+		if err := remarshal(env, &req); err != nil {
+			return err
+		}
+		return s.handleAvatarRequest(req)
+	case MessageTypeAvatarResponse:
+		var resp AvatarResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		return s.handleAvatarResponse(resp)
 	default:
 		return nil
 	}

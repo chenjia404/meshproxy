@@ -969,6 +969,12 @@ func (s *Store) UpdateRequestAvatar(requestID, avatar string) error {
 	return err
 }
 
+func (s *Store) UpdateRequestsAvatar(peerID, avatar string) error {
+	_, err := s.db.Exec(`UPDATE requests SET avatar=?, updated_at=? WHERE from_peer_id=? OR to_peer_id=?`,
+		strings.TrimSpace(avatar), time.Now().UTC().Format(time.RFC3339Nano), peerID, peerID)
+	return err
+}
+
 func (s *Store) UpdateRequestState(requestID, state, conversationID string) error {
 	_, err := s.db.Exec(`UPDATE requests SET state=?, conversation_id=?, updated_at=? WHERE request_id=?`,
 		state, conversationID, time.Now().UTC().Format(time.RFC3339Nano), requestID)

@@ -6,6 +6,8 @@ const (
 	MessageTypeSessionRequest    = "session_request"
 	MessageTypeSessionAccept     = "session_accept"
 	MessageTypeSessionReject     = "session_reject"
+	MessageTypeAvatarRequest     = "avatar_request"
+	MessageTypeAvatarResponse    = "avatar_response"
 	MessageTypeChatText          = "chat_text"
 	MessageTypeChatFile          = "chat_file"
 	MessageTypeGroupInviteNote   = "group_invite_notice"
@@ -125,7 +127,6 @@ type SessionRequest struct {
 	Nickname         string `json:"nickname"`
 	Bio              string `json:"bio"`
 	AvatarName       string `json:"avatar_name"`
-	AvatarData       []byte `json:"avatar_data,omitempty"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	IntroText        string `json:"intro_text"`
 	ChatKexPub       string `json:"chat_kex_pub"`
@@ -140,7 +141,6 @@ type SessionAccept struct {
 	ToPeerID         string `json:"to_peer_id"`
 	Bio              string `json:"bio"`
 	AvatarName       string `json:"avatar_name"`
-	AvatarData       []byte `json:"avatar_data,omitempty"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	ChatKexPub       string `json:"chat_kex_pub"`
 	SentAtUnix       int64  `json:"sent_at_unix"`
@@ -151,6 +151,23 @@ type SessionReject struct {
 	RequestID  string `json:"request_id"`
 	FromPeerID string `json:"from_peer_id"`
 	ToPeerID   string `json:"to_peer_id"`
+	SentAtUnix int64  `json:"sent_at_unix"`
+}
+
+type AvatarRequest struct {
+	Type       string `json:"type"`
+	FromPeerID string `json:"from_peer_id"`
+	ToPeerID   string `json:"to_peer_id"`
+	AvatarName string `json:"avatar_name"`
+	SentAtUnix int64  `json:"sent_at_unix"`
+}
+
+type AvatarResponse struct {
+	Type       string `json:"type"`
+	FromPeerID string `json:"from_peer_id"`
+	ToPeerID   string `json:"to_peer_id"`
+	AvatarName string `json:"avatar_name"`
+	AvatarData []byte `json:"avatar_data,omitempty"`
 	SentAtUnix int64  `json:"sent_at_unix"`
 }
 
