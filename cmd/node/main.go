@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,35 +20,26 @@ import (
 func main() {
 	defer safe.Recover("main")
 
-	cfgPath := flag.String("config", "config.yaml", "path to config file (default: config.yaml in current directory)")
-	modeFlag := flag.String("mode", "", "override node mode (relay or relay+exit)")
-	socksAddrFlag := flag.String("socks5", "", "override local SOCKS5 listen address, e.g. 127.0.0.1:1080")
-	apiAddrFlag := flag.String("api", "", "override local API listen address, e.g. 127.0.0.1:19080")
-	noDiscFlag := flag.Bool("nodisc", false, "disable DHT rendezvous peer discovery")
-	flag.Parse()
+	cfgPath := findConfigPath(os.Args[1:], "config.yaml")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := sdk.LoadConfig(*cfgPath)
+	cfg, err := sdk.LoadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
-	cfg.ConfigFilePath = *cfgPath
 
-	// command-line overrides (for quick testing)
-	if *modeFlag != "" {
-		cfg.Mode = *modeFlag
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.SetOutput(os.Stderr)
+	cfgFileFlag := fs.String("config", cfgPath, "path to config file (default: config.yaml in current directory)")
+	if err := sdk.RegisterFlags(fs, &cfg); err != nil {
+		log.Fatalf("register flags failed: %v", err)
 	}
-	if *socksAddrFlag != "" {
-		cfg.Socks5.Listen = *socksAddrFlag
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		log.Fatalf("parse flags failed: %v", err)
 	}
-	if *apiAddrFlag != "" {
-		cfg.API.Listen = *apiAddrFlag
-	}
-	if *noDiscFlag {
-		cfg.P2P.NoDiscovery = true
-	}
+	cfg.ConfigFilePath = *cfgFileFlag
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config after overrides: %v", err)
 	}
@@ -73,6 +65,25 @@ func main() {
 	}
 
 	log.Printf("meshproxy stopped, uptime=%s", time.Since(application.StartTime()).String())
+}
+
+func findConfigPath(args []string, fallback string) string {
+	path := fallback
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-config" || arg == "--config":
+			if i+1 < len(args) {
+				path = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(arg, "-config="):
+			path = strings.TrimPrefix(arg, "-config=")
+		case strings.HasPrefix(arg, "--config="):
+			path = strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return path
 }
 
 func setupCrashCapture(dataDir string) (func(), error) {

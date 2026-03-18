@@ -359,11 +359,8 @@ func (c *Config) postProcess() error {
 		c.Client.ExitSelection.Mode = ExitSelectionAuto
 	}
 	if c.Mode == ModeRelayExit && c.Exit == nil {
-		c.Exit = &ExitConfig{
-			Enabled: true,
-			Policy:  defaultExitPolicyConfig(),
-			Runtime: ExitRuntimeConfig{DrainMode: false, AcceptNewStreams: true},
-		}
+		exit := defaultExitConfig()
+		c.Exit = &exit
 	}
 	if c.Exit != nil {
 		if err := c.Exit.Policy.Validate(); err != nil {
@@ -383,6 +380,17 @@ func defaultExitPolicyConfig() ExitPolicyConfig {
 		AllowPrivateIPTargets: false,
 		AllowLoopbackTargets:  false,
 		AllowLinkLocalTargets: false,
+	}
+}
+
+func defaultExitConfig() ExitConfig {
+	return ExitConfig{
+		Enabled: true,
+		Policy:  defaultExitPolicyConfig(),
+		Runtime: ExitRuntimeConfig{
+			DrainMode:        false,
+			AcceptNewStreams: true,
+		},
 	}
 }
 

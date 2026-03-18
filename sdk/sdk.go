@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"flag"
 	"time"
 
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -71,6 +72,10 @@ func LoadOrCreatePrivateKey(path string) (crypto.PrivKey, error) {
 		return nil, err
 	}
 	return mgr.PrivateKey(), nil
+}
+
+func RegisterFlags(fs *flag.FlagSet, cfg *Config) error {
+	return config.RegisterFlags(fs, cfg)
 }
 
 func New(ctx context.Context, cfg Config, opts Options) (*Node, error) {
