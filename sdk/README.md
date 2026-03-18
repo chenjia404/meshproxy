@@ -238,6 +238,8 @@ log.Println(profile.Nickname, profile.Bio)
 
 `bio` 最多 `140` 字，超出时会直接返回错误。
 
+头像可以通过 `UpdateProfileAvatar(fileName, data)` 设置，大小最多 `512KB`，文件会按内容 `sha256` 落盘到 `data/avatar/`。
+
 ## 当前公开能力
 
 - `sdk.New(...)`
@@ -254,7 +256,7 @@ log.Println(profile.Nickname, profile.Bio)
 
 聊天包装当前已覆盖：
 
-- 个人资料
+- 个人资料和头像
 - 联系人
 - 好友请求
 - 私聊消息

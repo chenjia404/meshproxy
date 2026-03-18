@@ -172,6 +172,8 @@ type UpdateProvider interface {
 type ChatProvider interface {
 	GetProfile() (chat.Profile, error)
 	UpdateProfile(nickname, bio string) (chat.Profile, error)
+	UpdateProfileAvatar(fileName string, data []byte) (chat.Profile, error)
+	AvatarPath(fileName string) (string, error)
 	ListContacts() ([]chat.Contact, error)
 	UpdateContactNickname(peerID, nickname string) (chat.Contact, error)
 	SetContactBlocked(peerID string, blocked bool) (chat.Contact, error)
@@ -255,6 +257,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/client/circuit-pool", api.handleCircuitPoolConfig)
 	mux.HandleFunc("/api/v1/chat/me", api.handleChatMe)
 	mux.HandleFunc("/api/v1/chat/profile", api.handleChatProfile)
+	mux.HandleFunc("/api/v1/chat/profile/avatar", api.handleChatProfileAvatar)
+	mux.HandleFunc("/api/v1/chat/avatars/", api.handleChatAvatar)
 	mux.HandleFunc("/api/v1/chat/contacts", api.handleChatContacts)
 	mux.HandleFunc("/api/v1/chat/contacts/", api.handleChatContactItem)
 	mux.HandleFunc("/api/v1/chat/requests", api.handleChatRequests)
@@ -878,6 +882,70 @@ func (a *LocalAPI) handleChatProfile(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *LocalAPI) handleChatProfileAvatar(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(chat.MaxProfileAvatarBytes + (1 << 20)); err != nil {
+		http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("avatar")
+	if err != nil {
+		http.Error(w, "missing avatar: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, chat.MaxProfileAvatarBytes+1))
+	if err != nil {
+		http.Error(w, "read avatar failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(data) == 0 {
+		http.Error(w, "avatar is empty", http.StatusBadRequest)
+		return
+	}
+	if len(data) > chat.MaxProfileAvatarBytes {
+		http.Error(w, "avatar too large: max 512KB", http.StatusBadRequest)
+		return
+	}
+	profile, err := a.opts.ChatService.UpdateProfileAvatar(header.Filename, data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, profile)
+}
+
+func (a *LocalAPI) handleChatAvatar(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/avatars/")
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := a.opts.ChatService.AvatarPath(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeFile(w, r, path)
 }
 
 func (a *LocalAPI) handleChatRequests(w http.ResponseWriter, r *http.Request) {

@@ -101,11 +101,23 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureProfileAvatarColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensurePeerBioColumn(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensurePeerAvatarColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureRequestBioColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.ensureRequestAvatarColumn(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -150,6 +162,7 @@ func (s *Store) migrate() error {
 			peer_id TEXT PRIMARY KEY,
 			nickname TEXT NOT NULL,
 			bio TEXT NOT NULL DEFAULT '',
+			avatar TEXT NOT NULL DEFAULT '',
 			chat_kex_priv TEXT NOT NULL,
 			chat_kex_pub TEXT NOT NULL,
 			created_at TEXT NOT NULL,
@@ -159,6 +172,7 @@ func (s *Store) migrate() error {
 			peer_id TEXT PRIMARY KEY,
 			nickname TEXT NOT NULL,
 			bio TEXT NOT NULL DEFAULT '',
+			avatar TEXT NOT NULL DEFAULT '',
 			blocked INTEGER NOT NULL DEFAULT 0,
 			last_seen_at TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL
@@ -171,6 +185,7 @@ func (s *Store) migrate() error {
 			intro_text TEXT NOT NULL,
 			nickname TEXT NOT NULL,
 			bio TEXT NOT NULL DEFAULT '',
+			avatar TEXT NOT NULL DEFAULT '',
 			retention_minutes INTEGER NOT NULL DEFAULT 0,
 			remote_chat_kex_pub TEXT NOT NULL,
 			conversation_id TEXT NOT NULL DEFAULT '',
@@ -386,16 +401,16 @@ func (s *Store) ensureProfile(localPeerID string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	nickname := "peer-" + shortPeerID(localPeerID)
-	_, err = s.db.Exec(`INSERT INTO profile(peer_id,nickname,bio,chat_kex_priv,chat_kex_pub,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
-		localPeerID, nickname, "", base64.StdEncoding.EncodeToString(priv), base64.StdEncoding.EncodeToString(pub), now, now)
+	_, err = s.db.Exec(`INSERT INTO profile(peer_id,nickname,bio,avatar,chat_kex_priv,chat_kex_pub,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		localPeerID, nickname, "", "", base64.StdEncoding.EncodeToString(priv), base64.StdEncoding.EncodeToString(pub), now, now)
 	return err
 }
 
 func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	var p Profile
 	var privB64, createdAt string
-	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
-		Scan(&p.PeerID, &p.Nickname, &p.Bio, &privB64, &p.ChatKexPub, &createdAt)
+	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,avatar,chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
+		Scan(&p.PeerID, &p.Nickname, &p.Bio, &p.Avatar, &privB64, &p.ChatKexPub, &createdAt)
 	if err != nil {
 		return Profile{}, nil, err
 	}
@@ -420,6 +435,16 @@ func (s *Store) UpdateProfile(localPeerID, nickname, bio string) (Profile, error
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.db.Exec(`UPDATE profile SET nickname=?, bio=?, updated_at=? WHERE peer_id=?`, nickname, bio, now, localPeerID); err != nil {
+		return Profile{}, err
+	}
+	p, _, err := s.GetProfile(localPeerID)
+	return p, err
+}
+
+func (s *Store) UpdateProfileAvatar(localPeerID, avatar string) (Profile, error) {
+	avatar = strings.TrimSpace(avatar)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.Exec(`UPDATE profile SET avatar=?, updated_at=? WHERE peer_id=?`, avatar, now, localPeerID); err != nil {
 		return Profile{}, err
 	}
 	p, _, err := s.GetProfile(localPeerID)
@@ -459,6 +484,39 @@ func (s *Store) ensureProfileBioColumn() error {
 	return err
 }
 
+func (s *Store) ensureProfileAvatarColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(profile)`)
+	if err != nil {
+		return err
+	}
+	hasAvatar := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "avatar" {
+			hasAvatar = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasAvatar {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE profile ADD COLUMN avatar TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
 func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	if peerID == "" {
 		return nil
@@ -470,14 +528,24 @@ func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	bio = strings.TrimSpace(bio)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT INTO peers(peer_id,nickname,bio,updated_at,last_seen_at)
-		VALUES(?,?,?,?,?)
+		INSERT INTO peers(peer_id,nickname,bio,avatar,updated_at,last_seen_at)
+		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(peer_id) DO UPDATE SET
 			nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE peers.nickname END,
 			bio=CASE WHEN excluded.bio != '' THEN excluded.bio ELSE peers.bio END,
+			avatar=CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE peers.avatar END,
 			last_seen_at=CASE WHEN excluded.last_seen_at != '' THEN excluded.last_seen_at ELSE peers.last_seen_at END,
 			updated_at=excluded.updated_at
-	`, peerID, nickname, bio, now, now)
+	`, peerID, nickname, bio, "", now, now)
+	return err
+}
+
+func (s *Store) UpdatePeerAvatar(peerID, avatar string) error {
+	if peerID == "" {
+		return sql.ErrNoRows
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`UPDATE peers SET avatar=?, updated_at=? WHERE peer_id=?`, strings.TrimSpace(avatar), now, peerID)
 	return err
 }
 
@@ -487,6 +555,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 			p.peer_id,
 			p.nickname,
 			p.bio,
+			p.avatar,
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -513,7 +582,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
@@ -533,6 +602,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 			p.peer_id,
 			p.nickname,
 			p.bio,
+			p.avatar,
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -549,7 +619,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 		LEFT JOIN conversations c ON c.peer_id = p.peer_id
 		WHERE p.peer_id=?
 	`, s.localPeerID, s.localPeerID, peerID).
-		Scan(&c.PeerID, &c.Nickname, &c.Bio, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
+		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
 	}
@@ -607,6 +677,39 @@ func (s *Store) ensurePeerBioColumn() error {
 	return err
 }
 
+func (s *Store) ensurePeerAvatarColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(peers)`)
+	if err != nil {
+		return err
+	}
+	hasAvatar := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "avatar" {
+			hasAvatar = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasAvatar {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE peers ADD COLUMN avatar TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
 func (s *Store) ensureRequestBioColumn() error {
 	rows, err := s.db.Query(`PRAGMA table_info(requests)`)
 	if err != nil {
@@ -637,6 +740,39 @@ func (s *Store) ensureRequestBioColumn() error {
 		return nil
 	}
 	_, err = s.db.Exec(`ALTER TABLE requests ADD COLUMN bio TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensureRequestAvatarColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(requests)`)
+	if err != nil {
+		return err
+	}
+	hasAvatar := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "avatar" {
+			hasAvatar = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasAvatar {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE requests ADD COLUMN avatar TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -770,31 +906,32 @@ func (s *Store) SetPeerBlocked(peerID string, blocked bool) (Contact, error) {
 func (s *Store) UpsertIncomingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(request_id) DO UPDATE SET
 			state=excluded.state,
 			intro_text=excluded.intro_text,
 			nickname=excluded.nickname,
 			bio=excluded.bio,
+			avatar=excluded.avatar,
 			retention_minutes=excluded.retention_minutes,
 			remote_chat_kex_pub=excluded.remote_chat_kex_pub,
 			updated_at=excluded.updated_at
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.Avatar, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) SaveOutgoingRequest(req Request) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
+		INSERT OR REPLACE INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, req.RequestID, req.FromPeerID, req.ToPeerID, req.State, req.IntroText, req.Nickname, req.Bio, req.Avatar, req.RetentionMinutes, req.RemoteChatKexPub, req.ConversationID, req.LastTransportMode, now, now)
 	return err
 }
 
 func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
-	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
+	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
 	if err != nil {
 		return nil, err
 	}
@@ -803,7 +940,7 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 	for rows.Next() {
 		var r Request
 		var createdAt, updatedAt string
-		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.Avatar, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = parseDBTime(createdAt)
@@ -816,14 +953,20 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 func (s *Store) GetRequest(requestID string) (Request, error) {
 	var r Request
 	var createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
-		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
+		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.Avatar, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
 	if err != nil {
 		return Request{}, err
 	}
 	r.CreatedAt = parseDBTime(createdAt)
 	r.UpdatedAt = parseDBTime(updatedAt)
 	return r, nil
+}
+
+func (s *Store) UpdateRequestAvatar(requestID, avatar string) error {
+	_, err := s.db.Exec(`UPDATE requests SET avatar=?, updated_at=? WHERE request_id=?`,
+		strings.TrimSpace(avatar), time.Now().UTC().Format(time.RFC3339Nano), requestID)
+	return err
 }
 
 func (s *Store) UpdateRequestState(requestID, state, conversationID string) error {

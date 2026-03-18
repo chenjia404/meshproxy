@@ -24,6 +24,10 @@ func (c *ChatService) UpdateProfile(nickname, bio string) (Profile, error) {
 	return c.inner.UpdateProfile(nickname, bio)
 }
 
+func (c *ChatService) UpdateProfileAvatar(fileName string, data []byte) (Profile, error) {
+	return c.inner.UpdateProfileAvatar(fileName, data)
+}
+
 func (c *ChatService) ListContacts() ([]Contact, error) {
 	return c.inner.ListContacts()
 }

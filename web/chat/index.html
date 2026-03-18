@@ -88,6 +88,100 @@
     .contact-header-title { display: grid; gap: 0.16rem; min-width: 0; }
     .contact-header-title h3 { margin: 0; }
     .contact-chip-row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+    .avatar {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: linear-gradient(135deg, rgba(88,166,255,0.30), rgba(63,185,80,0.16));
+      color: #f4f7fb;
+      text-transform: uppercase;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+    .avatar img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .avatar-fallback {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      padding: 0.05rem;
+      font-size: 0.72em;
+      line-height: 1;
+      text-align: center;
+    }
+    .avatar.has-image .avatar-fallback { opacity: 0; }
+    .avatar-broken img { display: none; }
+    .avatar-xs { width: 24px; height: 24px; }
+    .avatar-sm { width: 32px; height: 32px; }
+    .avatar-md { width: 40px; height: 40px; }
+    .avatar-lg { width: 52px; height: 52px; }
+    .avatar-xl { width: 72px; height: 72px; }
+    .profile-hero {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-bottom: 0.9rem;
+    }
+    .profile-hero-body {
+      min-width: 0;
+      display: grid;
+      gap: 0.25rem;
+    }
+    .profile-hero-title {
+      font-size: 1rem;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .profile-hero-subtitle {
+      color: var(--muted);
+      font-size: 0.82rem;
+      word-break: break-all;
+    }
+    .profile-avatar-actions {
+      display: flex;
+      gap: 0.45rem;
+      flex-wrap: wrap;
+      margin-top: 0.7rem;
+    }
+    .request-header-row,
+    .contact-header-row,
+    .thread-peer-row,
+    .message-meta-row {
+      display: flex;
+      gap: 0.7rem;
+      align-items: center;
+      min-width: 0;
+    }
+    .message-meta-row { gap: 0.5rem; }
+    .message-meta-text {
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      align-items: center;
+      min-width: 0;
+    }
+    .message-meta-name {
+      color: var(--text);
+      font-weight: 600;
+    }
     .contact-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
     .retention-box, .group-panel { margin-top: 0.85rem; padding-top: 0.85rem; border-top: 1px solid var(--border); }
     .retention-row, .inline-form, .group-toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.45rem; }
@@ -515,6 +609,61 @@
       const contact = (state.contacts || []).find(c => c.peer_id === peerID);
       if (contact && contact.nickname) return contact.nickname;
       return fallback || shortPeer(peerID);
+    }
+
+    function avatarUrl(fileName) {
+      if (!fileName) return '';
+      return '/api/v1/chat/avatars/' + encodeURIComponent(fileName);
+    }
+
+    function avatarFallbackText(label, peerID) {
+      const source = String(label || peerID || '').trim();
+      if (!source) return '?';
+      const chars = Array.from(source.replace(/\s+/g, '')).slice(0, 2);
+      return chars.join('').toUpperCase() || '?';
+    }
+
+    function renderAvatar(fileName, label, sizeClass) {
+      const fallback = escapeHtml(avatarFallbackText(label));
+      const size = sizeClass || 'avatar-sm';
+      if (!fileName) {
+        return '<span class="avatar ' + size + '"><span class="avatar-fallback">' + fallback + '</span></span>';
+      }
+      return '<span class="avatar ' + size + ' has-image">' +
+        '<img data-avatar-img src="' + escapeHtml(avatarUrl(fileName)) + '" alt="' + escapeHtml(String(label || 'avatar')) + '">' +
+        '<span class="avatar-fallback">' + fallback + '</span>' +
+      '</span>';
+    }
+
+    function bindAvatarImages() {
+      document.querySelectorAll('img[data-avatar-img]').forEach(img => {
+        if (img.dataset.avatarBound === '1') return;
+        img.dataset.avatarBound = '1';
+        img.onerror = () => {
+          const box = img.closest('.avatar');
+          if (box) {
+            box.classList.remove('has-image');
+            box.classList.add('avatar-broken');
+          }
+          img.remove();
+        };
+      });
+    }
+
+    function peerAvatar(peerID) {
+      if (!peerID) return '';
+      if (state.me && peerID === state.me.peer_id) {
+        return state.me.avatar || '';
+      }
+      const contact = (state.contacts || []).find(c => c.peer_id === peerID);
+      return (contact && contact.avatar) || '';
+    }
+
+    function requestAvatar(req) {
+      if (!req) return '';
+      const remotePeerID = req.to_peer_id === state.me?.peer_id ? req.from_peer_id : req.to_peer_id;
+      const contact = (state.contacts || []).find(c => c.peer_id === remotePeerID);
+      return req.avatar || (contact && contact.avatar) || '';
     }
 
     function formatTime(value) {
@@ -1010,14 +1159,24 @@
       }
       document.getElementById('profile-card').innerHTML =
         '<h2>本机资料</h2>' +
+        '<div class="profile-hero">' +
+          renderAvatar(me.avatar, me.nickname || shortPeer(me.peer_id), 'avatar-xl') +
+          '<div class="profile-hero-body">' +
+            '<div class="profile-hero-title">' + escapeHtml(me.nickname || '-') + '</div>' +
+            '<div class="profile-hero-subtitle"><code>' + escapeHtml(me.peer_id) + '</code></div>' +
+            '<div class="muted">' + escapeHtml(me.bio || '-') + '</div>' +
+          '</div>' +
+        '</div>' +
         '<dl class="kv">' +
           '<dt>Peer ID</dt><dd><code>' + escapeHtml(me.peer_id) + '</code></dd>' +
           '<dt>昵称</dt><dd>' + escapeHtml(me.nickname || '-') + '</dd>' +
           '<dt>简介</dt><dd>' + escapeHtml(me.bio || '-') + '</dd>' +
+          '<dt>头像</dt><dd>' + escapeHtml(me.avatar || '未设置') + '</dd>' +
           '<dt>Chat KEX</dt><dd><code>' + escapeHtml(shortPeer(me.chat_kex_pub)) + '</code></dd>' +
         '</dl>' +
         '<div class="form-row"><label>修改昵称</label><input id="nickname-input" type="text" value="' + escapeHtml(me.nickname || '') + '" placeholder="输入昵称"></div>' +
         '<div class="form-row"><label>修改简介</label><textarea id="bio-input" maxlength="140" placeholder="介绍一下你自己，最多 140 字">' + escapeHtml(me.bio || '') + '</textarea><div class="muted" id="bio-help">最多 140 字。</div></div>' +
+        '<div class="profile-avatar-actions"><button type="button" class="btn btn-secondary" id="pick-avatar-btn">更换头像</button><input id="avatar-input" type="file" accept="image/*" hidden><span class="muted">最大 512KB</span></div>' +
         '<div class="actions"><button class="btn btn-primary" id="save-profile-btn">保存资料</button></div>';
       const bioInput = document.getElementById('bio-input');
       const bioHelp = document.getElementById('bio-help');
@@ -1039,6 +1198,39 @@
           showMessage('err', '保存资料失败: ' + err.message);
         }
       };
+      const pickAvatarBtn = document.getElementById('pick-avatar-btn');
+      const avatarInput = document.getElementById('avatar-input');
+      if (pickAvatarBtn && avatarInput) {
+        pickAvatarBtn.onclick = () => avatarInput.click();
+        avatarInput.onchange = async () => {
+          const file = avatarInput.files && avatarInput.files[0];
+          if (!file) return;
+          if (file.size > 512 * 1024) {
+            showMessage('err', '头像不能超过 512KB');
+            avatarInput.value = '';
+            return;
+          }
+          try {
+            const form = new FormData();
+            form.append('avatar', file);
+            const resp = await fetch('/api/v1/chat/profile/avatar', { method: 'POST', body: form });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || resp.statusText);
+            state.me = data;
+            showMessage('ok', '头像已更新');
+            await refreshContacts();
+            await refreshRequests();
+            renderProfile();
+            renderThread();
+            renderThreadLists();
+          } catch (err) {
+            showMessage('err', '更新头像失败: ' + err.message);
+          } finally {
+            avatarInput.value = '';
+          }
+        };
+      }
+      bindAvatarImages();
     }
 
     function renderNetwork() {
@@ -1123,8 +1315,16 @@
         html += '<div class="list">';
         html += list.map(req => {
           const inbound = req.to_peer_id === state.me?.peer_id;
+          const otherPeerID = inbound ? req.from_peer_id : req.to_peer_id;
+          const otherName = inbound ? displayName(req.from_peer_id, req.nickname || req.from_peer_id) : displayName(req.to_peer_id, req.to_peer_id);
           return '<div class="item">' +
-            '<h3>' + escapeHtml(inbound ? displayName(req.from_peer_id, req.nickname || req.from_peer_id) : displayName(req.to_peer_id, req.to_peer_id)) + '</h3>' +
+            '<div class="request-header-row">' +
+              renderAvatar(requestAvatar(req), otherName, 'avatar-md') +
+              '<div class="contact-header-title">' +
+                '<h3>' + escapeHtml(otherName) + '</h3>' +
+                '<div class="muted"><code>' + escapeHtml(shortPeer(otherPeerID)) + '</code></div>' +
+              '</div>' +
+            '</div>' +
             (req.bio ? '<div class="muted">简介：' + escapeHtml(req.bio) + '</div>' : '') +
             '<div class="muted">自动删除：' + (req.retention_minutes > 0 ? escapeHtml(String(req.retention_minutes)) + ' 分钟' : '关闭') + '</div>' +
             '<div class="muted">状态：' + escapeHtml(req.state) + '</div>' +
@@ -1160,6 +1360,7 @@
           }
         };
       });
+      bindAvatarImages();
     }
 
     function renderGroupInvites() {
@@ -1220,11 +1421,14 @@
           '<div class="item">' +
             '<div class="contact-header">' +
               '<div class="contact-header-top">' +
-                '<div class="contact-header-title">' +
-                  '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
-                  '<div class="contact-chip-row">' +
-                    '<span class="badge msg-local">' + escapeHtml(contact.blocked ? '已拉黑' : '正常') + '</span>' +
-                    '<span class="badge msg-sent">' + escapeHtml(contact.retention_minutes > 0 ? (contact.retention_minutes + ' 分钟自动删除') : '自动删除关闭') + '</span>' +
+                '<div class="contact-header-row">' +
+                  renderAvatar(contact.avatar, contact.nickname || contact.remote_nickname || shortPeer(contact.peer_id), 'avatar-md') +
+                  '<div class="contact-header-title">' +
+                    '<h3>' + escapeHtml(contact.nickname || shortPeer(contact.peer_id)) + '</h3>' +
+                    '<div class="contact-chip-row">' +
+                      '<span class="badge msg-local">' + escapeHtml(contact.blocked ? '已拉黑' : '正常') + '</span>' +
+                      '<span class="badge msg-sent">' + escapeHtml(contact.retention_minutes > 0 ? (contact.retention_minutes + ' 分钟自动删除') : '自动删除关闭') + '</span>' +
+                    '</div>' +
                   '</div>' +
                 '</div>' +
                 '<div class="muted"><code>' + escapeHtml(shortPeer(contact.peer_id)) + '</code></div>' +
@@ -1291,6 +1495,7 @@
           await openConversationByPeer(btn.dataset.openContact);
         };
       });
+      bindAvatarImages();
     }
 
     async function openConversationByPeer(peerID) {
@@ -1405,6 +1610,8 @@
         const peerStatus = state.peerStatus;
         const transportMode = direct.last_transport_mode || '-';
         const connectedness = peerStatus?.connectedness || 'unknown';
+        const peerName = displayName(direct.peer_id, shortPeer(direct.peer_id));
+        const peerAvatarName = peerAvatar(direct.peer_id);
         const retentionDraft = Object.prototype.hasOwnProperty.call(state.retentionDrafts, direct.conversation_id)
           ? state.retentionDrafts[direct.conversation_id]
           : String(direct.retention_minutes || 0);
@@ -1415,7 +1622,15 @@
         const connLabel = connectedness === 'Connected' || connectedness === 'connected' ? '已连接' : connectedness === 'NotConnected' || connectedness === 'not connected' ? '未连接' : connectedness;
         header.innerHTML =
           '<h2>当前会话</h2>' +
-          '<div class="thread-title"><div><h3>' + escapeHtml(displayName(direct.peer_id, shortPeer(direct.peer_id))) + '</h3><div class="thread-subline"><div class="muted">Peer：<code>' + escapeHtml(direct.peer_id) + '</code></div><div class="muted">会话 ID：<code>' + escapeHtml(direct.conversation_id) + '</code></div></div></div></div>' +
+          '<div class="thread-title">' +
+            '<div class="thread-peer-row">' +
+              renderAvatar(peerAvatarName, peerName, 'avatar-lg') +
+              '<div class="contact-header-title">' +
+                '<h3>' + escapeHtml(peerName) + '</h3>' +
+                '<div class="thread-subline"><div class="muted">Peer：<code>' + escapeHtml(direct.peer_id) + '</code></div><div class="muted">会话 ID：<code>' + escapeHtml(direct.conversation_id) + '</code></div></div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
           '<div class="status-row">' +
             '<span class="badge ' + escapeHtml(transportBadgeClass) + '">transport: ' + escapeHtml(transportMode) + '</span>' +
             '<span class="badge ' + escapeHtml((connectedness === 'Connected' || connectedness === 'connected') ? 'direct' : 'offline') + '">连接: ' + escapeHtml(connLabel) + '</span>' +
@@ -1458,6 +1673,7 @@
             }
           };
         }
+        bindAvatarImages();
         return;
       }
 
@@ -1871,8 +2087,20 @@
             const canRevoke = msg.direction === 'outbound'
               && msg.sender_peer_id === state.me?.peer_id
               && (msg.msg_type === 'chat_text' || msg.msg_type === 'chat_file');
+            const senderName = msg.direction === 'outbound' ? '我' : displayName(msg.sender_peer_id, shortPeer(msg.sender_peer_id));
+            const senderAvatarName = peerAvatar(msg.sender_peer_id);
             return '<div class="bubble ' + escapeHtml(msg.direction === 'outbound' ? 'outbound' : 'inbound') + '">' +
-              '<div class="meta">' + escapeHtml(msg.direction) + ' · ' + threadMessageStateBadge(msg.state) + ' · ' + escapeHtml(formatTime(msg.created_at)) + '</div>' +
+              '<div class="meta">' +
+                '<div class="message-meta-row">' +
+                  renderAvatar(senderAvatarName, senderName, 'avatar-xs') +
+                  '<div class="message-meta-text">' +
+                    '<span class="message-meta-name">' + escapeHtml(senderName) + '</span>' +
+                    '<span class="muted">' + escapeHtml(msg.direction) + '</span>' +
+                    threadMessageStateBadge(msg.state) +
+                    '<span class="muted">' + escapeHtml(formatTime(msg.created_at)) + '</span>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
               renderDirectMessageBody(msg) +
               (canRevoke
                 ? '<div class="actions message-actions" style="margin-top:0.55rem"><button type="button" class="btn btn-danger message-revoke-btn" data-revoke-msg="' + escapeHtml(msg.msg_id) + '">撤回</button></div>'
@@ -1960,6 +2188,7 @@
       document.querySelectorAll('[data-preview-src]').forEach(img => {
         img.onclick = () => openImageLightbox(img.dataset.previewSrc, img.dataset.previewName || '');
       });
+      bindAvatarImages();
     }
 
     function renderComposer() {

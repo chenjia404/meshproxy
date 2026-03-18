@@ -41,12 +41,17 @@ const (
 	MessageStateQueuedForRetry  = "queued_for_retry"
 )
 
-const MaxProfileBioLength = 140
+const (
+	MaxProfileBioLength     = 140
+	MaxProfileAvatarBytes   = 512 << 10
+	DefaultAvatarStorageDir = "avatar"
+)
 
 type Profile struct {
 	PeerID     string    `json:"peer_id"`
 	Nickname   string    `json:"nickname"`
 	Bio        string    `json:"bio"`
+	Avatar     string    `json:"avatar"`
 	ChatKexPub string    `json:"chat_kex_pub"`
 	CreatedAt  time.Time `json:"created_at"`
 }
@@ -55,6 +60,7 @@ type Contact struct {
 	PeerID           string    `json:"peer_id"`
 	Nickname         string    `json:"nickname"`
 	Bio              string    `json:"bio"`
+	Avatar           string    `json:"avatar"`
 	RemoteNickname   string    `json:"remote_nickname,omitempty"`
 	RetentionMinutes int       `json:"retention_minutes"`
 	Blocked          bool      `json:"blocked"`
@@ -70,6 +76,7 @@ type Request struct {
 	IntroText         string    `json:"intro_text"`
 	Nickname          string    `json:"nickname"`
 	Bio               string    `json:"bio"`
+	Avatar            string    `json:"avatar"`
 	RetentionMinutes  int       `json:"retention_minutes"`
 	RemoteChatKexPub  string    `json:"remote_chat_kex_pub"`
 	ConversationID    string    `json:"conversation_id,omitempty"`
@@ -117,6 +124,8 @@ type SessionRequest struct {
 	ToPeerID         string `json:"to_peer_id"`
 	Nickname         string `json:"nickname"`
 	Bio              string `json:"bio"`
+	AvatarName       string `json:"avatar_name"`
+	AvatarData       []byte `json:"avatar_data,omitempty"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	IntroText        string `json:"intro_text"`
 	ChatKexPub       string `json:"chat_kex_pub"`
@@ -130,6 +139,8 @@ type SessionAccept struct {
 	FromPeerID       string `json:"from_peer_id"`
 	ToPeerID         string `json:"to_peer_id"`
 	Bio              string `json:"bio"`
+	AvatarName       string `json:"avatar_name"`
+	AvatarData       []byte `json:"avatar_data,omitempty"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	ChatKexPub       string `json:"chat_kex_pub"`
 	SentAtUnix       int64  `json:"sent_at_unix"`
