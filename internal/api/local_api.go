@@ -32,6 +32,7 @@ type StatusProvider interface {
 	Socks5Listen() string
 	P2PListenAddrs() []string
 	StartTime() time.Time
+	TrafficStats() TrafficStatsResponse
 }
 
 // NodeProvider provides read access to known nodes.
@@ -89,6 +90,13 @@ type CircuitInfoResponse struct {
 	Alive               bool                  `json:"alive"`
 	ConsecutiveFailures int                   `json:"consecutive_failures"`
 	SmoothedRTTMillis   float64               `json:"smoothed_rtt_ms"`
+}
+
+// TrafficStatsResponse summarizes process lifetime proxy traffic.
+type TrafficStatsResponse struct {
+	BytesSent     uint64 `json:"bytes_sent"`
+	BytesReceived uint64 `json:"bytes_received"`
+	BytesTotal    uint64 `json:"bytes_total"`
 }
 
 // PoolKindStatusResponse is one pool kind's status for API.
@@ -159,8 +167,8 @@ type LocalAPIOpts struct {
 	// ExitService 僅在 mode=relay+exit 時非空，用於出口策略/狀態 API。
 	ExitService *exit.Service
 	// ChatService provides first-stage direct chat APIs.
-	ChatService   ChatProvider
-	UpdateService UpdateProvider
+	ChatService    ChatProvider
+	UpdateService  UpdateProvider
 	UpdateSettings UpdateSettingsProvider
 }
 
@@ -379,6 +387,7 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"p2p_listen_addrs": p.P2PListenAddrs(),
 		"uptime_seconds":   int64(time.Since(p.StartTime()).Seconds()),
 		"version":          update.Version,
+		"traffic":          p.TrafficStats(),
 	}
 	if a.opts != nil && a.opts.Relays != nil {
 		resp["relays_known"] = len(a.opts.Relays.ListRelays())

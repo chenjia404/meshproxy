@@ -17,6 +17,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/internal/traffic"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -46,6 +47,7 @@ type Service struct {
 	host           host.Host
 	Policy         *PolicyChecker
 	socks5Upstream string
+	traffic        *traffic.Recorder
 	mu             sync.Mutex
 	conns          map[string]net.Conn
 	udpSessions    map[string]*udpSession
@@ -55,11 +57,12 @@ type Service struct {
 
 // NewService registers the circuit protocol handler on the given host and
 // returns the created Service instance. policy 可為 nil，表示不做出口策略檢查。
-func NewService(h host.Host, policy *PolicyChecker, socks5Upstream string) *Service {
+func NewService(h host.Host, policy *PolicyChecker, socks5Upstream string, trafficStats *traffic.Recorder) *Service {
 	s := &Service{
 		host:           h,
 		Policy:         policy,
 		socks5Upstream: socks5Upstream,
+		traffic:        trafficStats,
 		conns:          make(map[string]net.Conn),
 		udpSessions:    make(map[string]*udpSession),
 		sessions:       make(map[string]*protocol.HopSession),
@@ -124,10 +127,12 @@ func (s *Service) serveSocks5TunnelStream(str network.Stream) {
 	}
 
 	safe.Go("exit.serveSocks5TunnelStream.copyUp", func() {
-		_, _ = io.Copy(upstream, str)
+		n, _ := io.Copy(upstream, str)
+		s.recordTraffic(0, uint64(n))
 		once.Do(closeBoth)
 	})
-	_, _ = io.Copy(str, upstream)
+	n, _ := io.Copy(str, upstream)
+	s.recordTraffic(uint64(n), 0)
 	once.Do(closeBoth)
 }
 
@@ -191,6 +196,7 @@ func (s *Service) serveRawTunnelE2EWithHeader(str network.Stream, header tunnel.
 					once.Do(closeBoth)
 					return
 				}
+				s.recordTraffic(0, uint64(n))
 			}
 			if err != nil {
 				if err == io.EOF {
@@ -227,6 +233,7 @@ func (s *Service) serveRawTunnelE2EWithHeader(str network.Stream, header tunnel.
 				once.Do(closeBoth)
 				return
 			}
+			s.recordTraffic(uint64(len(plain)), 0)
 		case tunnel.FrameTypeClose:
 			once.Do(closeBoth)
 			return
@@ -731,6 +738,7 @@ func (s *Service) pumpRemoteToCircuit(circuitID, streamID string, remote net.Con
 			if err != nil {
 				return
 			}
+			s.recordTraffic(uint64(len(frame.PayloadJSON)), 0)
 		}
 		if err != nil {
 			return
@@ -758,6 +766,7 @@ func (s *Service) pumpRemoteToCircuitPlain(circuitID, streamID string, remote ne
 			if frameErr != nil {
 				return
 			}
+			s.recordTraffic(uint64(len(frame.PayloadJSON)), 0)
 		}
 		if err != nil {
 			return
@@ -769,6 +778,13 @@ func (s *Service) storeConn(streamID string, conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.conns[streamID] = conn
+}
+
+func (s *Service) recordTraffic(sent, recv uint64) {
+	if s == nil || s.traffic == nil || (sent == 0 && recv == 0) {
+		return
+	}
+	s.traffic.Add(sent, recv)
 }
 
 func (s *Service) getConn(streamID string) net.Conn {

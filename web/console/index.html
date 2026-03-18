@@ -519,6 +519,7 @@
         '<dt>模式</dt><dd><span class="badge ok">' + escapeHtml(data.mode || '-') + '</span></dd>' +
         '<dt>SOCKS5</dt><dd>' + escapeHtml(data.socks5_listen || '-') + '</dd>' +
         '<dt>运行时长</dt><dd>' + formatUptime(data.uptime_seconds) + '</dd>' +
+        '<dt>本次流量</dt><dd>' + formatBytes((data.traffic && data.traffic.bytes_total) || 0) + ' <span class="muted">上行 ' + formatBytes((data.traffic && data.traffic.bytes_sent) || 0) + ' · 下行 ' + formatBytes((data.traffic && data.traffic.bytes_received) || 0) + '</span></dd>' +
         '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
         '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
         '<dt>P2P 监听</dt><dd><pre style="margin:0;font-size:0.8rem">' + (data.p2p_listen_addrs || []).map(escapeHtml).join('\n') + '</pre></dd></dl>' + poolHtml + '</div>' +
@@ -553,6 +554,7 @@
       return '<h1>实时流量</h1><div class="card"><h3>汇总</h3><dl class="kv">' +
         '<dt>电路总数</dt><dd>' + (data.circuits_total ?? '-') + '</dd>' +
         '<dt>活跃 Stream</dt><dd>' + (data.streams_active ?? '-') + '</dd>' +
+        '<dt>本次流量</dt><dd>' + formatBytes((data.traffic && data.traffic.bytes_total) || 0) + ' <span class="muted">上行 ' + formatBytes((data.traffic && data.traffic.bytes_sent) || 0) + ' · 下行 ' + formatBytes((data.traffic && data.traffic.bytes_received) || 0) + '</span></dd>' +
         '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
         '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
         '<dt>最近错误数</dt><dd>' + (data.errors_recent_count ?? 0) + '</dd>' + pool + '</dl></div>';

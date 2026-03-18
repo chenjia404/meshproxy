@@ -20,6 +20,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/store"
+	"github.com/chenjia404/meshproxy/internal/traffic"
 )
 
 const (
@@ -74,6 +75,7 @@ type CircuitManager struct {
 	store           *store.CircuitStore
 	pathSelector    *PathSelector
 	streams         *StreamManager
+	traffic         *traffic.Recorder
 	pool            *CircuitPool
 	buildRetries    int // 1~2: retries when building circuit fails (relay/exit failover)
 	beginTCPRetries int // 1~2: retries when exit connect (BEGIN_TCP) fails
@@ -92,13 +94,14 @@ type CircuitManager struct {
 }
 
 // NewCircuitManager creates a new CircuitManager.
-func NewCircuitManager(ctx context.Context, h host.Host, store *store.CircuitStore, selector *PathSelector, streams *StreamManager) *CircuitManager {
+func NewCircuitManager(ctx context.Context, h host.Host, store *store.CircuitStore, selector *PathSelector, streams *StreamManager, trafficStats *traffic.Recorder) *CircuitManager {
 	return &CircuitManager{
 		ctx:              ctx,
 		host:             h,
 		store:            store,
 		pathSelector:     selector,
 		streams:          streams,
+		traffic:          trafficStats,
 		activeStreams:    make(map[string]network.Stream),
 		hopSessions:      make(map[string][]*protocol.HopSession),
 		pendingConnected: make(map[string]chan protocol.Connected),
@@ -1069,6 +1072,9 @@ func (m *CircuitManager) addCircuitBytes(circuitID string, sent, recv uint64) {
 		return
 	}
 	m.store.AddStats(circuitID, sent, recv)
+	if m.traffic != nil {
+		m.traffic.Add(sent, recv)
+	}
 	m.scheduleHeartbeat(circuitID)
 }
 

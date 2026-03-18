@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/internal/traffic"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -38,13 +40,14 @@ type Socks5Server struct {
 	pathSelector      *PathSelector
 	streamManager     *StreamManager
 	errorRecorder     ErrorRecorder
+	traffic           *traffic.Recorder
 	allowUDPAssociate bool
 	tunnelToExit      bool
 	exitUpstream      string
 }
 
 // NewSocks5Server creates a new SOCKS5 server instance. errRec may be nil.
-func NewSocks5Server(addr string, h host.Host, cm *CircuitManager, selector *PathSelector, sm *StreamManager, errRec ErrorRecorder) *Socks5Server {
+func NewSocks5Server(addr string, h host.Host, cm *CircuitManager, selector *PathSelector, sm *StreamManager, errRec ErrorRecorder, trafficStats *traffic.Recorder) *Socks5Server {
 	return &Socks5Server{
 		addr:              addr,
 		closeChan:         make(chan struct{}),
@@ -53,6 +56,7 @@ func NewSocks5Server(addr string, h host.Host, cm *CircuitManager, selector *Pat
 		pathSelector:      selector,
 		streamManager:     sm,
 		errorRecorder:     errRec,
+		traffic:           trafficStats,
 		allowUDPAssociate: false,
 	}
 }
@@ -346,7 +350,13 @@ func (s *Socks5Server) writeTunnelRouteHeader(stream network.Stream, tunnelID st
 		HopIndex:   0,
 		TargetExit: plan.Hops[plan.ExitHopIndex].PeerID,
 	}
-	return tunnel.WriteJSONFrame(stream, header)
+	if err := tunnel.WriteJSONFrame(stream, header); err != nil {
+		return err
+	}
+	if data, err := json.Marshal(header); err == nil {
+		s.recordTraffic(0, uint64(len(data)))
+	}
+	return nil
 }
 
 func (s *Socks5Server) pipeEncryptedTunnel(conn net.Conn, stream network.Stream, sess *tunnel.Session) {
@@ -377,6 +387,7 @@ func (s *Socks5Server) pipeEncryptedTunnel(conn net.Conn, stream network.Stream,
 					once.Do(closeBoth)
 					return
 				}
+				s.recordTraffic(uint64(len(plain)), 0)
 			case tunnel.FrameTypeClose:
 				once.Do(closeBoth)
 				return
@@ -397,6 +408,7 @@ func (s *Socks5Server) pipeEncryptedTunnel(conn net.Conn, stream network.Stream,
 				once.Do(closeBoth)
 				return
 			}
+			s.recordTraffic(0, uint64(n))
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -416,6 +428,13 @@ func newTunnelID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func (s *Socks5Server) recordTraffic(sent, recv uint64) {
+	if s == nil || s.traffic == nil || (sent == 0 && recv == 0) {
+		return
+	}
+	s.traffic.Add(sent, recv)
 }
 
 // handleHandshake performs a minimal SOCKS5 NO-AUTH handshake and parses the request.

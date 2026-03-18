@@ -32,6 +32,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/relaycache"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/store"
+	"github.com/chenjia404/meshproxy/internal/traffic"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 	"github.com/chenjia404/meshproxy/internal/update"
 )
@@ -66,6 +67,7 @@ type App struct {
 	updater        *update.Service
 	autoUpdateMu   sync.RWMutex
 	autoUpdate     bool
+	traffic        *traffic.Recorder
 
 	peerExchangeOnce sync.Map
 	peerExchangeDial sync.Map
@@ -130,6 +132,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		bootstrapCache: bootstrapCache,
 		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
 		autoUpdate:     cfg.AutoUpdate,
+		traffic:        traffic.NewRecorder(),
 	}
 
 	// Identity
@@ -268,7 +271,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return out
 	})
 	a.pathSelector = selector
-	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr)
+	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr, a.traffic)
 	a.circuitManager = cm
 	cm.SetBuildRetries(cfg.Client.BuildRetries)
 	cm.SetBeginTCPRetries(cfg.Client.BeginTCPRetries)
@@ -290,13 +293,13 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	// Relay service when this node relays (relay or relay+exit).
 	var relaySvc *relay.Service
 	if cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeRelayExit {
-		relaySvc = relay.NewService(a.Host())
+		relaySvc = relay.NewService(a.Host(), a.traffic)
 	}
 	// Exit service when this node is relay+exit（帶出口策略檢查）。始終創建 Policy 以便出口政策 API 可註冊。
 	var exitSvc *exit.Service
 	if cfg.Mode == config.ModeRelayExit {
 		policy := exit.NewPolicyChecker(cfg.Exit) // cfg.Exit 為 nil 時使用預設策略
-		exitSvc = exit.NewService(a.Host(), policy, cfg.Socks5.ExitUpstream)
+		exitSvc = exit.NewService(a.Host(), policy, cfg.Socks5.ExitUpstream, a.traffic)
 		exitSocks := exit.NewSocks5Server(cfg.Socks5.ExitUpstream, policy)
 		if err := exitSocks.Start(); err != nil {
 			return nil, fmt.Errorf("start exit socks5: %w", err)
@@ -345,7 +348,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	if opts.EnableSOCKS5 {
-		socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors})
+		socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors}, a.traffic)
 		socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
 		socks.SetTunnelToExit(cfg.Socks5.TunnelToExit, cfg.Socks5.ExitUpstream)
 		if err := socks.Start(); err != nil {
@@ -473,6 +476,18 @@ func (a *App) P2PListenAddrs() []string {
 // StartTime returns when the application instance was created.
 func (a *App) StartTime() time.Time {
 	return a.startTime
+}
+
+func (a *App) TrafficStats() api.TrafficStatsResponse {
+	if a == nil || a.traffic == nil {
+		return api.TrafficStatsResponse{}
+	}
+	stats := a.traffic.Snapshot()
+	return api.TrafficStatsResponse{
+		BytesSent:     stats.BytesSent,
+		BytesReceived: stats.BytesReceived,
+		BytesTotal:    stats.BytesTotal,
+	}
 }
 
 func (a *App) CheckForUpdate(ctx context.Context) (update.Info, error) {
@@ -736,6 +751,7 @@ func (m *metricsSummaryAdapter) GetSummary() map[string]any {
 		"mode":                a.Mode(),
 		"peer_id":             a.PeerID(),
 		"uptime_seconds":      int64(time.Since(a.StartTime()).Seconds()),
+		"traffic":             a.TrafficStats(),
 		"circuits_total":      a.circuitStore.Count(),
 		"streams_active":      len(streams),
 		"relays_known":        len(relays),

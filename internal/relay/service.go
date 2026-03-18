@@ -18,13 +18,15 @@ import (
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
+	"github.com/chenjia404/meshproxy/internal/traffic"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 // Service 實現 relay 節點：與客戶端做每跳密鑰協商，收到 OnionData 時只解一層，將內層密文轉發給 next_hop。
 type Service struct {
-	host host.Host
-	mu   sync.Mutex
+	host    host.Host
+	mu      sync.Mutex
+	traffic *traffic.Recorder
 	// streamID -> 與該客戶端 stream 對應的 HopSession（僅與發起方建立）
 	sessionsByStream map[string]*protocol.HopSession
 	// circuitID -> 到下一跳（exit）的 stream，用於轉發
@@ -34,9 +36,10 @@ type Service struct {
 }
 
 // NewService 在給定 host 上註冊 circuit 協議處理，返回 Service。
-func NewService(h host.Host) *Service {
+func NewService(h host.Host, trafficStats *traffic.Recorder) *Service {
 	s := &Service{
 		host:             h,
+		traffic:          trafficStats,
 		sessionsByStream: make(map[string]*protocol.HopSession),
 		nextHopStreams:   make(map[string]network.Stream),
 		writeMu:          make(map[string]*sync.Mutex),
@@ -162,6 +165,9 @@ func (s *Service) serveStream(str network.Stream) {
 				// extend：轉發客戶端公鑰給 exit，觸發 exit 的密鑰協商
 				initFrame, _ := protocol.NewKeyExchangeInitFrame(frame.CircuitID, innerCipher)
 				err = protocol.WriteFrame(nextStr, initFrame)
+				if err == nil {
+					s.recordTraffic(0, uint64(len(initFrame.PayloadJSON)))
+				}
 			} else {
 				// 一般洋蔥數據：轉發內層密文給 exit
 				innerCell := protocol.OnionCell{Ciphertext: innerCipher}
@@ -173,6 +179,9 @@ func (s *Service) serveStream(str network.Stream) {
 					PayloadJSON: innerPayload,
 				}
 				err = protocol.WriteFrame(nextStr, fwdFrame)
+				if err == nil {
+					s.recordTraffic(0, uint64(len(fwdFrame.PayloadJSON)))
+				}
 			}
 			writeMu.Unlock()
 			if err != nil {
@@ -239,6 +248,9 @@ func (s *Service) servePassthroughTunnelWithHeader(str network.Stream, header tu
 	if err := tunnel.WriteJSONFrame(nextStr, header); err != nil {
 		return
 	}
+	if headerJSON, err := json.Marshal(header); err == nil {
+		s.recordTraffic(0, uint64(len(headerJSON)))
+	}
 
 	var once sync.Once
 	closeBoth := func() {
@@ -246,10 +258,12 @@ func (s *Service) servePassthroughTunnelWithHeader(str network.Stream, header tu
 		_ = nextStr.Close()
 	}
 	safe.Go("relay.serveRawTunnel.copyUp", func() {
-		_, _ = io.Copy(nextStr, str)
+		n, _ := io.Copy(nextStr, str)
+		s.recordTraffic(uint64(n), 0)
 		once.Do(closeBoth)
 	})
-	_, _ = io.Copy(str, nextStr)
+	n, _ := io.Copy(str, nextStr)
+	s.recordTraffic(0, uint64(n))
 	once.Do(closeBoth)
 }
 
@@ -299,5 +313,13 @@ func (s *Service) pumpNextHopToClient(circuitID string, nextStr network.Stream, 
 		writeMu.Lock()
 		_ = protocol.WriteFrame(clientStr, outFrame)
 		writeMu.Unlock()
+		s.recordTraffic(uint64(len(backPayload)), 0)
 	}
+}
+
+func (s *Service) recordTraffic(sent, recv uint64) {
+	if s == nil || s.traffic == nil || (sent == 0 && recv == 0) {
+		return
+	}
+	s.traffic.Add(sent, recv)
 }
