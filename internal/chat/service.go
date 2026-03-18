@@ -47,14 +47,24 @@ type chatRequestProbeState struct {
 	at        time.Time
 }
 
+type profileSyncState struct {
+	mu             sync.Mutex
+	inFlight       bool
+	lastProfileKey string
+	nextAttemptAt  time.Time
+	failures       int
+}
+
 const (
-	directRetryBatchSize      = 64
-	directAckWait             = 20 * time.Second
-	directSyncBatchSize       = 256
-	directAutoConnectTTL      = 30 * time.Second
-	directChatRequestProbeTTL = 1 * time.Minute
-	directProfileSyncTTL      = 1 * time.Minute
-	directAvatarFetchTTL      = 1 * time.Minute
+	directRetryBatchSize        = 64
+	directAckWait               = 20 * time.Second
+	directSyncBatchSize         = 256
+	directAutoConnectTTL        = 30 * time.Second
+	directChatRequestProbeTTL   = 1 * time.Minute
+	directProfileSyncTTL        = 1 * time.Minute
+	directProfileSyncBackoff    = 1 * time.Minute
+	directProfileSyncMaxBackoff = 1 * time.Hour
+	directAvatarFetchTTL        = 1 * time.Minute
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -209,12 +219,9 @@ func (s *Service) maybeSyncProfile(peerID string) {
 		return
 	}
 	key := peerID + "\x00" + profile.Nickname + "\x00" + profile.Bio + "\x00" + profile.Avatar
-	if last, ok := s.profileSyncSeen.Load(key); ok {
-		if ts, ok := last.(time.Time); ok && time.Since(ts) < directProfileSyncTTL {
-			return
-		}
+	if !s.beginProfileSync(peerID, key) {
+		return
 	}
-	s.profileSyncSeen.Store(key, time.Now())
 	safe.Go("chat.profileSync", func() {
 		wire := ProfileSync{
 			Type:       MessageTypeProfileSync,
@@ -226,16 +233,75 @@ func (s *Service) maybeSyncProfile(peerID string) {
 			SentAtUnix: time.Now().UnixMilli(),
 		}
 		if err := s.sendEnvelope(peerID, wire); err != nil {
-			if isIgnorableChatRequestError(err) {
-				s.markChatRequestProbeResult(peerID, false)
-			}
+			s.finishProfileSync(peerID, key, false, err)
 			if !isIgnorableProfileSyncError(err) {
 				log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
 			}
 			return
 		}
-		s.markChatRequestProbeResult(peerID, true)
+		s.finishProfileSync(peerID, key, true, nil)
 	})
+}
+
+func (s *Service) beginProfileSync(peerID, profileKey string) bool {
+	if s == nil || peerID == "" || profileKey == "" {
+		return false
+	}
+	stateAny, _ := s.profileSyncSeen.LoadOrStore(peerID, &profileSyncState{})
+	state := stateAny.(*profileSyncState)
+	now := time.Now()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.inFlight {
+		return false
+	}
+	if state.lastProfileKey == profileKey && !state.nextAttemptAt.IsZero() && now.Before(state.nextAttemptAt) {
+		return false
+	}
+	state.inFlight = true
+	state.lastProfileKey = profileKey
+	return true
+}
+
+func (s *Service) finishProfileSync(peerID, profileKey string, ok bool, err error) {
+	if s == nil || peerID == "" {
+		return
+	}
+	stateAny, okLoad := s.profileSyncSeen.Load(peerID)
+	if !okLoad {
+		return
+	}
+	state, okType := stateAny.(*profileSyncState)
+	if !okType || state == nil {
+		return
+	}
+	now := time.Now()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.inFlight = false
+	state.lastProfileKey = profileKey
+	if ok {
+		state.failures = 0
+		state.nextAttemptAt = now.Add(directProfileSyncTTL)
+		s.markChatRequestProbeResult(peerID, true)
+		return
+	}
+	state.failures++
+	if err != nil && isIgnorableChatRequestError(err) {
+		s.markChatRequestProbeResult(peerID, false)
+	}
+	delay := directProfileSyncBackoff << min(state.failures-1, 6)
+	if delay > directProfileSyncMaxBackoff {
+		delay = directProfileSyncMaxBackoff
+	}
+	state.nextAttemptAt = now.Add(delay)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *Service) chatRequestProbeAllowed(peerID string) bool {
