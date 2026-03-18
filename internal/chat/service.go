@@ -206,9 +206,23 @@ func (s *Service) maybeSyncProfile(peerID string) {
 			SentAtUnix: time.Now().UnixMilli(),
 		}
 		if err := s.sendEnvelope(peerID, wire); err != nil {
-			log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
+			if !isIgnorableProfileSyncError(err) {
+				log.Printf("[chat] send profile sync failed peer=%s err=%v", peerID, err)
+			}
 		}
 	})
+}
+
+func isIgnorableProfileSyncError(err error) bool {
+	if err == nil {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sent go away") ||
+		strings.Contains(msg, "transport error") ||
+		strings.Contains(msg, "connection closed") ||
+		strings.Contains(msg, "unknown protocol") ||
+		strings.Contains(msg, "protocol not supported")
 }
 
 func (s *Service) syncPeerAvatar(peerID string) {
