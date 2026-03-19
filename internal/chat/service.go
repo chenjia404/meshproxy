@@ -67,11 +67,11 @@ const (
 	directProfileSyncMaxBackoff = 1 * time.Hour
 	directAvatarFetchTTL        = 1 * time.Minute
 
-	friendRequestRetryDeadline       = 7 * 24 * time.Hour
-	friendRequestRetryTickInterval   = 20 * time.Second
-	friendRequestRetryBatchSize      = 32
-	friendRequestRetryBaseDelay       = 10 * time.Second
-	friendRequestRetryMaxDelay        = 30 * time.Minute
+	friendRequestRetryDeadline     = 7 * 24 * time.Hour
+	friendRequestRetryTickInterval = 20 * time.Second
+	friendRequestRetryBatchSize    = 32
+	friendRequestRetryBaseDelay    = 10 * time.Second
+	friendRequestRetryMaxDelay     = 30 * time.Minute
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -761,6 +761,15 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 			}
 			if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
 				log.Printf("[chat] send accept for existing conversation failed request=%s err=%v", requestID, err)
+				// Schedule retry for up to friendRequestRetryDeadline.
+				if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
+					log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
+				}
+			}
+		} else {
+			// Can't connect now: schedule accept retry.
+			if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
+				log.Printf("[chat] schedule friend accept retry (existing conv, connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
 			}
 		}
 		return existingConv, nil
@@ -794,6 +803,10 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	}
 	_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
+		// Connection not currently available: schedule retry of SessionAccept.
+		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
+			log.Printf("[chat] schedule friend accept retry (connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
+		}
 		return conv, nil
 	}
 	wire := SessionAccept{
@@ -810,6 +823,10 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	}
 	if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
 		log.Printf("[chat] send accept failed request=%s err=%v", requestID, err)
+		// Schedule retry for up to friendRequestRetryDeadline.
+		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
+			log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
+		}
 	}
 	return conv, nil
 }
@@ -1392,28 +1409,8 @@ func isAvatarEnvelope(v any) bool {
 }
 
 func (s *Service) sendViaRelay(peerID string, v any) error {
-	path, firstHop, tunnelID, err := s.buildRelayPath(peerID)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
-	defer cancel()
-	str, err := s.host.NewStream(ctx, firstHop, p2p.ProtocolChatRelayE2E)
-	if err != nil {
-		return err
-	}
-	defer str.Close()
-	header := tunnel.RouteHeader{
-		Version:    1,
-		TunnelID:   tunnelID,
-		Path:       path,
-		HopIndex:   0,
-		TargetExit: peerID,
-	}
-	if err := tunnel.WriteJSONFrame(str, header); err != nil {
-		return err
-	}
-	sess, err := tunnel.ClientHandshake(str, tunnelID)
+	const relayAttemptLimit = 5
+	relays, err := s.pickRelayCandidates(peerID, relayAttemptLimit)
 	if err != nil {
 		return err
 	}
@@ -1421,26 +1418,80 @@ func (s *Service) sendViaRelay(peerID string, v any) error {
 	if err != nil {
 		return err
 	}
-	frame, err := sess.Seal(tunnel.FrameTypeData, payload)
-	if err != nil {
-		return err
+
+	var lastErr error
+	for _, relayPID := range relays {
+		path := []string{relayPID.String(), peerID}
+		tunnelID := uuid.NewString()
+
+		ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+		str, openErr := s.host.NewStream(ctx, relayPID, p2p.ProtocolChatRelayE2E)
+		cancel()
+		if openErr != nil {
+			lastErr = openErr
+			continue
+		}
+
+		func() {
+			defer str.Close()
+			header := tunnel.RouteHeader{
+				Version:    1,
+				TunnelID:   tunnelID,
+				Path:       path,
+				HopIndex:   0,
+				TargetExit: peerID,
+			}
+			if err := tunnel.WriteJSONFrame(str, header); err != nil {
+				lastErr = err
+				return
+			}
+			sess, err := tunnel.ClientHandshake(str, tunnelID)
+			if err != nil {
+				lastErr = err
+				return
+			}
+			frame, err := sess.Seal(tunnel.FrameTypeData, payload)
+			if err != nil {
+				lastErr = err
+				return
+			}
+			if err := tunnel.WriteJSONFrame(str, frame); err != nil {
+				lastErr = err
+				return
+			}
+			if closeFrame, err := sess.Seal(tunnel.FrameTypeClose, nil); err == nil {
+				_ = tunnel.WriteJSONFrame(str, closeFrame)
+			}
+			lastErr = nil
+		}()
+
+		if lastErr == nil {
+			return nil
+		}
 	}
-	if err := tunnel.WriteJSONFrame(str, frame); err != nil {
-		return err
+	if lastErr != nil {
+		return lastErr
 	}
-	closeFrame, err := sess.Seal(tunnel.FrameTypeClose, nil)
-	if err == nil {
-		_ = tunnel.WriteJSONFrame(str, closeFrame)
-	}
-	return nil
+	return errors.New("no relay path available")
 }
 
-func (s *Service) buildRelayPath(targetPeerID string) ([]string, peer.ID, string, error) {
+func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID, error) {
 	if s.discovery == nil {
-		return nil, "", "", errors.New("discovery store not available")
+		return nil, errors.New("discovery store not available")
 	}
-	relays := s.discovery.ListRelays()
-	for _, relayDesc := range relays {
+	all := s.discovery.ListRelays()
+	if len(all) == 0 {
+		return nil, errors.New("no relay path available")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+
+	// Shuffle relay list to randomize selection.
+	rand.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
+
+	out := make([]peer.ID, 0, min(limit, len(all)))
+	for _, relayDesc := range all {
 		if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer || relayDesc.PeerID == targetPeerID {
 			continue
 		}
@@ -1448,9 +1499,15 @@ func (s *Service) buildRelayPath(targetPeerID string) ([]string, peer.ID, string
 		if err != nil {
 			continue
 		}
-		return []string{relayDesc.PeerID, targetPeerID}, pid, uuid.NewString(), nil
+		out = append(out, pid)
+		if len(out) >= limit {
+			break
+		}
 	}
-	return nil, "", "", errors.New("no relay path available")
+	if len(out) == 0 {
+		return nil, errors.New("no relay path available")
+	}
+	return out, nil
 }
 
 func protocolForEnvelope(v any) coreprotocol.ID {
@@ -2227,16 +2284,18 @@ func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Ti
 		_ = s.store.DeleteFriendRequestJob(item.RequestID)
 		return err
 	}
-	// Request no longer pending: stop retrying.
-	if req.State != RequestStatePending {
+	// Abandon after 1 week, regardless of state.
+	if !req.CreatedAt.IsZero() && now.After(req.CreatedAt.Add(friendRequestRetryDeadline)) {
+		if req.State == RequestStatePending {
+			if err := s.store.UpdateRequestState(req.RequestID, RequestStateRejected, ""); err != nil {
+				return err
+			}
+		}
 		return s.store.DeleteFriendRequestJob(item.RequestID)
 	}
 
-	// Abandon after 1 week.
-	if !req.CreatedAt.IsZero() && now.After(req.CreatedAt.Add(friendRequestRetryDeadline)) {
-		if err := s.store.UpdateRequestState(req.RequestID, RequestStateRejected, ""); err != nil {
-			return err
-		}
+	// If request is no longer pending or accepted, stop retrying.
+	if req.State != RequestStatePending && req.State != RequestStateAccepted {
 		return s.store.DeleteFriendRequestJob(item.RequestID)
 	}
 
@@ -2250,28 +2309,70 @@ func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Ti
 		return err
 	}
 
-	wire := SessionRequest{
-		Type:             MessageTypeSessionRequest,
-		RequestID:        req.RequestID,
-		FromPeerID:       s.localPeer,
-		ToPeerID:         req.ToPeerID,
-		Nickname:         req.Nickname,
-		Bio:              req.Bio,
-		AvatarName:       profile.Avatar,
-		RetentionMinutes: req.RetentionMinutes,
-		IntroText:        req.IntroText,
-		ChatKexPub:       req.RemoteChatKexPub,
-		SentAtUnix:       now.UnixMilli(),
+	// Pending -> re-send SessionRequest (outgoing friend request).
+	if req.State == RequestStatePending {
+		wire := SessionRequest{
+			Type:             MessageTypeSessionRequest,
+			RequestID:        req.RequestID,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         req.ToPeerID,
+			Nickname:         req.Nickname,
+			Bio:              req.Bio,
+			AvatarName:       profile.Avatar,
+			RetentionMinutes: req.RetentionMinutes,
+			IntroText:        req.IntroText,
+			ChatKexPub:       req.RemoteChatKexPub,
+			SentAtUnix:       now.UnixMilli(),
+		}
+
+		if err := s.sendEnvelope(item.PeerID, wire); err == nil {
+			return s.store.DeleteFriendRequestJob(item.RequestID)
+		} else {
+			if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
+				return fmt.Errorf("schedule retry failed after send error: send=%v schedule=%v", err, scheduleErr)
+			}
+			return err
+		}
 	}
 
-	if err := s.sendEnvelope(item.PeerID, wire); err == nil {
-		return s.store.DeleteFriendRequestJob(item.RequestID)
-	} else {
+	// Accepted -> re-send SessionAccept to finalize the friendship.
+	if req.State == RequestStateAccepted {
+		if req.ConversationID == "" {
+			// Nothing meaningful to retry; drop the job.
+			return s.store.DeleteFriendRequestJob(item.RequestID)
+		}
+		conv, err := s.store.GetConversation(req.ConversationID)
+		if err != nil {
+			_ = s.store.DeleteFriendRequestJob(item.RequestID)
+			return err
+		}
+		retentionMinutes := req.RetentionMinutes
+		if conv.RetentionMinutes > retentionMinutes {
+			retentionMinutes = conv.RetentionMinutes
+		}
+		wire := SessionAccept{
+			Type:             MessageTypeSessionAccept,
+			RequestID:        req.RequestID,
+			ConversationID:   conv.ConversationID,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         item.PeerID,
+			Bio:              profile.Bio,
+			AvatarName:       profile.Avatar,
+			RetentionMinutes: retentionMinutes,
+			ChatKexPub:       profile.ChatKexPub,
+			SentAtUnix:       now.UnixMilli(),
+		}
+		if err := s.sendEnvelope(item.PeerID, wire); err == nil {
+			return s.store.DeleteFriendRequestJob(item.RequestID)
+		}
 		if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
-			return fmt.Errorf("schedule retry failed after send error: send=%v schedule=%v", err, scheduleErr)
+			return fmt.Errorf("schedule retry (accept) failed after send error: send=%v schedule=%v", err, scheduleErr)
 		}
 		return err
 	}
+
+	// Should not reach here, but be safe.
+	return s.store.DeleteFriendRequestJob(item.RequestID)
 }
 
 func (s *Service) scheduleFriendRequestRetry(requestID, peerID string, retryCount int) error {

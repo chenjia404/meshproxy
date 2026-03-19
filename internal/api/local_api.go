@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -298,6 +299,9 @@ type LocalAPI struct {
 	server          *http.Server
 	consoleHTML     []byte // embedded console index.html, served directly to avoid redirect
 	chatHTML        []byte // embedded chat index.html, served directly to avoid redirect
+	statusMu        sync.RWMutex
+	statusCache     map[string]any
+	statusCacheAt   time.Time
 }
 
 func (a *LocalAPI) meshSpaceIntID(spaceID uint32) int {
@@ -453,6 +457,19 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// /status may be polled frequently by UI. Cache a short snapshot to avoid
+	// repeatedly collecting optional heavy fields on every request.
+	const statusCacheTTL = 1200 * time.Millisecond
+	now := time.Now()
+
+	a.statusMu.RLock()
+	if a.statusCache != nil && now.Sub(a.statusCacheAt) <= statusCacheTTL {
+		resp := cloneStatusMap(a.statusCache)
+		a.statusMu.RUnlock()
+		writeJSON(w, resp)
+		return
+	}
+	a.statusMu.RUnlock()
 
 	p := a.statusProvider
 	resp := map[string]any{
@@ -475,7 +492,23 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 			resp["circuit_pool"] = ps
 		}
 	}
+
+	a.statusMu.Lock()
+	a.statusCache = cloneStatusMap(resp)
+	a.statusCacheAt = now
+	a.statusMu.Unlock()
 	writeJSON(w, resp)
+}
+
+func cloneStatusMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func (a *LocalAPI) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
