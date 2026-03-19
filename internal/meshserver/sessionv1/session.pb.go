@@ -7,47 +7,57 @@ const _ = proto.ProtoPackageIsVersion4
 type MsgType int32
 
 const (
-	MsgType_MSG_TYPE_UNSPECIFIED            MsgType = 0
-	MsgType_HELLO                           MsgType = 1
-	MsgType_AUTH_CHALLENGE                  MsgType = 2
-	MsgType_AUTH_PROVE                      MsgType = 3
-	MsgType_AUTH_RESULT                     MsgType = 4
-	MsgType_PING                            MsgType = 10
-	MsgType_PONG                            MsgType = 11
-	MsgType_ERROR                           MsgType = 12
-	MsgType_LIST_SERVERS_REQ                MsgType = 20
-	MsgType_LIST_SERVERS_RESP               MsgType = 21
-	MsgType_LIST_CHANNELS_REQ               MsgType = 22
-	MsgType_LIST_CHANNELS_RESP              MsgType = 23
-	MsgType_SUBSCRIBE_CHANNEL_REQ           MsgType = 24
-	MsgType_SUBSCRIBE_CHANNEL_RESP          MsgType = 25
-	MsgType_UNSUBSCRIBE_CHANNEL_REQ         MsgType = 26
-	MsgType_UNSUBSCRIBE_CHANNEL_RESP        MsgType = 27
-	MsgType_CREATE_GROUP_REQ                MsgType = 28
-	MsgType_CREATE_GROUP_RESP               MsgType = 29
-	MsgType_SEND_MESSAGE_REQ                MsgType = 30
-	MsgType_SEND_MESSAGE_ACK                MsgType = 31
-	MsgType_MESSAGE_EVENT                   MsgType = 32
-	MsgType_CHANNEL_DELIVER_ACK             MsgType = 33
-	MsgType_CHANNEL_READ_UPDATE             MsgType = 34
-	MsgType_SYNC_CHANNEL_REQ                MsgType = 35
-	MsgType_SYNC_CHANNEL_RESP               MsgType = 36
-	MsgType_CREATE_CHANNEL_REQ              MsgType = 37
-	MsgType_CREATE_CHANNEL_RESP             MsgType = 38
-	MsgType_ADMIN_SET_MEMBER_ROLE_REQ       MsgType = 39
-	MsgType_ADMIN_SET_MEMBER_ROLE_RESP      MsgType = 40
-	MsgType_ADMIN_SET_CHANNEL_CREATION_REQ  MsgType = 41
-	MsgType_ADMIN_SET_CHANNEL_CREATION_RESP MsgType = 42
-	MsgType_JOIN_SERVER_REQ                 MsgType = 43
-	MsgType_JOIN_SERVER_RESP                MsgType = 44
-	MsgType_INVITE_SERVER_MEMBER_REQ        MsgType = 45
-	MsgType_INVITE_SERVER_MEMBER_RESP       MsgType = 46
-	MsgType_KICK_SERVER_MEMBER_REQ          MsgType = 47
-	MsgType_KICK_SERVER_MEMBER_RESP         MsgType = 48
-	MsgType_BAN_SERVER_MEMBER_REQ           MsgType = 49
-	MsgType_BAN_SERVER_MEMBER_RESP          MsgType = 50
-	MsgType_LIST_SERVER_MEMBERS_REQ         MsgType = 51
-	MsgType_LIST_SERVER_MEMBERS_RESP        MsgType = 52
+	MsgType_MSG_TYPE_UNSPECIFIED                  MsgType = 0
+	MsgType_HELLO                                 MsgType = 1
+	MsgType_AUTH_CHALLENGE                        MsgType = 2
+	MsgType_AUTH_PROVE                            MsgType = 3
+	MsgType_AUTH_RESULT                           MsgType = 4
+	MsgType_PING                                  MsgType = 10
+	MsgType_PONG                                  MsgType = 11
+	MsgType_ERROR                                 MsgType = 12
+	MsgType_LIST_SPACES_REQ                       MsgType = 20
+	MsgType_LIST_SPACES_RESP                      MsgType = 21
+	MsgType_LIST_CHANNELS_REQ                     MsgType = 22
+	MsgType_LIST_CHANNELS_RESP                    MsgType = 23
+	MsgType_SUBSCRIBE_CHANNEL_REQ                 MsgType = 24
+	MsgType_SUBSCRIBE_CHANNEL_RESP                MsgType = 25
+	MsgType_UNSUBSCRIBE_CHANNEL_REQ               MsgType = 26
+	MsgType_UNSUBSCRIBE_CHANNEL_RESP              MsgType = 27
+	MsgType_CREATE_GROUP_REQ                      MsgType = 28
+	MsgType_CREATE_GROUP_RESP                     MsgType = 29
+	MsgType_SEND_MESSAGE_REQ                      MsgType = 30
+	MsgType_SEND_MESSAGE_ACK                      MsgType = 31
+	MsgType_MESSAGE_EVENT                         MsgType = 32
+	MsgType_CHANNEL_DELIVER_ACK                   MsgType = 33
+	MsgType_CHANNEL_READ_UPDATE                   MsgType = 34
+	MsgType_SYNC_CHANNEL_REQ                      MsgType = 35
+	MsgType_SYNC_CHANNEL_RESP                     MsgType = 36
+	MsgType_CREATE_CHANNEL_REQ                    MsgType = 37
+	MsgType_CREATE_CHANNEL_RESP                   MsgType = 38
+	MsgType_JOIN_SPACE_REQ                        MsgType = 43
+	MsgType_JOIN_SPACE_RESP                       MsgType = 44
+	MsgType_INVITE_SPACE_MEMBER_REQ               MsgType = 45
+	MsgType_INVITE_SPACE_MEMBER_RESP              MsgType = 46
+	MsgType_KICK_SPACE_MEMBER_REQ                 MsgType = 47
+	MsgType_KICK_SPACE_MEMBER_RESP                MsgType = 48
+	MsgType_BAN_SPACE_MEMBER_REQ                  MsgType = 49
+	MsgType_BAN_SPACE_MEMBER_RESP                 MsgType = 50
+	MsgType_LIST_SPACE_MEMBERS_REQ                MsgType = 51
+	MsgType_LIST_SPACE_MEMBERS_RESP               MsgType = 52
+	MsgType_UNBAN_SPACE_MEMBER_REQ                MsgType = 53
+	MsgType_UNBAN_SPACE_MEMBER_RESP               MsgType = 54
+	MsgType_CREATE_SPACE_REQ                      MsgType = 57
+	MsgType_CREATE_SPACE_RESP                     MsgType = 58
+	MsgType_GET_CREATE_SPACE_PERMISSIONS_REQ      MsgType = 59
+	MsgType_GET_CREATE_SPACE_PERMISSIONS_RESP     MsgType = 60
+	MsgType_GET_CREATE_GROUP_PERMISSIONS_REQ      MsgType = 61
+	MsgType_GET_CREATE_GROUP_PERMISSIONS_RESP     MsgType = 62
+	MsgType_GET_MEDIA_REQ                         MsgType = 63
+	MsgType_GET_MEDIA_RESP                        MsgType = 64
+	MsgType_ADMIN_SET_SPACE_MEMBER_ROLE_REQ       MsgType = 39
+	MsgType_ADMIN_SET_SPACE_MEMBER_ROLE_RESP      MsgType = 40
+	MsgType_ADMIN_SET_SPACE_CHANNEL_CREATION_REQ  MsgType = 41
+	MsgType_ADMIN_SET_SPACE_CHANNEL_CREATION_RESP MsgType = 42
 )
 
 var MsgType_name = map[int32]string{
@@ -59,8 +69,8 @@ var MsgType_name = map[int32]string{
 	10: "PING",
 	11: "PONG",
 	12: "ERROR",
-	20: "LIST_SERVERS_REQ",
-	21: "LIST_SERVERS_RESP",
+	20: "LIST_SPACES_REQ",
+	21: "LIST_SPACES_RESP",
 	22: "LIST_CHANNELS_REQ",
 	23: "LIST_CHANNELS_RESP",
 	24: "SUBSCRIBE_CHANNEL_REQ",
@@ -78,20 +88,30 @@ var MsgType_name = map[int32]string{
 	36: "SYNC_CHANNEL_RESP",
 	37: "CREATE_CHANNEL_REQ",
 	38: "CREATE_CHANNEL_RESP",
-	39: "ADMIN_SET_MEMBER_ROLE_REQ",
-	40: "ADMIN_SET_MEMBER_ROLE_RESP",
-	41: "ADMIN_SET_CHANNEL_CREATION_REQ",
-	42: "ADMIN_SET_CHANNEL_CREATION_RESP",
-	43: "JOIN_SERVER_REQ",
-	44: "JOIN_SERVER_RESP",
-	45: "INVITE_SERVER_MEMBER_REQ",
-	46: "INVITE_SERVER_MEMBER_RESP",
-	47: "KICK_SERVER_MEMBER_REQ",
-	48: "KICK_SERVER_MEMBER_RESP",
-	49: "BAN_SERVER_MEMBER_REQ",
-	50: "BAN_SERVER_MEMBER_RESP",
-	51: "LIST_SERVER_MEMBERS_REQ",
-	52: "LIST_SERVER_MEMBERS_RESP",
+	39: "ADMIN_SET_SPACE_MEMBER_ROLE_REQ",
+	40: "ADMIN_SET_SPACE_MEMBER_ROLE_RESP",
+	41: "ADMIN_SET_SPACE_CHANNEL_CREATION_REQ",
+	42: "ADMIN_SET_SPACE_CHANNEL_CREATION_RESP",
+	43: "JOIN_SPACE_REQ",
+	44: "JOIN_SPACE_RESP",
+	45: "INVITE_SPACE_MEMBER_REQ",
+	46: "INVITE_SPACE_MEMBER_RESP",
+	47: "KICK_SPACE_MEMBER_REQ",
+	48: "KICK_SPACE_MEMBER_RESP",
+	49: "BAN_SPACE_MEMBER_REQ",
+	50: "BAN_SPACE_MEMBER_RESP",
+	51: "LIST_SPACE_MEMBERS_REQ",
+	52: "LIST_SPACE_MEMBERS_RESP",
+	53: "UNBAN_SPACE_MEMBER_REQ",
+	54: "UNBAN_SPACE_MEMBER_RESP",
+	57: "CREATE_SPACE_REQ",
+	58: "CREATE_SPACE_RESP",
+	59: "GET_CREATE_SPACE_PERMISSIONS_REQ",
+	60: "GET_CREATE_SPACE_PERMISSIONS_RESP",
+	61: "GET_CREATE_GROUP_PERMISSIONS_REQ",
+	62: "GET_CREATE_GROUP_PERMISSIONS_RESP",
+	63: "GET_MEDIA_REQ",
+	64: "GET_MEDIA_RESP",
 }
 
 func (x MsgType) String() string { return proto.EnumName(MsgType_name, int32(x)) }
@@ -191,11 +211,11 @@ func (m *Hello) String() string { return proto.CompactTextString(m) }
 func (*Hello) ProtoMessage()    {}
 
 type AuthChallenge struct {
-	ServerPeerId string `protobuf:"bytes,1,opt,name=server_peer_id,json=serverPeerId,proto3" json:"server_peer_id,omitempty"`
-	Nonce        []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	IssuedAtMs   uint64 `protobuf:"varint,3,opt,name=issued_at_ms,json=issuedAtMs,proto3" json:"issued_at_ms,omitempty"`
-	ExpiresAtMs  uint64 `protobuf:"varint,4,opt,name=expires_at_ms,json=expiresAtMs,proto3" json:"expires_at_ms,omitempty"`
-	SessionHint  string `protobuf:"bytes,5,opt,name=session_hint,json=sessionHint,proto3" json:"session_hint,omitempty"`
+	NodePeerId  string `protobuf:"bytes,1,opt,name=node_peer_id,json=nodePeerId,proto3" json:"node_peer_id,omitempty"`
+	Nonce       []byte `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	IssuedAtMs  uint64 `protobuf:"varint,3,opt,name=issued_at_ms,json=issuedAtMs,proto3" json:"issued_at_ms,omitempty"`
+	ExpiresAtMs uint64 `protobuf:"varint,4,opt,name=expires_at_ms,json=expiresAtMs,proto3" json:"expires_at_ms,omitempty"`
+	SessionHint string `protobuf:"bytes,5,opt,name=session_hint,json=sessionHint,proto3" json:"session_hint,omitempty"`
 }
 
 func (m *AuthChallenge) Reset()         { *m = AuthChallenge{} }
@@ -216,12 +236,12 @@ func (m *AuthProve) String() string { return proto.CompactTextString(m) }
 func (*AuthProve) ProtoMessage()    {}
 
 type AuthResult struct {
-	Ok          bool             `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	SessionId   string           `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	UserId      string           `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	DisplayName string           `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Message     string           `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	Servers     []*ServerSummary `protobuf:"bytes,6,rep,name=servers,proto3" json:"servers,omitempty"`
+	Ok          bool            `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SessionId   string          `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	UserId      string          `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	DisplayName string          `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Message     string          `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+	Spaces      []*SpaceSummary `protobuf:"bytes,6,rep,name=spaces,proto3" json:"spaces,omitempty"`
 }
 
 func (m *AuthResult) Reset()         { *m = AuthResult{} }
@@ -253,47 +273,20 @@ func (m *Pong) Reset()         { *m = Pong{} }
 func (m *Pong) String() string { return proto.CompactTextString(m) }
 func (*Pong) ProtoMessage()    {}
 
-type ServerSummary struct {
-	ServerId             string     `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	Name                 string     `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	AvatarUrl            string     `protobuf:"bytes,3,opt,name=avatar_url,json=avatarUrl,proto3" json:"avatar_url,omitempty"`
-	Description          string     `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
-	Visibility           Visibility `protobuf:"varint,5,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
-	MemberCount          uint32     `protobuf:"varint,6,opt,name=member_count,json=memberCount,proto3" json:"member_count,omitempty"`
-	AllowChannelCreation bool       `protobuf:"varint,7,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
-}
-
-func (m *ServerSummary) Reset()         { *m = ServerSummary{} }
-func (m *ServerSummary) String() string { return proto.CompactTextString(m) }
-func (*ServerSummary) ProtoMessage()    {}
-
-type ListServersReq struct{}
-
-func (m *ListServersReq) Reset()         { *m = ListServersReq{} }
-func (m *ListServersReq) String() string { return proto.CompactTextString(m) }
-func (*ListServersReq) ProtoMessage()    {}
-
-type ListServersResp struct {
-	Servers []*ServerSummary `protobuf:"bytes,1,rep,name=servers,proto3" json:"servers,omitempty"`
-}
-
-func (m *ListServersResp) Reset()         { *m = ListServersResp{} }
-func (m *ListServersResp) String() string { return proto.CompactTextString(m) }
-func (*ListServersResp) ProtoMessage()    {}
-
 type ChannelSummary struct {
-	ChannelId       string      `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	ServerId        string      `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	ChannelId       uint32      `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	SpaceId         uint32      `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	Type            ChannelType `protobuf:"varint,3,opt,name=type,proto3,enum=meshserver.session.v1.ChannelType" json:"type,omitempty"`
 	Name            string      `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
 	Description     string      `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
 	Visibility      Visibility  `protobuf:"varint,6,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
 	SlowModeSeconds uint32      `protobuf:"varint,7,opt,name=slow_mode_seconds,json=slowModeSeconds,proto3" json:"slow_mode_seconds,omitempty"`
 	LastSeq         uint64      `protobuf:"varint,8,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
-	CanView         bool        `protobuf:"varint,9,opt,name=can_view,json=canView,proto3" json:"can_view,omitempty"`
-	CanSendMessage  bool        `protobuf:"varint,10,opt,name=can_send_message,json=canSendMessage,proto3" json:"can_send_message,omitempty"`
-	CanSendImage    bool        `protobuf:"varint,11,opt,name=can_send_image,json=canSendImage,proto3" json:"can_send_image,omitempty"`
-	CanSendFile     bool        `protobuf:"varint,12,opt,name=can_send_file,json=canSendFile,proto3" json:"can_send_file,omitempty"`
+	MemberCount     uint32      `protobuf:"varint,9,opt,name=member_count,json=memberCount,proto3" json:"member_count,omitempty"`
+	CanView         bool        `protobuf:"varint,10,opt,name=can_view,json=canView,proto3" json:"can_view,omitempty"`
+	CanSendMessage  bool        `protobuf:"varint,11,opt,name=can_send_message,json=canSendMessage,proto3" json:"can_send_message,omitempty"`
+	CanSendImage    bool        `protobuf:"varint,12,opt,name=can_send_image,json=canSendImage,proto3" json:"can_send_image,omitempty"`
+	CanSendFile     bool        `protobuf:"varint,13,opt,name=can_send_file,json=canSendFile,proto3" json:"can_send_file,omitempty"`
 }
 
 func (m *ChannelSummary) Reset()         { *m = ChannelSummary{} }
@@ -301,7 +294,7 @@ func (m *ChannelSummary) String() string { return proto.CompactTextString(m) }
 func (*ChannelSummary) ProtoMessage()    {}
 
 type ListChannelsReq struct {
-	ServerId string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	SpaceId uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 }
 
 func (m *ListChannelsReq) Reset()         { *m = ListChannelsReq{} }
@@ -309,7 +302,7 @@ func (m *ListChannelsReq) String() string { return proto.CompactTextString(m) }
 func (*ListChannelsReq) ProtoMessage()    {}
 
 type ListChannelsResp struct {
-	ServerId string            `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	SpaceId  uint32            `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	Channels []*ChannelSummary `protobuf:"bytes,2,rep,name=channels,proto3" json:"channels,omitempty"`
 }
 
@@ -317,8 +310,30 @@ func (m *ListChannelsResp) Reset()         { *m = ListChannelsResp{} }
 func (m *ListChannelsResp) String() string { return proto.CompactTextString(m) }
 func (*ListChannelsResp) ProtoMessage()    {}
 
+type CreateSpaceReq struct {
+	Name                 string     `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description          string     `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	Visibility           Visibility `protobuf:"varint,3,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
+	AllowChannelCreation bool       `protobuf:"varint,4,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
+}
+
+func (m *CreateSpaceReq) Reset()         { *m = CreateSpaceReq{} }
+func (m *CreateSpaceReq) String() string { return proto.CompactTextString(m) }
+func (*CreateSpaceReq) ProtoMessage()    {}
+
+type CreateSpaceResp struct {
+	Ok      bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	Space   *SpaceSummary `protobuf:"bytes,3,opt,name=space,proto3" json:"space,omitempty"`
+	Message string        `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *CreateSpaceResp) Reset()         { *m = CreateSpaceResp{} }
+func (m *CreateSpaceResp) String() string { return proto.CompactTextString(m) }
+func (*CreateSpaceResp) ProtoMessage()    {}
+
 type SubscribeChannelReq struct {
-	ChannelId   string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId   uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	LastSeenSeq uint64 `protobuf:"varint,2,opt,name=last_seen_seq,json=lastSeenSeq,proto3" json:"last_seen_seq,omitempty"`
 }
 
@@ -328,7 +343,7 @@ func (*SubscribeChannelReq) ProtoMessage()    {}
 
 type SubscribeChannelResp struct {
 	Ok             bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ChannelId      string `protobuf:"bytes,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId      uint32 `protobuf:"varint,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	CurrentLastSeq uint64 `protobuf:"varint,3,opt,name=current_last_seq,json=currentLastSeq,proto3" json:"current_last_seq,omitempty"`
 	Message        string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
 }
@@ -338,7 +353,7 @@ func (m *SubscribeChannelResp) String() string { return proto.CompactTextString(
 func (*SubscribeChannelResp) ProtoMessage()    {}
 
 type UnsubscribeChannelReq struct {
-	ChannelId string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 }
 
 func (m *UnsubscribeChannelReq) Reset()         { *m = UnsubscribeChannelReq{} }
@@ -347,7 +362,7 @@ func (*UnsubscribeChannelReq) ProtoMessage()    {}
 
 type UnsubscribeChannelResp struct {
 	Ok        bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ChannelId string `protobuf:"bytes,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId uint32 `protobuf:"varint,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 }
 
 func (m *UnsubscribeChannelResp) Reset()         { *m = UnsubscribeChannelResp{} }
@@ -355,7 +370,7 @@ func (m *UnsubscribeChannelResp) String() string { return proto.CompactTextStrin
 func (*UnsubscribeChannelResp) ProtoMessage()    {}
 
 type CreateGroupReq struct {
-	ServerId        string     `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	SpaceId         uint32     `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	Name            string     `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Description     string     `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
 	Visibility      Visibility `protobuf:"varint,4,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
@@ -368,8 +383,8 @@ func (*CreateGroupReq) ProtoMessage()    {}
 
 type CreateGroupResp struct {
 	Ok        bool            `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId  string          `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	ChannelId string          `protobuf:"bytes,3,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	SpaceId   uint32          `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	ChannelId uint32          `protobuf:"varint,3,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	Channel   *ChannelSummary `protobuf:"bytes,4,opt,name=channel,proto3" json:"channel,omitempty"`
 	Message   string          `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
 }
@@ -379,7 +394,7 @@ func (m *CreateGroupResp) String() string { return proto.CompactTextString(m) }
 func (*CreateGroupResp) ProtoMessage()    {}
 
 type CreateChannelReq struct {
-	ServerId        string     `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	SpaceId         uint32     `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	Name            string     `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Description     string     `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
 	Visibility      Visibility `protobuf:"varint,4,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
@@ -392,8 +407,8 @@ func (*CreateChannelReq) ProtoMessage()    {}
 
 type CreateChannelResp struct {
 	Ok        bool            `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId  string          `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	ChannelId string          `protobuf:"bytes,3,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	SpaceId   uint32          `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	ChannelId uint32          `protobuf:"varint,3,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	Channel   *ChannelSummary `protobuf:"bytes,4,opt,name=channel,proto3" json:"channel,omitempty"`
 	Message   string          `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
 }
@@ -402,131 +417,35 @@ func (m *CreateChannelResp) Reset()         { *m = CreateChannelResp{} }
 func (m *CreateChannelResp) String() string { return proto.CompactTextString(m) }
 func (*CreateChannelResp) ProtoMessage()    {}
 
-type AdminSetMemberRoleReq struct {
-	ServerId     string     `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string     `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-	Role         MemberRole `protobuf:"varint,3,opt,name=role,proto3,enum=meshserver.session.v1.MemberRole" json:"role,omitempty"`
+type SpaceSummary struct {
+	SpaceId              uint32     `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	Name                 string     `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	AvatarUrl            string     `protobuf:"bytes,3,opt,name=avatar_url,json=avatarUrl,proto3" json:"avatar_url,omitempty"`
+	Description          string     `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
+	Visibility           Visibility `protobuf:"varint,5,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
+	MemberCount          uint32     `protobuf:"varint,6,opt,name=member_count,json=memberCount,proto3" json:"member_count,omitempty"`
+	AllowChannelCreation bool       `protobuf:"varint,7,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
 }
 
-func (m *AdminSetMemberRoleReq) Reset()         { *m = AdminSetMemberRoleReq{} }
-func (m *AdminSetMemberRoleReq) String() string { return proto.CompactTextString(m) }
-func (*AdminSetMemberRoleReq) ProtoMessage()    {}
+func (m *SpaceSummary) Reset()         { *m = SpaceSummary{} }
+func (m *SpaceSummary) String() string { return proto.CompactTextString(m) }
+func (*SpaceSummary) ProtoMessage()    {}
 
-type AdminSetMemberRoleResp struct {
-	Ok           bool       `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId     string     `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string     `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-	Role         MemberRole `protobuf:"varint,4,opt,name=role,proto3,enum=meshserver.session.v1.MemberRole" json:"role,omitempty"`
-	Message      string     `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+type ListSpacesReq struct{}
+
+func (m *ListSpacesReq) Reset()         { *m = ListSpacesReq{} }
+func (m *ListSpacesReq) String() string { return proto.CompactTextString(m) }
+func (*ListSpacesReq) ProtoMessage()    {}
+
+type ListSpacesResp struct {
+	Spaces []*SpaceSummary `protobuf:"bytes,1,rep,name=spaces,proto3" json:"spaces,omitempty"`
 }
 
-func (m *AdminSetMemberRoleResp) Reset()         { *m = AdminSetMemberRoleResp{} }
-func (m *AdminSetMemberRoleResp) String() string { return proto.CompactTextString(m) }
-func (*AdminSetMemberRoleResp) ProtoMessage()    {}
+func (m *ListSpacesResp) Reset()         { *m = ListSpacesResp{} }
+func (m *ListSpacesResp) String() string { return proto.CompactTextString(m) }
+func (*ListSpacesResp) ProtoMessage()    {}
 
-type AdminSetChannelCreationReq struct {
-	ServerId             string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	AllowChannelCreation bool   `protobuf:"varint,2,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
-}
-
-func (m *AdminSetChannelCreationReq) Reset()         { *m = AdminSetChannelCreationReq{} }
-func (m *AdminSetChannelCreationReq) String() string { return proto.CompactTextString(m) }
-func (*AdminSetChannelCreationReq) ProtoMessage()    {}
-
-type AdminSetChannelCreationResp struct {
-	Ok                   bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId             string `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	AllowChannelCreation bool   `protobuf:"varint,3,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
-	Message              string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
-}
-
-func (m *AdminSetChannelCreationResp) Reset()         { *m = AdminSetChannelCreationResp{} }
-func (m *AdminSetChannelCreationResp) String() string { return proto.CompactTextString(m) }
-func (*AdminSetChannelCreationResp) ProtoMessage()    {}
-
-type JoinServerReq struct {
-	ServerId string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-}
-
-func (m *JoinServerReq) Reset()         { *m = JoinServerReq{} }
-func (m *JoinServerReq) String() string { return proto.CompactTextString(m) }
-func (*JoinServerReq) ProtoMessage()    {}
-
-type JoinServerResp struct {
-	Ok       bool           `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId string         `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	Server   *ServerSummary `protobuf:"bytes,3,opt,name=server,proto3" json:"server,omitempty"`
-	Message  string         `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
-}
-
-func (m *JoinServerResp) Reset()         { *m = JoinServerResp{} }
-func (m *JoinServerResp) String() string { return proto.CompactTextString(m) }
-func (*JoinServerResp) ProtoMessage()    {}
-
-type InviteServerMemberReq struct {
-	ServerId     string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-}
-
-func (m *InviteServerMemberReq) Reset()         { *m = InviteServerMemberReq{} }
-func (m *InviteServerMemberReq) String() string { return proto.CompactTextString(m) }
-func (*InviteServerMemberReq) ProtoMessage()    {}
-
-type InviteServerMemberResp struct {
-	Ok           bool           `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId     string         `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string         `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-	Server       *ServerSummary `protobuf:"bytes,4,opt,name=server,proto3" json:"server,omitempty"`
-	Message      string         `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-}
-
-func (m *InviteServerMemberResp) Reset()         { *m = InviteServerMemberResp{} }
-func (m *InviteServerMemberResp) String() string { return proto.CompactTextString(m) }
-func (*InviteServerMemberResp) ProtoMessage()    {}
-
-type KickServerMemberReq struct {
-	ServerId     string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-}
-
-func (m *KickServerMemberReq) Reset()         { *m = KickServerMemberReq{} }
-func (m *KickServerMemberReq) String() string { return proto.CompactTextString(m) }
-func (*KickServerMemberReq) ProtoMessage()    {}
-
-type KickServerMemberResp struct {
-	Ok           bool           `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId     string         `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string         `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-	Server       *ServerSummary `protobuf:"bytes,4,opt,name=server,proto3" json:"server,omitempty"`
-	Message      string         `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-}
-
-func (m *KickServerMemberResp) Reset()         { *m = KickServerMemberResp{} }
-func (m *KickServerMemberResp) String() string { return proto.CompactTextString(m) }
-func (*KickServerMemberResp) ProtoMessage()    {}
-
-type BanServerMemberReq struct {
-	ServerId     string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-}
-
-func (m *BanServerMemberReq) Reset()         { *m = BanServerMemberReq{} }
-func (m *BanServerMemberReq) String() string { return proto.CompactTextString(m) }
-func (*BanServerMemberReq) ProtoMessage()    {}
-
-type BanServerMemberResp struct {
-	Ok           bool           `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ServerId     string         `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	TargetUserId string         `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
-	Server       *ServerSummary `protobuf:"bytes,4,opt,name=server,proto3" json:"server,omitempty"`
-	Message      string         `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-}
-
-func (m *BanServerMemberResp) Reset()         { *m = BanServerMemberResp{} }
-func (m *BanServerMemberResp) String() string { return proto.CompactTextString(m) }
-func (*BanServerMemberResp) ProtoMessage()    {}
-
-type ServerMemberSummary struct {
+type SpaceMemberSummary struct {
 	MemberId     uint64     `protobuf:"varint,1,opt,name=member_id,json=memberId,proto3" json:"member_id,omitempty"`
 	UserId       string     `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	DisplayName  string     `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
@@ -539,30 +458,213 @@ type ServerMemberSummary struct {
 	LastSeenAtMs uint64     `protobuf:"varint,10,opt,name=last_seen_at_ms,json=lastSeenAtMs,proto3" json:"last_seen_at_ms,omitempty"`
 }
 
-func (m *ServerMemberSummary) Reset()         { *m = ServerMemberSummary{} }
-func (m *ServerMemberSummary) String() string { return proto.CompactTextString(m) }
-func (*ServerMemberSummary) ProtoMessage()    {}
+func (m *SpaceMemberSummary) Reset()         { *m = SpaceMemberSummary{} }
+func (m *SpaceMemberSummary) String() string { return proto.CompactTextString(m) }
+func (*SpaceMemberSummary) ProtoMessage()    {}
 
-type ListServerMembersReq struct {
-	ServerId      string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+type ListSpaceMembersReq struct {
+	SpaceId       uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	AfterMemberId uint64 `protobuf:"varint,2,opt,name=after_member_id,json=afterMemberId,proto3" json:"after_member_id,omitempty"`
 	Limit         uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 }
 
-func (m *ListServerMembersReq) Reset()         { *m = ListServerMembersReq{} }
-func (m *ListServerMembersReq) String() string { return proto.CompactTextString(m) }
-func (*ListServerMembersReq) ProtoMessage()    {}
+func (m *ListSpaceMembersReq) Reset()         { *m = ListSpaceMembersReq{} }
+func (m *ListSpaceMembersReq) String() string { return proto.CompactTextString(m) }
+func (*ListSpaceMembersReq) ProtoMessage()    {}
 
-type ListServerMembersResp struct {
-	ServerId          string                 `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
-	Members           []*ServerMemberSummary `protobuf:"bytes,2,rep,name=members,proto3" json:"members,omitempty"`
-	NextAfterMemberId uint64                 `protobuf:"varint,3,opt,name=next_after_member_id,json=nextAfterMemberId,proto3" json:"next_after_member_id,omitempty"`
-	HasMore           bool                   `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+type ListSpaceMembersResp struct {
+	SpaceId           uint32                `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	Members           []*SpaceMemberSummary `protobuf:"bytes,2,rep,name=members,proto3" json:"members,omitempty"`
+	NextAfterMemberId uint64                `protobuf:"varint,3,opt,name=next_after_member_id,json=nextAfterMemberId,proto3" json:"next_after_member_id,omitempty"`
+	HasMore           bool                  `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
 }
 
-func (m *ListServerMembersResp) Reset()         { *m = ListServerMembersResp{} }
-func (m *ListServerMembersResp) String() string { return proto.CompactTextString(m) }
-func (*ListServerMembersResp) ProtoMessage()    {}
+func (m *ListSpaceMembersResp) Reset()         { *m = ListSpaceMembersResp{} }
+func (m *ListSpaceMembersResp) String() string { return proto.CompactTextString(m) }
+func (*ListSpaceMembersResp) ProtoMessage()    {}
+
+type UnbanSpaceMemberReq struct {
+	SpaceId      uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+}
+
+func (m *UnbanSpaceMemberReq) Reset()         { *m = UnbanSpaceMemberReq{} }
+func (m *UnbanSpaceMemberReq) String() string { return proto.CompactTextString(m) }
+func (*UnbanSpaceMemberReq) ProtoMessage()    {}
+
+type UnbanSpaceMemberResp struct {
+	Ok           bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId      uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string        `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Space        *SpaceSummary `protobuf:"bytes,4,opt,name=space,proto3" json:"space,omitempty"`
+	Message      string        `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *UnbanSpaceMemberResp) Reset()         { *m = UnbanSpaceMemberResp{} }
+func (m *UnbanSpaceMemberResp) String() string { return proto.CompactTextString(m) }
+func (*UnbanSpaceMemberResp) ProtoMessage()    {}
+
+type GetCreateSpacePermissionsReq struct {
+}
+
+func (m *GetCreateSpacePermissionsReq) Reset()         { *m = GetCreateSpacePermissionsReq{} }
+func (m *GetCreateSpacePermissionsReq) String() string { return proto.CompactTextString(m) }
+func (*GetCreateSpacePermissionsReq) ProtoMessage()    {}
+
+type GetCreateSpacePermissionsResp struct {
+	Ok             bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	CanCreateSpace bool   `protobuf:"varint,2,opt,name=can_create_space,json=canCreateSpace,proto3" json:"can_create_space,omitempty"`
+	Message        string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *GetCreateSpacePermissionsResp) Reset()         { *m = GetCreateSpacePermissionsResp{} }
+func (m *GetCreateSpacePermissionsResp) String() string { return proto.CompactTextString(m) }
+func (*GetCreateSpacePermissionsResp) ProtoMessage()    {}
+
+type GetCreateGroupPermissionsReq struct {
+	SpaceId uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+}
+
+func (m *GetCreateGroupPermissionsReq) Reset()         { *m = GetCreateGroupPermissionsReq{} }
+func (m *GetCreateGroupPermissionsReq) String() string { return proto.CompactTextString(m) }
+func (*GetCreateGroupPermissionsReq) ProtoMessage()    {}
+
+type GetCreateGroupPermissionsResp struct {
+	Ok             bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId        uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	Space          *SpaceSummary `protobuf:"bytes,3,opt,name=space,proto3" json:"space,omitempty"`
+	Role           MemberRole    `protobuf:"varint,4,opt,name=role,proto3,enum=meshserver.session.v1.MemberRole" json:"role,omitempty"`
+	CanCreateGroup bool          `protobuf:"varint,5,opt,name=can_create_group,json=canCreateGroup,proto3" json:"can_create_group,omitempty"`
+	Message        string        `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *GetCreateGroupPermissionsResp) Reset()         { *m = GetCreateGroupPermissionsResp{} }
+func (m *GetCreateGroupPermissionsResp) String() string { return proto.CompactTextString(m) }
+func (*GetCreateGroupPermissionsResp) ProtoMessage()    {}
+
+type AdminSetSpaceMemberRoleReq struct {
+	SpaceId      uint32     `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string     `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Role         MemberRole `protobuf:"varint,3,opt,name=role,proto3,enum=meshserver.session.v1.MemberRole" json:"role,omitempty"`
+}
+
+func (m *AdminSetSpaceMemberRoleReq) Reset()         { *m = AdminSetSpaceMemberRoleReq{} }
+func (m *AdminSetSpaceMemberRoleReq) String() string { return proto.CompactTextString(m) }
+func (*AdminSetSpaceMemberRoleReq) ProtoMessage()    {}
+
+type AdminSetSpaceMemberRoleResp struct {
+	Ok           bool       `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId      uint32     `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string     `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Role         MemberRole `protobuf:"varint,4,opt,name=role,proto3,enum=meshserver.session.v1.MemberRole" json:"role,omitempty"`
+	Message      string     `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *AdminSetSpaceMemberRoleResp) Reset()         { *m = AdminSetSpaceMemberRoleResp{} }
+func (m *AdminSetSpaceMemberRoleResp) String() string { return proto.CompactTextString(m) }
+func (*AdminSetSpaceMemberRoleResp) ProtoMessage()    {}
+
+type AdminSetSpaceChannelCreationReq struct {
+	SpaceId              uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	AllowChannelCreation bool   `protobuf:"varint,2,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
+}
+
+func (m *AdminSetSpaceChannelCreationReq) Reset()         { *m = AdminSetSpaceChannelCreationReq{} }
+func (m *AdminSetSpaceChannelCreationReq) String() string { return proto.CompactTextString(m) }
+func (*AdminSetSpaceChannelCreationReq) ProtoMessage()    {}
+
+type AdminSetSpaceChannelCreationResp struct {
+	Ok                   bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId              uint32 `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	AllowChannelCreation bool   `protobuf:"varint,3,opt,name=allow_channel_creation,json=allowChannelCreation,proto3" json:"allow_channel_creation,omitempty"`
+	Message              string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *AdminSetSpaceChannelCreationResp) Reset()         { *m = AdminSetSpaceChannelCreationResp{} }
+func (m *AdminSetSpaceChannelCreationResp) String() string { return proto.CompactTextString(m) }
+func (*AdminSetSpaceChannelCreationResp) ProtoMessage()    {}
+
+type JoinSpaceReq struct {
+	SpaceId uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+}
+
+func (m *JoinSpaceReq) Reset()         { *m = JoinSpaceReq{} }
+func (m *JoinSpaceReq) String() string { return proto.CompactTextString(m) }
+func (*JoinSpaceReq) ProtoMessage()    {}
+
+type JoinSpaceResp struct {
+	Ok      bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	Space   *SpaceSummary `protobuf:"bytes,3,opt,name=space,proto3" json:"space,omitempty"`
+	Message string        `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *JoinSpaceResp) Reset()         { *m = JoinSpaceResp{} }
+func (m *JoinSpaceResp) String() string { return proto.CompactTextString(m) }
+func (*JoinSpaceResp) ProtoMessage()    {}
+
+type InviteSpaceMemberReq struct {
+	SpaceId      uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+}
+
+func (m *InviteSpaceMemberReq) Reset()         { *m = InviteSpaceMemberReq{} }
+func (m *InviteSpaceMemberReq) String() string { return proto.CompactTextString(m) }
+func (*InviteSpaceMemberReq) ProtoMessage()    {}
+
+type InviteSpaceMemberResp struct {
+	Ok           bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId      uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string        `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Space        *SpaceSummary `protobuf:"bytes,4,opt,name=space,proto3" json:"space,omitempty"`
+	Message      string        `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *InviteSpaceMemberResp) Reset()         { *m = InviteSpaceMemberResp{} }
+func (m *InviteSpaceMemberResp) String() string { return proto.CompactTextString(m) }
+func (*InviteSpaceMemberResp) ProtoMessage()    {}
+
+type KickSpaceMemberReq struct {
+	SpaceId      uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+}
+
+func (m *KickSpaceMemberReq) Reset()         { *m = KickSpaceMemberReq{} }
+func (m *KickSpaceMemberReq) String() string { return proto.CompactTextString(m) }
+func (*KickSpaceMemberReq) ProtoMessage()    {}
+
+type KickSpaceMemberResp struct {
+	Ok           bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId      uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string        `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Space        *SpaceSummary `protobuf:"bytes,4,opt,name=space,proto3" json:"space,omitempty"`
+	Message      string        `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *KickSpaceMemberResp) Reset()         { *m = KickSpaceMemberResp{} }
+func (m *KickSpaceMemberResp) String() string { return proto.CompactTextString(m) }
+func (*KickSpaceMemberResp) ProtoMessage()    {}
+
+type BanSpaceMemberReq struct {
+	SpaceId      uint32 `protobuf:"varint,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string `protobuf:"bytes,2,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+}
+
+func (m *BanSpaceMemberReq) Reset()         { *m = BanSpaceMemberReq{} }
+func (m *BanSpaceMemberReq) String() string { return proto.CompactTextString(m) }
+func (*BanSpaceMemberReq) ProtoMessage()    {}
+
+type BanSpaceMemberResp struct {
+	Ok           bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	SpaceId      uint32        `protobuf:"varint,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	TargetUserId string        `protobuf:"bytes,3,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`
+	Space        *SpaceSummary `protobuf:"bytes,4,opt,name=space,proto3" json:"space,omitempty"`
+	Message      string        `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *BanSpaceMemberResp) Reset()         { *m = BanSpaceMemberResp{} }
+func (m *BanSpaceMemberResp) String() string { return proto.CompactTextString(m) }
+func (*BanSpaceMemberResp) ProtoMessage()    {}
 
 type MediaImage struct {
 	MediaId      string `protobuf:"bytes,1,opt,name=media_id,json=mediaId,proto3" json:"media_id,omitempty"`
@@ -607,7 +709,7 @@ func (m *MessageContent) String() string { return proto.CompactTextString(m) }
 func (*MessageContent) ProtoMessage()    {}
 
 type SendMessageReq struct {
-	ChannelId   string          `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId   uint32          `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	ClientMsgId string          `protobuf:"bytes,2,opt,name=client_msg_id,json=clientMsgId,proto3" json:"client_msg_id,omitempty"`
 	MessageType MessageType     `protobuf:"varint,3,opt,name=message_type,json=messageType,proto3,enum=meshserver.session.v1.MessageType" json:"message_type,omitempty"`
 	Content     *MessageContent `protobuf:"bytes,4,opt,name=content,proto3" json:"content,omitempty"`
@@ -619,7 +721,7 @@ func (*SendMessageReq) ProtoMessage()    {}
 
 type SendMessageAck struct {
 	Ok           bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	ChannelId    string `protobuf:"bytes,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId    uint32 `protobuf:"varint,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	ClientMsgId  string `protobuf:"bytes,3,opt,name=client_msg_id,json=clientMsgId,proto3" json:"client_msg_id,omitempty"`
 	MessageId    string `protobuf:"bytes,4,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	Seq          uint64 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"`
@@ -632,7 +734,7 @@ func (m *SendMessageAck) String() string { return proto.CompactTextString(m) }
 func (*SendMessageAck) ProtoMessage()    {}
 
 type MessageEvent struct {
-	ChannelId    string          `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId    uint32          `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	MessageId    string          `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	Seq          uint64          `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
 	SenderUserId string          `protobuf:"bytes,4,opt,name=sender_user_id,json=senderUserId,proto3" json:"sender_user_id,omitempty"`
@@ -646,7 +748,7 @@ func (m *MessageEvent) String() string { return proto.CompactTextString(m) }
 func (*MessageEvent) ProtoMessage()    {}
 
 type ChannelDeliverAck struct {
-	ChannelId string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	AckedSeq  uint64 `protobuf:"varint,2,opt,name=acked_seq,json=ackedSeq,proto3" json:"acked_seq,omitempty"`
 }
 
@@ -655,7 +757,7 @@ func (m *ChannelDeliverAck) String() string { return proto.CompactTextString(m) 
 func (*ChannelDeliverAck) ProtoMessage()    {}
 
 type ChannelReadUpdate struct {
-	ChannelId   string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId   uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	LastReadSeq uint64 `protobuf:"varint,2,opt,name=last_read_seq,json=lastReadSeq,proto3" json:"last_read_seq,omitempty"`
 }
 
@@ -664,7 +766,7 @@ func (m *ChannelReadUpdate) String() string { return proto.CompactTextString(m) 
 func (*ChannelReadUpdate) ProtoMessage()    {}
 
 type SyncChannelReq struct {
-	ChannelId string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	AfterSeq  uint64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
 	Limit     uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 }
@@ -674,7 +776,7 @@ func (m *SyncChannelReq) String() string { return proto.CompactTextString(m) }
 func (*SyncChannelReq) ProtoMessage()    {}
 
 type SyncChannelResp struct {
-	ChannelId    string          `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelId    uint32          `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	Messages     []*MessageEvent `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
 	NextAfterSeq uint64          `protobuf:"varint,3,opt,name=next_after_seq,json=nextAfterSeq,proto3" json:"next_after_seq,omitempty"`
 	HasMore      bool            `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
@@ -683,3 +785,22 @@ type SyncChannelResp struct {
 func (m *SyncChannelResp) Reset()         { *m = SyncChannelResp{} }
 func (m *SyncChannelResp) String() string { return proto.CompactTextString(m) }
 func (*SyncChannelResp) ProtoMessage()    {}
+
+type GetMediaReq struct {
+	MediaId string `protobuf:"bytes,1,opt,name=media_id,json=mediaId,proto3" json:"media_id,omitempty"`
+}
+
+func (m *GetMediaReq) Reset()         { *m = GetMediaReq{} }
+func (m *GetMediaReq) String() string { return proto.CompactTextString(m) }
+func (*GetMediaReq) ProtoMessage()    {}
+
+type GetMediaResp struct {
+	Ok      bool       `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	MediaId string     `protobuf:"bytes,2,opt,name=media_id,json=mediaId,proto3" json:"media_id,omitempty"`
+	File    *MediaFile `protobuf:"bytes,3,opt,name=file,proto3" json:"file,omitempty"`
+	Message string     `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *GetMediaResp) Reset()         { *m = GetMediaResp{} }
+func (m *GetMediaResp) String() string { return proto.CompactTextString(m) }
+func (*GetMediaResp) ProtoMessage()    {}

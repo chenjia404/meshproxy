@@ -193,22 +193,20 @@ type MeshServerProvider interface {
 	ListConnections() []meshserver.ConnectionInfo
 	// ListConnectedServers returns the persisted list of meshserver connections.
 	ListConnectedServers() []meshserver.ConnectionInfo
-	// GetOrCreateSpaceID maps server_id (space) to a stable auto-increment int id.
+	// Legacy stable-id mapping APIs are kept for backward compatibility, but
+	// meshserver now uses numeric space_id/channel_id natively.
 	GetOrCreateSpaceID(serverID string) (int, error)
-	// GetServerIDBySpaceID maps stable auto-increment int id back to meshserver server_id.
 	GetServerIDBySpaceID(spaceID int) (string, error)
-	// GetOrCreateChannelID maps channel_id (group/channel) to a stable auto-increment int id.
 	GetOrCreateChannelID(channelID string) (int, error)
-	// GetChannelIDByChannelIDIntID maps stable auto-increment int id back to meshserver channel_id.
 	GetChannelIDByChannelIDIntID(channelIDIntID int) (string, error)
 	Connect(ctx context.Context, name, peerID, clientAgent, protocolID string) (meshserver.ConnectionInfo, error)
 	Disconnect(name string) error
-	ListServers(ctx context.Context, connection string) (*sessionv1.ListServersResp, error)
-	JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error)
-	InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error)
-	KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error)
-	BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error)
-	ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error)
+	ListServers(ctx context.Context, connection string) (*sessionv1.ListSpacesResp, error)
+	JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinSpaceResp, error)
+	InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error)
+	KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error)
+	BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanSpaceMemberResp, error)
+	ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListSpaceMembersResp, error)
 	ListChannels(ctx context.Context, connection, serverID string) (*sessionv1.ListChannelsResp, error)
 	CreateGroup(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error)
 	CreateChannel(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error)
@@ -230,6 +228,10 @@ type MeshServerProvider interface {
 	// ListMyGroups returns joined groups (GROUP-type channels) for a space.
 	// It is exposed for front-end via a HTTP endpoint.
 	ListMyGroups(ctx context.Context, connection, spaceID string) (*meshserver.MyGroupsResp, error)
+
+	// GetCreateSpacePermissions returns the caller's permissions to create spaces on this meshserver.
+	// This corresponds to GET_CREATE_SPACE_PERMISSIONS.
+	GetCreateSpacePermissions(ctx context.Context, connection string) (*sessionv1.GetCreateSpacePermissionsResp, error)
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -298,6 +300,20 @@ type LocalAPI struct {
 	chatHTML        []byte // embedded chat index.html, served directly to avoid redirect
 }
 
+func (a *LocalAPI) meshSpaceIntID(spaceID uint32) int {
+	if spaceID == 0 {
+		return 0
+	}
+	return int(spaceID)
+}
+
+func (a *LocalAPI) meshChannelIntID(channelID uint32) int {
+	if channelID == 0 {
+		return 0
+	}
+	return int(channelID)
+}
+
 // NewLocalAPI creates a new LocalAPI instance. opts may be nil for minimal API.
 func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitProvider, opts *LocalAPIOpts) *LocalAPI {
 	mux := http.NewServeMux()
@@ -341,6 +357,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/meshserver/channels/", api.handleMeshServerChannelItem)
 	mux.HandleFunc("/api/v1/meshserver/connections", api.handleMeshServerConnections)
 	mux.HandleFunc("/api/v1/meshserver/connections/", api.handleMeshServerConnectionItem)
+	mux.HandleFunc("/api/v1/meshserver/server/my_permissions", api.handleMeshServerServerMyPermissions)
 	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
 	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
 	mux.HandleFunc("/api/v1/update/settings", api.handleUpdateSettings)
@@ -1655,7 +1672,7 @@ func (a *LocalAPI) handleMeshServerServers(w http.ResponseWriter, r *http.Reques
 	// Convert server terminology to Space terminology for the response.
 	type spaceSummary struct {
 		ID                   int                `json:"id"`
-		SpaceID              string             `json:"space_id"`
+		SpaceID              uint32             `json:"space_id"`
 		Name                 string             `json:"name"`
 		AvatarUrl            string             `json:"avatar_url"`
 		Description          string             `json:"description"`
@@ -1668,16 +1685,16 @@ func (a *LocalAPI) handleMeshServerServers(w http.ResponseWriter, r *http.Reques
 	}
 
 	out := &listSpacesResp{
-		Spaces: make([]*spaceSummary, 0, len(resp.Servers)),
+		Spaces: make([]*spaceSummary, 0, len(resp.Spaces)),
 	}
-	for _, s := range resp.Servers {
+	for _, s := range resp.Spaces {
 		if s == nil {
 			continue
 		}
-		spaceIntID, _ := a.opts.MeshServer.GetOrCreateSpaceID(s.ServerId)
+		spaceIntID := a.meshSpaceIntID(s.SpaceId)
 		out.Spaces = append(out.Spaces, &spaceSummary{
 			ID:                   spaceIntID,
-			SpaceID:              s.ServerId,
+			SpaceID:              s.SpaceId,
 			Name:                 s.Name,
 			AvatarUrl:            s.AvatarUrl,
 			Description:          s.Description,
@@ -1763,7 +1780,7 @@ func (a *LocalAPI) handleMeshServerMyServers(w http.ResponseWriter, r *http.Requ
 	// Convert server terminology to Space terminology for nested response fields.
 	type spaceSummary struct {
 		ID                   int                `json:"id"`
-		SpaceID              string             `json:"space_id"`
+		SpaceID              uint32             `json:"space_id"`
 		Name                 string             `json:"name"`
 		AvatarUrl            string             `json:"avatar_url"`
 		Description          string             `json:"description"`
@@ -1789,11 +1806,11 @@ func (a *LocalAPI) handleMeshServerMyServers(w http.ResponseWriter, r *http.Requ
 		if it == nil || it.Server == nil {
 			continue
 		}
-		spaceIntID, _ := a.opts.MeshServer.GetOrCreateSpaceID(it.Server.ServerId)
+		spaceIntID := a.meshSpaceIntID(it.Server.SpaceId)
 		out.Servers = append(out.Servers, &mySpaceItem{
 			Space: &spaceSummary{
 				ID:                   spaceIntID,
-				SpaceID:              it.Server.ServerId,
+				SpaceID:              it.Server.SpaceId,
 				Name:                 it.Server.Name,
 				AvatarUrl:            it.Server.AvatarUrl,
 				Description:          it.Server.Description,
@@ -1819,20 +1836,6 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 		return
 	}
 	serverID := parts[0]
-	// Accept front-end numeric `id` as well as raw meshserver `server_id`.
-	// If the segment is a pure integer, treat it as stable space `id` and map back to `server_id`.
-	if spaceIntID, err := strconv.Atoi(serverID); err == nil && spaceIntID > 0 {
-		mapped, mapErr := a.opts.MeshServer.GetServerIDBySpaceID(spaceIntID)
-		if mapErr != nil {
-			http.Error(w, mapErr.Error(), http.StatusBadRequest)
-			return
-		}
-		if mapped == "" {
-			http.Error(w, "space not found", http.StatusBadRequest)
-			return
-		}
-		serverID = mapped
-	}
 	action := parts[1]
 	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
 	switch action {
@@ -1847,8 +1850,8 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 				}
 				type channelSummaryWithID struct {
 					ID                int                `json:"id"`
-					ChannelId         string             `json:"channel_id"`
-					ServerId          string             `json:"server_id"`
+					ChannelId         uint32             `json:"channel_id"`
+					ServerId          uint32             `json:"server_id"`
 					Type              sessionv1.ChannelType `json:"type"`
 					Name              string             `json:"name"`
 					Description       string             `json:"description"`
@@ -1875,11 +1878,11 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 						if ch == nil {
 							continue
 						}
-						chIntID, _ := a.opts.MeshServer.GetOrCreateChannelID(ch.ChannelId)
+						chIntID := a.meshChannelIntID(ch.ChannelId)
 						out.Channels = append(out.Channels, &channelSummaryWithID{
 							ID:               chIntID,
 							ChannelId:        ch.ChannelId,
-							ServerId:         ch.ServerId,
+							ServerId:         ch.SpaceId,
 							Type:             ch.Type,
 							Name:             ch.Name,
 							Description:      ch.Description,
@@ -1913,8 +1916,8 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 				}
 				type channelSummaryWithID struct {
 					ID                int                `json:"id"`
-					ChannelId         string             `json:"channel_id"`
-					ServerId          string             `json:"server_id"`
+					ChannelId         uint32             `json:"channel_id"`
+					ServerId          uint32             `json:"server_id"`
 					Type              sessionv1.ChannelType `json:"type"`
 					Name              string             `json:"name"`
 					Description       string             `json:"description"`
@@ -1928,23 +1931,23 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 				}
 				type createChannelRespWithID struct {
 					Ok       bool                      `json:"ok"`
-					ServerID string                   `json:"server_id"`
-					ChannelID string                  `json:"channel_id"`
+					ServerID uint32                   `json:"server_id"`
+					ChannelID uint32                  `json:"channel_id"`
 					Channel *channelSummaryWithID    `json:"channel"`
 					Message  string                   `json:"message"`
 				}
 				out := &createChannelRespWithID{
 					Ok:        resp.Ok,
-					ServerID:  resp.ServerId,
+					ServerID:  resp.SpaceId,
 					ChannelID: resp.ChannelId,
 					Message:   resp.Message,
 				}
 				if resp.Channel != nil {
-					chID, _ := a.opts.MeshServer.GetOrCreateChannelID(resp.Channel.ChannelId)
+					chID := a.meshChannelIntID(resp.Channel.ChannelId)
 					out.Channel = &channelSummaryWithID{
 						ID:               chID,
 						ChannelId:        resp.Channel.ChannelId,
-						ServerId:         resp.Channel.ServerId,
+						ServerId:         resp.Channel.SpaceId,
 						Type:             resp.Channel.Type,
 						Name:             resp.Channel.Name,
 						Description:      resp.Channel.Description,
@@ -2086,8 +2089,8 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 			}
 			type channelSummaryWithID struct {
 				ID                int                   `json:"id"`
-				ChannelId         string                `json:"channel_id"`
-				ServerId          string                `json:"server_id"`
+				ChannelId         uint32                `json:"channel_id"`
+				ServerId          uint32                `json:"server_id"`
 				Type              sessionv1.ChannelType `json:"type"`
 				Name              string                `json:"name"`
 				Description       string                `json:"description"`
@@ -2101,23 +2104,23 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 			}
 			type createGroupRespWithID struct {
 				Ok        bool                   `json:"ok"`
-				ServerID  string                `json:"server_id"`
-				ChannelID string                `json:"channel_id"`
+				ServerID  uint32                `json:"server_id"`
+				ChannelID uint32                `json:"channel_id"`
 				Channel   *channelSummaryWithID `json:"channel"`
 				Message   string                `json:"message"`
 			}
 			out := &createGroupRespWithID{
 				Ok:         resp.Ok,
-				ServerID:   resp.ServerId,
+				ServerID:   resp.SpaceId,
 				ChannelID:  resp.ChannelId,
 				Message:    resp.Message,
 			}
 			if resp.Channel != nil {
-				chID, _ := a.opts.MeshServer.GetOrCreateChannelID(resp.Channel.ChannelId)
+				chID := a.meshChannelIntID(resp.Channel.ChannelId)
 				out.Channel = &channelSummaryWithID{
 					ID:               chID,
 					ChannelId:        resp.Channel.ChannelId,
-					ServerId:         resp.Channel.ServerId,
+					ServerId:         resp.Channel.SpaceId,
 					Type:             resp.Channel.Type,
 					Name:             resp.Channel.Name,
 					Description:      resp.Channel.Description,
@@ -2149,19 +2152,6 @@ func (a *LocalAPI) handleMeshServerChannelItem(w http.ResponseWriter, r *http.Re
 		return
 	}
 	channelID := parts[0]
-	// Accept front-end numeric `id` as well as raw meshserver `channel_id`.
-	if chIntID, err := strconv.Atoi(channelID); err == nil && chIntID > 0 {
-		mapped, mapErr := a.opts.MeshServer.GetChannelIDByChannelIDIntID(chIntID)
-		if mapErr != nil {
-			http.Error(w, mapErr.Error(), http.StatusBadRequest)
-			return
-		}
-		if mapped == "" {
-			http.Error(w, "channel not found", http.StatusBadRequest)
-			return
-		}
-		channelID = mapped
-	}
 	action := parts[1]
 	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
 	switch action {
@@ -2395,6 +2385,16 @@ func (a *LocalAPI) handleMeshServerConnectionItem(w http.ResponseWriter, r *http
 		return
 	}
 	switch r.Method {
+	case http.MethodGet:
+		// Return the connection's current status snapshot.
+		for _, c := range a.opts.MeshServer.ListConnections() {
+			if strings.EqualFold(strings.TrimSpace(c.Name), name) {
+				writeJSON(w, c)
+				return
+			}
+		}
+		http.Error(w, "connection not found", http.StatusNotFound)
+		return
 	case http.MethodDelete:
 		if err := a.opts.MeshServer.Disconnect(name); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -2404,6 +2404,42 @@ func (a *LocalAPI) handleMeshServerConnectionItem(w http.ResponseWriter, r *http
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleMeshServerServerMyPermissions returns connection/server-level permissions.
+//
+// GET /api/v1/meshserver/server/my_permissions?connection=...
+// - no space_id param; call GET_CREATE_SPACE_PERMISSIONS directly by connection.
+func (a *LocalAPI) handleMeshServerServerMyPermissions(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
+	connections := a.opts.MeshServer.ListConnections()
+	if len(connections) == 0 {
+		http.Error(w, "connection not found", http.StatusNotFound)
+		return
+	}
+	if connection == "" {
+		if len(connections) == 1 {
+			connection = connections[0].Name
+		} else {
+			http.Error(w, "connection is required when multiple connections exist", http.StatusBadRequest)
+			return
+		}
+	}
+
+	resp, err := a.opts.MeshServer.GetCreateSpacePermissions(r.Context(), connection)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, resp)
 }
 
 func parseMeshServerVisibility(value string) sessionv1.Visibility {

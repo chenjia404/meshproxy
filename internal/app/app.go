@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -774,7 +775,19 @@ func (a *App) meshServerClient(connection string) (*meshserver.Client, error) {
 	return client, nil
 }
 
-func (a *App) MeshServerListServersFor(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+func parseUint32ID(s string) uint32 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(v)
+}
+
+func (a *App) MeshServerListServersFor(ctx context.Context, connection string) (*sessionv1.ListSpacesResp, error) {
 	client, err := a.meshServerClient(connection)
 	if err != nil {
 		return nil, err
@@ -782,11 +795,19 @@ func (a *App) MeshServerListServersFor(ctx context.Context, connection string) (
 	return client.ListServers(ctx)
 }
 
-func (a *App) MeshServerJoinServer(ctx context.Context, serverID string) (*sessionv1.JoinServerResp, error) {
+func (a *App) MeshServerGetCreateSpacePermissionsForConnection(ctx context.Context, connection string) (*sessionv1.GetCreateSpacePermissionsResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetCreateSpacePermissions(ctx)
+}
+
+func (a *App) MeshServerJoinServer(ctx context.Context, serverID string) (*sessionv1.JoinSpaceResp, error) {
 	return a.MeshServerJoinServerForConnection(ctx, "", serverID)
 }
 
-func (a *App) MeshServerJoinServerForConnection(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error) {
+func (a *App) MeshServerJoinServerForConnection(ctx context.Context, connection, serverID string) (*sessionv1.JoinSpaceResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -802,11 +823,11 @@ func (a *App) MeshServerJoinServerForConnection(ctx context.Context, connection,
 	return resp, err
 }
 
-func (a *App) MeshServerInviteServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+func (a *App) MeshServerInviteServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error) {
 	return a.MeshServerInviteServerMemberForConnection(ctx, "", serverID, targetUserID)
 }
 
-func (a *App) MeshServerInviteServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+func (a *App) MeshServerInviteServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -817,11 +838,11 @@ func (a *App) MeshServerInviteServerMemberForConnection(ctx context.Context, con
 	return client.InviteServerMember(ctx, serverID, targetUserID)
 }
 
-func (a *App) MeshServerKickServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+func (a *App) MeshServerKickServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error) {
 	return a.MeshServerKickServerMemberForConnection(ctx, "", serverID, targetUserID)
 }
 
-func (a *App) MeshServerKickServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+func (a *App) MeshServerKickServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -832,11 +853,11 @@ func (a *App) MeshServerKickServerMemberForConnection(ctx context.Context, conne
 	return client.KickServerMember(ctx, serverID, targetUserID)
 }
 
-func (a *App) MeshServerBanServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+func (a *App) MeshServerBanServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.BanSpaceMemberResp, error) {
 	return a.MeshServerBanServerMemberForConnection(ctx, "", serverID, targetUserID)
 }
 
-func (a *App) MeshServerBanServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+func (a *App) MeshServerBanServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanSpaceMemberResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -847,11 +868,11 @@ func (a *App) MeshServerBanServerMemberForConnection(ctx context.Context, connec
 	return client.BanServerMember(ctx, serverID, targetUserID)
 }
 
-func (a *App) MeshServerListServerMembers(ctx context.Context, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+func (a *App) MeshServerListServerMembers(ctx context.Context, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListSpaceMembersResp, error) {
 	return a.MeshServerListServerMembersForConnection(ctx, "", serverID, afterMemberID, limit)
 }
 
-func (a *App) MeshServerListServerMembersForConnection(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+func (a *App) MeshServerListServerMembersForConnection(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListSpaceMembersResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -867,7 +888,7 @@ func (a *App) MeshServerListChannelsFor(ctx context.Context, connection, serverI
 	if err != nil {
 		return nil, err
 	}
-	return client.ListChannels(ctx, serverID)
+	return client.ListChannels(ctx, parseUint32ID(serverID))
 }
 
 func (a *App) MeshServerCreateGroupFor(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
@@ -891,7 +912,7 @@ func (a *App) MeshServerSubscribeChannelFor(ctx context.Context, connection, cha
 	if err != nil {
 		return nil, err
 	}
-	return client.SubscribeChannel(ctx, channelID, lastSeenSeq)
+	return client.SubscribeChannel(ctx, parseUint32ID(channelID), lastSeenSeq)
 }
 
 func (a *App) MeshServerUnsubscribeChannelFor(ctx context.Context, connection, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
@@ -899,7 +920,7 @@ func (a *App) MeshServerUnsubscribeChannelFor(ctx context.Context, connection, c
 	if err != nil {
 		return nil, err
 	}
-	return client.UnsubscribeChannel(ctx, channelID)
+	return client.UnsubscribeChannel(ctx, parseUint32ID(channelID))
 }
 
 func (a *App) MeshServerSendTextFor(ctx context.Context, connection, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
@@ -918,14 +939,14 @@ func (a *App) MeshServerSyncChannelFor(ctx context.Context, connection, channelI
 	return client.SyncChannel(ctx, channelID, afterSeq, limit)
 }
 
-func (a *App) MeshServerListServers(ctx context.Context) (*sessionv1.ListServersResp, error) {
+func (a *App) MeshServerListServers(ctx context.Context) (*sessionv1.ListSpacesResp, error) {
 	if a == nil || a.meshServer == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return a.MeshServerListServersFor(ctx, "")
 }
 
-func (a *App) MeshServerListServersForConnection(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+func (a *App) MeshServerListServersForConnection(ctx context.Context, connection string) (*sessionv1.ListSpacesResp, error) {
 	return a.MeshServerListServersFor(ctx, connection)
 }
 
@@ -952,10 +973,11 @@ func (a *App) MeshServerGetMyPermissionsForConnection(ctx context.Context, conne
 	if err != nil {
 		return nil, err
 	}
+	spaceID := parseUint32ID(serverID)
 	var allowChannelCreation bool
 	serverFound := false
-	for _, s := range serversResp.Servers {
-		if s != nil && s.ServerId == serverID {
+	for _, s := range serversResp.Spaces {
+		if s != nil && s.SpaceId == spaceID {
 			allowChannelCreation = s.AllowChannelCreation
 			serverFound = true
 			break
@@ -1026,7 +1048,7 @@ func (a *App) MeshServerListMyServersForConnection(ctx context.Context, connecti
 			if err != nil {
 				// Fall through to cache.
 			} else {
-				if serversResp == nil || len(serversResp.Servers) == 0 {
+				if serversResp == nil || len(serversResp.Spaces) == 0 {
 					resp := &meshserver.MyServersResp{Servers: []*meshserver.MyServer{}}
 					if a.myServersStore != nil {
 						_ = a.myServersStore.Put(cacheKey, resp)
@@ -1034,9 +1056,9 @@ func (a *App) MeshServerListMyServersForConnection(ctx context.Context, connecti
 					return resp, nil
 				}
 
-				out := make([]*meshserver.MyServer, 0, len(serversResp.Servers))
-				for _, s := range serversResp.Servers {
-					if s == nil || s.ServerId == "" {
+				out := make([]*meshserver.MyServer, 0, len(serversResp.Spaces))
+				for _, s := range serversResp.Spaces {
+					if s == nil || s.SpaceId == 0 {
 						continue
 					}
 
@@ -1045,7 +1067,7 @@ func (a *App) MeshServerListMyServersForConnection(ctx context.Context, connecti
 					after := uint64(0)
 					limit := uint32(50)
 					for {
-						membersResp, err := client.ListServerMembers(ctx, s.ServerId, after, limit)
+						membersResp, err := client.ListServerMembers(ctx, strconv.FormatUint(uint64(s.SpaceId), 10), after, limit)
 						if err != nil {
 							// Fall through to cache.
 							goto cache_fallback
@@ -1117,7 +1139,7 @@ func (a *App) MeshServerListMyGroupsForConnection(ctx context.Context, connectio
 	if a.meshServer != nil {
 		client, err := a.meshServerClient(connection)
 		if err == nil && client != nil {
-			channelsResp, err := client.ListChannels(ctx, spaceID)
+			channelsResp, err := client.ListChannels(ctx, parseUint32ID(spaceID))
 			if err == nil {
 				groups := make([]*meshserver.MyGroup, 0)
 				for _, ch := range channelsResp.Channels {
@@ -1133,13 +1155,10 @@ func (a *App) MeshServerListMyGroupsForConnection(ctx context.Context, connectio
 					}
 					groups = append(groups, &meshserver.MyGroup{
 						ID: func() int {
-							if a.resourceIDsStore == nil {
-								return 0
-							}
-							id, _ := a.resourceIDsStore.GetOrCreateChannelID(ch.ChannelId)
-							return id
+							// Prefer native numeric channel_id as stable id.
+							return int(ch.ChannelId)
 						}(),
-						ChannelID:        ch.ChannelId,
+						ChannelID:        strconv.FormatUint(uint64(ch.ChannelId), 10),
 						Type:             ch.Type,
 						Name:             ch.Name,
 						Description:      ch.Description,
@@ -1280,7 +1299,7 @@ func (a *App) MeshServerSyncChannelForConnection(ctx context.Context, connection
 	return a.MeshServerSyncChannelFor(ctx, connection, channelID, afterSeq, limit)
 }
 
-func (a *App) ListServers(ctx context.Context) (*sessionv1.ListServersResp, error) {
+func (a *App) ListServers(ctx context.Context) (*sessionv1.ListSpacesResp, error) {
 	return a.MeshServerListServers(ctx)
 }
 
@@ -1388,42 +1407,42 @@ func (m *meshServerAPIAdapter) Disconnect(name string) error {
 	return m.app.MeshServerDisconnect(name)
 }
 
-func (m *meshServerAPIAdapter) ListServers(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+func (m *meshServerAPIAdapter) ListServers(ctx context.Context, connection string) (*sessionv1.ListSpacesResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerListServersForConnection(ctx, connection)
 }
 
-func (m *meshServerAPIAdapter) JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error) {
+func (m *meshServerAPIAdapter) JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinSpaceResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerJoinServerForConnection(ctx, connection, serverID)
 }
 
-func (m *meshServerAPIAdapter) InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+func (m *meshServerAPIAdapter) InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerInviteServerMemberForConnection(ctx, connection, serverID, targetUserID)
 }
 
-func (m *meshServerAPIAdapter) KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+func (m *meshServerAPIAdapter) KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerKickServerMemberForConnection(ctx, connection, serverID, targetUserID)
 }
 
-func (m *meshServerAPIAdapter) BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+func (m *meshServerAPIAdapter) BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanSpaceMemberResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerBanServerMemberForConnection(ctx, connection, serverID, targetUserID)
 }
 
-func (m *meshServerAPIAdapter) ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+func (m *meshServerAPIAdapter) ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListSpaceMembersResp, error) {
 	if m == nil || m.app == nil {
 		return nil, fmt.Errorf("meshserver client not available")
 	}
@@ -1512,6 +1531,13 @@ func (m *meshServerAPIAdapter) ListMyGroups(ctx context.Context, connection, spa
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerListMyGroupsForConnection(ctx, connection, spaceID)
+}
+
+func (m *meshServerAPIAdapter) GetCreateSpacePermissions(ctx context.Context, connection string) (*sessionv1.GetCreateSpacePermissionsResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerGetCreateSpacePermissionsForConnection(ctx, connection)
 }
 
 // streamsAPIAdapter adapts StreamManager to api.StreamsProvider.

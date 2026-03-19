@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"sync"
 
 	proto "github.com/golang/protobuf/proto"
@@ -168,7 +170,7 @@ func (c *Client) authenticate(ctx context.Context) error {
 		return fmt.Errorf("decode auth challenge: %w", err)
 	}
 	// 與 meshserver internal/auth.BuildChallengePayload 一致：node_peer_id、尾部 \n；ServerPeerId 對應 proto node_peer_id 欄位
-	payload := buildChallengePayload(string(c.protocolID), c.host.ID().String(), chal.ServerPeerId, chal.Nonce, chal.IssuedAtMs, chal.ExpiresAtMs)
+	payload := buildChallengePayload(string(c.protocolID), c.host.ID().String(), chal.NodePeerId, chal.Nonce, chal.IssuedAtMs, chal.ExpiresAtMs)
 	sig, err := c.privKey.Sign(payload)
 	if err != nil {
 		return fmt.Errorf("sign auth challenge: %w", err)
@@ -348,20 +350,32 @@ func buildChallengePayload(protocolID, clientPeerID, nodePeerID string, nonce []
 	))
 }
 
-func (c *Client) ListServers(ctx context.Context) (*sessionv1.ListServersResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_LIST_SERVERS_REQ, &sessionv1.ListServersReq{})
+func (c *Client) ListServers(ctx context.Context) (*sessionv1.ListSpacesResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_LIST_SPACES_REQ, &sessionv1.ListSpacesReq{})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.ListServersResp
+	var resp sessionv1.ListSpacesResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) ListChannels(ctx context.Context, serverID string) (*sessionv1.ListChannelsResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_LIST_CHANNELS_REQ, &sessionv1.ListChannelsReq{ServerId: serverID})
+func (c *Client) GetCreateSpacePermissions(ctx context.Context) (*sessionv1.GetCreateSpacePermissionsResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_GET_CREATE_SPACE_PERMISSIONS_REQ, &sessionv1.GetCreateSpacePermissionsReq{})
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.GetCreateSpacePermissionsResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) ListChannels(ctx context.Context, spaceID uint32) (*sessionv1.ListChannelsResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_LIST_CHANNELS_REQ, &sessionv1.ListChannelsReq{SpaceId: spaceID})
 	if err != nil {
 		return nil, err
 	}
@@ -373,8 +387,9 @@ func (c *Client) ListChannels(ctx context.Context, serverID string) (*sessionv1.
 }
 
 func (c *Client) CreateGroup(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
 	env, err := c.request(ctx, sessionv1.MsgType_CREATE_GROUP_REQ, &sessionv1.CreateGroupReq{
-		ServerId:        serverID,
+		SpaceId:         uint32(spaceID64),
 		Name:            name,
 		Description:     description,
 		Visibility:      visibility,
@@ -391,8 +406,9 @@ func (c *Client) CreateGroup(ctx context.Context, serverID, name, description st
 }
 
 func (c *Client) CreateChannel(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
 	env, err := c.request(ctx, sessionv1.MsgType_CREATE_CHANNEL_REQ, &sessionv1.CreateChannelReq{
-		ServerId:        serverID,
+		SpaceId:         uint32(spaceID64),
 		Name:            name,
 		Description:     description,
 		Visibility:      visibility,
@@ -408,7 +424,7 @@ func (c *Client) CreateChannel(ctx context.Context, serverID, name, description 
 	return &resp, nil
 }
 
-func (c *Client) SubscribeChannel(ctx context.Context, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+func (c *Client) SubscribeChannel(ctx context.Context, channelID uint32, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
 	env, err := c.request(ctx, sessionv1.MsgType_SUBSCRIBE_CHANNEL_REQ, &sessionv1.SubscribeChannelReq{
 		ChannelId:   channelID,
 		LastSeenSeq: lastSeenSeq,
@@ -423,7 +439,7 @@ func (c *Client) SubscribeChannel(ctx context.Context, channelID string, lastSee
 	return &resp, nil
 }
 
-func (c *Client) UnsubscribeChannel(ctx context.Context, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+func (c *Client) UnsubscribeChannel(ctx context.Context, channelID uint32) (*sessionv1.UnsubscribeChannelResp, error) {
 	env, err := c.request(ctx, sessionv1.MsgType_UNSUBSCRIBE_CHANNEL_REQ, &sessionv1.UnsubscribeChannelReq{
 		ChannelId: channelID,
 	})
@@ -438,8 +454,9 @@ func (c *Client) UnsubscribeChannel(ctx context.Context, channelID string) (*ses
 }
 
 func (c *Client) SendMessage(ctx context.Context, channelID, clientMsgID string, messageType sessionv1.MessageType, text string, images []*sessionv1.MediaImage, files []*sessionv1.MediaFile) (*sessionv1.SendMessageAck, error) {
+	chID64, _ := strconv.ParseUint(strings.TrimSpace(channelID), 10, 32)
 	env, err := c.request(ctx, sessionv1.MsgType_SEND_MESSAGE_REQ, &sessionv1.SendMessageReq{
-		ChannelId:   channelID,
+		ChannelId:   uint32(chID64),
 		ClientMsgId: clientMsgID,
 		MessageType: messageType,
 		Content:     &sessionv1.MessageContent{Text: text, Images: images, Files: files},
@@ -455,8 +472,9 @@ func (c *Client) SendMessage(ctx context.Context, channelID, clientMsgID string,
 }
 
 func (c *Client) SyncChannel(ctx context.Context, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	chID64, _ := strconv.ParseUint(strings.TrimSpace(channelID), 10, 32)
 	env, err := c.request(ctx, sessionv1.MsgType_SYNC_CHANNEL_REQ, &sessionv1.SyncChannelReq{
-		ChannelId: channelID,
+		ChannelId: uint32(chID64),
 		AfterSeq:  afterSeq,
 		Limit:     limit,
 	})
@@ -471,9 +489,7 @@ func (c *Client) SyncChannel(ctx context.Context, channelID string, afterSeq uin
 }
 
 func (c *Client) GetMedia(ctx context.Context, mediaID string) (*sessionv1.GetMediaResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_GET_MEDIA_REQ, &sessionv1.GetMediaReq{
-		MediaId: mediaID,
-	})
+	env, err := c.request(ctx, sessionv1.MsgType_GET_MEDIA_REQ, &sessionv1.GetMediaReq{MediaId: mediaID})
 	if err != nil {
 		return nil, err
 	}
@@ -484,106 +500,113 @@ func (c *Client) GetMedia(ctx context.Context, mediaID string) (*sessionv1.GetMe
 	return &resp, nil
 }
 
-func (c *Client) SetMemberRole(ctx context.Context, serverID, targetUserID string, role sessionv1.MemberRole) (*sessionv1.AdminSetMemberRoleResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_ADMIN_SET_MEMBER_ROLE_REQ, &sessionv1.AdminSetMemberRoleReq{
-		ServerId:     serverID,
+func (c *Client) SetMemberRole(ctx context.Context, serverID, targetUserID string, role sessionv1.MemberRole) (*sessionv1.AdminSetSpaceMemberRoleResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_ADMIN_SET_SPACE_MEMBER_ROLE_REQ, &sessionv1.AdminSetSpaceMemberRoleReq{
+		SpaceId:      uint32(spaceID64),
 		TargetUserId: targetUserID,
 		Role:         role,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.AdminSetMemberRoleResp
+	var resp sessionv1.AdminSetSpaceMemberRoleResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) SetChannelCreation(ctx context.Context, serverID string, enabled bool) (*sessionv1.AdminSetChannelCreationResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_ADMIN_SET_CHANNEL_CREATION_REQ, &sessionv1.AdminSetChannelCreationReq{
-		ServerId:             serverID,
+func (c *Client) SetChannelCreation(ctx context.Context, serverID string, enabled bool) (*sessionv1.AdminSetSpaceChannelCreationResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_ADMIN_SET_SPACE_CHANNEL_CREATION_REQ, &sessionv1.AdminSetSpaceChannelCreationReq{
+		SpaceId:              uint32(spaceID64),
 		AllowChannelCreation: enabled,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.AdminSetChannelCreationResp
+	var resp sessionv1.AdminSetSpaceChannelCreationResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) JoinServer(ctx context.Context, serverID string) (*sessionv1.JoinServerResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_JOIN_SERVER_REQ, &sessionv1.JoinServerReq{
-		ServerId: serverID,
+func (c *Client) JoinServer(ctx context.Context, serverID string) (*sessionv1.JoinSpaceResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_JOIN_SPACE_REQ, &sessionv1.JoinSpaceReq{
+		SpaceId: uint32(spaceID64),
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.JoinServerResp
+	var resp sessionv1.JoinSpaceResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) InviteServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_INVITE_SERVER_MEMBER_REQ, &sessionv1.InviteServerMemberReq{
-		ServerId:     serverID,
+func (c *Client) InviteServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_INVITE_SPACE_MEMBER_REQ, &sessionv1.InviteSpaceMemberReq{
+		SpaceId:      uint32(spaceID64),
 		TargetUserId: targetUserID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.InviteServerMemberResp
+	var resp sessionv1.InviteSpaceMemberResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) KickServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_KICK_SERVER_MEMBER_REQ, &sessionv1.KickServerMemberReq{
-		ServerId:     serverID,
+func (c *Client) KickServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_KICK_SPACE_MEMBER_REQ, &sessionv1.KickSpaceMemberReq{
+		SpaceId:      uint32(spaceID64),
 		TargetUserId: targetUserID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.KickServerMemberResp
+	var resp sessionv1.KickSpaceMemberResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) BanServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_BAN_SERVER_MEMBER_REQ, &sessionv1.BanServerMemberReq{
-		ServerId:     serverID,
+func (c *Client) BanServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.BanSpaceMemberResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_BAN_SPACE_MEMBER_REQ, &sessionv1.BanSpaceMemberReq{
+		SpaceId:      uint32(spaceID64),
 		TargetUserId: targetUserID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.BanServerMemberResp
+	var resp sessionv1.BanSpaceMemberResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) ListServerMembers(ctx context.Context, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
-	env, err := c.request(ctx, sessionv1.MsgType_LIST_SERVER_MEMBERS_REQ, &sessionv1.ListServerMembersReq{
-		ServerId:      serverID,
+func (c *Client) ListServerMembers(ctx context.Context, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListSpaceMembersResp, error) {
+	spaceID64, _ := strconv.ParseUint(strings.TrimSpace(serverID), 10, 32)
+	env, err := c.request(ctx, sessionv1.MsgType_LIST_SPACE_MEMBERS_REQ, &sessionv1.ListSpaceMembersReq{
+		SpaceId:       uint32(spaceID64),
 		AfterMemberId: afterMemberID,
 		Limit:         limit,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var resp sessionv1.ListServerMembersResp
+	var resp sessionv1.ListSpaceMembersResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}

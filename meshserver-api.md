@@ -125,6 +125,50 @@ Content-Type: application/json
 }
 ```
 
+### 1.4 查看某个连接的状态（权限/认证信息）
+
+如果你想查询 **meshserver 连接本身**（connection/server）的状态，比如是否已连接、是否已认证、当前 user_id 等，可以使用此接口。
+
+`GET /api/v1/meshserver/connections/{name}`
+
+响应示例：
+
+```json
+{
+  "name": "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "peer_id": "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "client_agent": "meshproxy-client",
+  "protocol_id": "/meshserver/session/1.0.0",
+  "connected": true,
+  "authenticated": true,
+  "session_id": "sess_01HXYZ...",
+  "user_id": "user_001",
+  "display_name": "AI Node"
+}
+```
+
+### 1.5 查询“服务器/连接”级别权限（仅 connection）
+
+这个接口用于查询 **meshserver 连接本身** 的创建 Space 权限（调用 `GET_CREATE_SPACE_PERMISSIONS`）。
+
+`GET /api/v1/meshserver/server/my_permissions?connection=...`
+
+说明：
+
+- 这个接口**没有 `space_id` 参数**
+- 服务端会直接按 `connection` 调用 `GET_CREATE_SPACE_PERMISSIONS`
+- 如果有多个连接且未传 `connection`，会返回错误
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "can_create_space": true,
+  "message": ""
+}
+```
+
 ## 2. 请求里的 connection 参数
 
 当连接了多个 meshserver 时，后续 API 需要通过 `connection` 指定目标。
