@@ -38,7 +38,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.UserAgent("meshproxy"),
-		libp2p.ConnectionGater(NewAddrFilterGater()),
+		// libp2p.ConnectionGater(NewAddrFilterGater()),
 
 		//尝试开启upnp协议
 		libp2p.NATPortMap(),

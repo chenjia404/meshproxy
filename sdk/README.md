@@ -124,6 +124,323 @@ func main() {
 }
 ```
 
+## 对接 meshserver 的中心化群
+
+这套接口对应的是 `meshserver` 的中心化群，不是本项目原有的去中心化群。
+
+说明：
+
+- 本地 HTTP API 的请求里，`visibility` 仍然可以用 `public` / `private`
+- 但响应里的 proto `enum` 字段会按数字输出，例如 `PUBLIC=1`、`PRIVATE=2`、`GROUP=1`、`BROADCAST=2`、`TEXT=1`
+
+meshserver 不需要在配置文件里预先写死。用户运行时既可以只输入目标 meshserver 节点的 `peer_id`，也可以直接输入完整的 `multiaddr`，就可以动态连接一个或多个 meshserver。
+
+连接时会先尝试使用本地 peerstore 和 DHT 发现地址；如果这个 `peer_id` 当前没有可发现地址，客户端还会去 DHT 的 `meshserver` rendezvous 命名空间里自动发现。若最终还是没有可用地址，仍然会报 `no good addresses`。
+
+先连接一个 meshserver：
+
+`POST /api/v1/meshserver/connections`
+
+请求：
+
+```http
+POST /api/v1/meshserver/connections
+Content-Type: application/json
+
+{
+  "peer_id": "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "client_agent": "meshproxy-client",
+  "protocol_id": "/meshserver/session/1.0.0"
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "connection": {
+    "name": "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "peer_id": "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "client_agent": "meshproxy-client",
+    "protocol_id": "/meshserver/session/1.0.0",
+    "connected": true,
+    "authenticated": true,
+    "session_id": "sess_01HXYZ...",
+    "user_id": "user_001",
+    "display_name": "AI Node"
+  }
+}
+```
+
+查询当前所有已连接的 meshserver：
+
+`GET /api/v1/meshserver/connections`
+
+如果用户只输入 `peer_id`，服务端会自动把连接名也默认成这个 `peer_id`，因此后续可以直接用 `connection=<peer_id>` 访问对应的 meshserver。
+
+本地 API 还会提供这些服务器群接口。若你连接了多个 meshserver，请在请求里带上 `connection` 查询参数；不传时，默认使用唯一连接，或者在只有一个连接时自动命中：
+
+### 1. 获取可见服务器列表
+
+`GET /api/v1/meshserver/spaces?connection=<peer_id>`
+
+请求：
+
+```http
+GET /api/v1/meshserver/spaces?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+响应示例：
+
+```json
+{
+  "servers": [
+    {
+      "server_id": "srv_demo",
+      "name": "Demo Server",
+      "avatar_url": "/blobs/server-avatar.png",
+      "description": "默认演示服务器",
+      "visibility": 1,
+      "member_count": 12,
+      "allow_channel_creation": true
+    }
+  ]
+}
+```
+
+### 2. 获取服务器下的频道列表
+
+`GET /api/v1/meshserver/spaces/{space_id}/channels?connection=<peer_id>`
+
+请求：
+
+```http
+GET /api/v1/meshserver/spaces/srv_demo/channels?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+响应示例：
+
+```json
+{
+  "server_id": "srv_demo",
+  "channels": [
+    {
+      "channel_id": "ch_demo_group",
+      "server_id": "srv_demo",
+      "type": "GROUP",
+      "name": "AI 群",
+      "description": "给机器人测试用的群",
+      "visibility": 1,
+      "slow_mode_seconds": 0,
+      "last_seq": 128,
+      "can_view": true,
+      "can_send_message": true,
+      "can_send_image": true,
+      "can_send_file": true
+    }
+  ]
+}
+```
+
+### 3. 在服务器里创建群
+
+`POST /api/v1/meshserver/spaces/{space_id}/groups?connection=<peer_id>`
+
+请求：
+
+```http
+POST /api/v1/meshserver/spaces/srv_demo/groups?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Content-Type: application/json
+
+{
+  "name": "AI 群",
+  "description": "用于机器人协作",
+  "visibility": "public",
+  "slow_mode_seconds": 0
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "server_id": "srv_demo",
+  "channel_id": "ch_01HXYZ...",
+    "channel": {
+      "channel_id": "ch_01HXYZ...",
+      "server_id": "srv_demo",
+      "type": 1,
+      "name": "AI 群",
+      "description": "用于机器人协作",
+      "visibility": 1,
+      "slow_mode_seconds": 0,
+      "last_seq": 0,
+      "can_view": true,
+    "can_send_message": true,
+    "can_send_image": true,
+    "can_send_file": true
+  },
+  "message": "created"
+}
+```
+
+### 4. 在服务器里创建广播频道
+
+`POST /api/v1/meshserver/spaces/{space_id}/channels?connection=<peer_id>`
+
+请求：
+
+```http
+POST /api/v1/meshserver/spaces/srv_demo/channels?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Content-Type: application/json
+
+{
+  "name": "公告",
+  "description": "只读广播频道",
+  "visibility": "private",
+  "slow_mode_seconds": 5
+}
+```
+
+响应示例和创建群类似，只是 `channel.type` 会是 `BROADCAST`。
+
+### 5. 加入频道
+
+`POST /api/v1/meshserver/channels/{channel_id}/join?connection=<peer_id>`
+
+请求：
+
+```http
+POST /api/v1/meshserver/channels/ch_demo_group/join?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Content-Type: application/json
+
+{
+  "last_seen_seq": 0
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "channel_id": "ch_demo_group",
+  "current_last_seq": 128,
+  "message": "subscribed"
+}
+```
+
+### 6. 退出频道
+
+`POST /api/v1/meshserver/channels/{channel_id}/leave?connection=<peer_id>`
+
+请求：
+
+```http
+POST /api/v1/meshserver/channels/ch_demo_group/leave?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "channel_id": "ch_demo_group"
+}
+```
+
+### 7. 发送消息
+
+`POST /api/v1/meshserver/channels/{channel_id}/messages?connection=<peer_id>`
+
+当前第一版主要用于发文本消息，后续可以再扩展图片/文件。
+
+请求：
+
+```http
+POST /api/v1/meshserver/channels/ch_demo_group/messages?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Content-Type: application/json
+
+{
+  "client_msg_id": "local-uuid-001",
+  "message_type": "text",
+  "text": "你好，服务器群"
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "channel_id": "ch_demo_group",
+  "client_msg_id": "local-uuid-001",
+  "message_id": "msg_01HXYZ...",
+  "seq": 129,
+  "server_time_ms": 1730000000000,
+  "message": "stored"
+}
+```
+
+### 8. 同步频道消息
+
+`GET /api/v1/meshserver/channels/{channel_id}/sync?connection=<peer_id>&after_seq=...&limit=...`
+
+请求：
+
+```http
+GET /api/v1/meshserver/channels/ch_demo_group/sync?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&after_seq=128&limit=50
+```
+
+响应示例：
+
+```json
+{
+  "channel_id": "ch_demo_group",
+  "messages": [
+    {
+      "channel_id": "ch_demo_group",
+      "message_id": "msg_01HXYZ...",
+      "seq": 129,
+      "sender_user_id": "user_001",
+      "message_type": 1,
+      "content": {
+        "text": "你好，服务器群"
+      },
+      "created_at_ms": 1730000000000
+    }
+  ],
+  "next_after_seq": 130,
+  "has_more": false
+}
+```
+
+### SDK 调用示例
+
+如果你想在 Go 程序里直接调用，不走 HTTP，也可以：
+
+```go
+conn, err := node.MeshServer().Connect(ctx, "", "12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "", "")
+if err != nil {
+	log.Fatal(err)
+}
+log.Println("connected:", conn.Name, conn.PeerID)
+
+resp, err := node.MeshServer().ListServersForConnection(ctx, conn.Name)
+if err != nil {
+	log.Fatal(err)
+}
+log.Println("servers:", len(resp.Servers))
+
+groupResp, err := node.MeshServer().CreateGroupForConnection(ctx, conn.Name, "srv_demo", "AI 群", "用于机器人协作", sdk.MeshServerVisibilityPublic, 0)
+if err != nil {
+	log.Fatal(err)
+}
+log.Println("channel_id:", groupResp.ChannelId)
+```
+
 ## 手动连接某个 Peer
 
 ```go

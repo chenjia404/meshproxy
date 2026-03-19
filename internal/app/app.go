@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,8 @@ import (
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/geoip"
 	"github.com/chenjia404/meshproxy/internal/identity"
+	"github.com/chenjia404/meshproxy/internal/meshserver"
+	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/relay"
@@ -55,6 +58,7 @@ type App struct {
 	exitSocks5 *exit.Socks5Server
 	localAPI   *api.LocalAPI
 	chat       *chat.Service
+	meshServer *meshserver.Manager
 
 	circuitStore   *store.CircuitStore
 	pathSelector   *client.PathSelector
@@ -75,6 +79,14 @@ type App struct {
 	closeOnce sync.Once
 	closeErr  error
 	ownsHost  bool
+
+	myServersStore *meshserver.MyServersStore
+
+	connectedServersStore *meshserver.ConnectedMeshServersStore
+
+	myGroupsStore *meshserver.MyGroupsStore
+
+	resourceIDsStore *meshserver.ResourceIDsStore
 }
 
 type Options struct {
@@ -111,6 +123,14 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
+	myServersPath := filepath.Join(cfg.DataDir, "my_meshserver_servers.db")
+	myServersStore := meshserver.NewMyServersStore(myServersPath)
+	myGroupsPath := filepath.Join(cfg.DataDir, "my_meshserver_groups.db")
+	myGroupsStore := meshserver.NewMyGroupsStore(myGroupsPath)
+	connectedServersPath := filepath.Join(cfg.DataDir, "connected_meshservers.db")
+	connectedServersStore := meshserver.NewConnectedMeshServersStore(connectedServersPath)
+	resourceIDsPath := filepath.Join(cfg.DataDir, "meshserver_resource_ids.db")
+	resourceIDsStore := meshserver.NewResourceIDsStore(resourceIDsPath)
 	cachePath := filepath.Join(cfg.DataDir, "relays.json")
 	relayCache, err := relaycache.New(cachePath)
 	if err != nil {
@@ -130,6 +150,10 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		circuitStore:   store.NewCircuitStore(),
 		relayCache:     relayCache,
 		bootstrapCache: bootstrapCache,
+		myServersStore: myServersStore,
+		myGroupsStore:  myGroupsStore,
+		connectedServersStore: connectedServersStore,
+		resourceIDsStore: resourceIDsStore,
 		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
 		autoUpdate:     cfg.AutoUpdate,
 		traffic:        traffic.NewRecorder(),
@@ -232,6 +256,26 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	connections := make([]meshserver.ConnectionConfig, 0, len(cfg.MeshServerConnections()))
+	for _, conn := range cfg.MeshServerConnections() {
+		connections = append(connections, meshserver.ConnectionConfig{
+			Name:        conn.Name,
+			PeerID:      conn.PeerID,
+			ClientAgent: conn.ClientAgent,
+			ProtocolID:  conn.ProtocolID,
+		})
+	}
+	meshMgr, err := meshserver.NewManager(ctx, a.Host(), h.Routing, idMgr.PrivateKey(), connections)
+	if err != nil {
+		return nil, fmt.Errorf("init meshserver manager: %w", err)
+	}
+	a.meshServer = meshMgr
+	// Persist all configured/initialized meshserver connections for the local "/servers" list.
+	if a.connectedServersStore != nil {
+		for _, info := range a.meshServer.List() {
+			_ = a.connectedServersStore.Put(info)
+		}
+	}
 	a.restoreCachedPeerConnections()
 
 	// Path selector and circuit manager
@@ -375,6 +419,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			ConfigPath:          cfg.ConfigFilePath,
 			ExitService:         exitSvc,
 			ChatService:         chatSvc,
+			MeshServer:          &meshServerAPIAdapter{app: a},
 			UpdateService:       a,
 			UpdateSettings:      a,
 		}
@@ -402,7 +447,9 @@ func (a *App) Close() error {
 	a.closeOnce.Do(func() {
 		var firstErr error
 		if a.localAPI != nil {
-			if err := a.localAPI.Shutdown(); err != nil && firstErr == nil {
+			// firstErr is guaranteed to be nil at this point (no earlier assignments in this closure),
+			// so the additional `firstErr == nil` check is redundant.
+			if err := a.localAPI.Shutdown(); err != nil {
 				firstErr = err
 			}
 		}
@@ -413,6 +460,11 @@ func (a *App) Close() error {
 		}
 		if a.chat != nil {
 			if err := a.chat.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if a.meshServer != nil {
+			if err := a.meshServer.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -593,6 +645,673 @@ func (a *App) ChatService() *chat.Service {
 	return a.chat
 }
 
+func (a *App) MeshServerClient() *meshserver.Client {
+	if a == nil {
+		return nil
+	}
+	if a.meshServer == nil {
+		return nil
+	}
+	client, _ := a.meshServer.Get("")
+	return client
+}
+
+func (a *App) MeshServerEnabled() bool {
+	return a != nil && a.meshServer != nil && a.meshServer.HasAny()
+}
+
+func (a *App) MeshServerConnections() []meshserver.ConnectionInfo {
+	if a == nil || a.meshServer == nil {
+		return nil
+	}
+	return a.meshServer.List()
+}
+
+// MeshServerListConnectedServers returns the persisted list of connected meshservers.
+// It merges stored identity fields with live connection status when possible.
+func (a *App) MeshServerListConnectedServers() []meshserver.ConnectionInfo {
+	if a == nil || a.connectedServersStore == nil {
+		return nil
+	}
+
+	entries := a.connectedServersStore.ListEntries()
+	if len(entries) == 0 {
+		return nil
+	}
+
+	live := make(map[string]meshserver.ConnectionInfo, len(a.MeshServerConnections()))
+	for _, ci := range a.MeshServerConnections() {
+		live[ci.Name] = ci
+	}
+
+	out := make([]meshserver.ConnectionInfo, 0, len(entries))
+	for _, e := range entries {
+		ci := meshserver.ConnectionInfo{
+			Name:        e.Name,
+			PeerID:      e.PeerID,
+			ClientAgent: e.ClientAgent,
+			ProtocolID:  e.ProtocolID,
+		}
+		if liveCI, ok := live[e.Name]; ok {
+			ci.Connected = liveCI.Connected
+			ci.Authenticated = liveCI.Authenticated
+			ci.SessionID = liveCI.SessionID
+			ci.UserID = liveCI.UserID
+			ci.DisplayName = liveCI.DisplayName
+		}
+		out = append(out, ci)
+	}
+	return out
+}
+
+func (a *App) MeshServerGetOrCreateSpaceID(serverID string) (int, error) {
+	if a == nil || a.resourceIDsStore == nil {
+		return 0, nil
+	}
+	return a.resourceIDsStore.GetOrCreateSpaceID(serverID)
+}
+
+func (a *App) MeshServerGetServerIDBySpaceID(spaceID int) (string, error) {
+	if a == nil || a.resourceIDsStore == nil {
+		return "", nil
+	}
+	return a.resourceIDsStore.GetServerIDBySpaceID(spaceID)
+}
+
+func (a *App) MeshServerGetOrCreateChannelID(channelID string) (int, error) {
+	if a == nil || a.resourceIDsStore == nil {
+		return 0, nil
+	}
+	return a.resourceIDsStore.GetOrCreateChannelID(channelID)
+}
+
+func (a *App) MeshServerGetChannelIDByChannelIDIntID(channelIDIntID int) (string, error) {
+	if a == nil || a.resourceIDsStore == nil {
+		return "", nil
+	}
+	return a.resourceIDsStore.GetChannelIDByChannelIDIntID(channelIDIntID)
+}
+
+func (a *App) MeshServerConnect(ctx context.Context, name, peerID, clientAgent, protocolID string) (meshserver.ConnectionInfo, error) {
+	if a == nil || a.meshServer == nil {
+		return meshserver.ConnectionInfo{}, fmt.Errorf("meshserver client not available")
+	}
+	info, err := a.meshServer.Add(ctx, meshserver.ConnectionConfig{
+		Name:        name,
+		PeerID:      peerID,
+		ClientAgent: clientAgent,
+		ProtocolID:  protocolID,
+	})
+	if err != nil {
+		return meshserver.ConnectionInfo{}, err
+	}
+	// Best-effort: persist joined business servers after successful auth.
+	if a.myServersStore != nil {
+		_, _ = a.MeshServerListMyServersForConnection(ctx, info.Name)
+	}
+	// Best-effort: persist connected meshservers.
+	if a.connectedServersStore != nil {
+		_ = a.connectedServersStore.Put(info)
+	}
+	return info, nil
+}
+
+func (a *App) MeshServerDisconnect(name string) error {
+	if a == nil || a.meshServer == nil {
+		return fmt.Errorf("meshserver client not available")
+	}
+	return a.meshServer.Remove(name)
+}
+
+func (a *App) meshServerClient(connection string) (*meshserver.Client, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServer.Get(connection)
+	if err != nil {
+		return nil, fmt.Errorf("meshserver client not available: %w", err)
+	}
+	return client, nil
+}
+
+func (a *App) MeshServerListServersFor(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListServers(ctx)
+}
+
+func (a *App) MeshServerJoinServer(ctx context.Context, serverID string) (*sessionv1.JoinServerResp, error) {
+	return a.MeshServerJoinServerForConnection(ctx, "", serverID)
+}
+
+func (a *App) MeshServerJoinServerForConnection(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.JoinServer(ctx, serverID)
+	if err == nil && a.myServersStore != nil {
+		// Best-effort: update persisted joined servers.
+		_, _ = a.MeshServerListMyServersForConnection(ctx, connection)
+	}
+	return resp, err
+}
+
+func (a *App) MeshServerInviteServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+	return a.MeshServerInviteServerMemberForConnection(ctx, "", serverID, targetUserID)
+}
+
+func (a *App) MeshServerInviteServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.InviteServerMember(ctx, serverID, targetUserID)
+}
+
+func (a *App) MeshServerKickServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+	return a.MeshServerKickServerMemberForConnection(ctx, "", serverID, targetUserID)
+}
+
+func (a *App) MeshServerKickServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.KickServerMember(ctx, serverID, targetUserID)
+}
+
+func (a *App) MeshServerBanServerMember(ctx context.Context, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+	return a.MeshServerBanServerMemberForConnection(ctx, "", serverID, targetUserID)
+}
+
+func (a *App) MeshServerBanServerMemberForConnection(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.BanServerMember(ctx, serverID, targetUserID)
+}
+
+func (a *App) MeshServerListServerMembers(ctx context.Context, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+	return a.MeshServerListServerMembersForConnection(ctx, "", serverID, afterMemberID, limit)
+}
+
+func (a *App) MeshServerListServerMembersForConnection(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListServerMembers(ctx, serverID, afterMemberID, limit)
+}
+
+func (a *App) MeshServerListChannelsFor(ctx context.Context, connection, serverID string) (*sessionv1.ListChannelsResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListChannels(ctx, serverID)
+}
+
+func (a *App) MeshServerCreateGroupFor(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.CreateGroup(ctx, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerCreateChannelFor(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.CreateChannel(ctx, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerSubscribeChannelFor(ctx context.Context, connection, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.SubscribeChannel(ctx, channelID, lastSeenSeq)
+}
+
+func (a *App) MeshServerUnsubscribeChannelFor(ctx context.Context, connection, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.UnsubscribeChannel(ctx, channelID)
+}
+
+func (a *App) MeshServerSendTextFor(ctx context.Context, connection, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.SendMessage(ctx, channelID, clientMsgID, sessionv1.MessageType_TEXT, text, nil, nil)
+}
+
+func (a *App) MeshServerSyncChannelFor(ctx context.Context, connection, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.SyncChannel(ctx, channelID, afterSeq, limit)
+}
+
+func (a *App) MeshServerListServers(ctx context.Context) (*sessionv1.ListServersResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerListServersFor(ctx, "")
+}
+
+func (a *App) MeshServerListServersForConnection(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+	return a.MeshServerListServersFor(ctx, connection)
+}
+
+// MeshServerGetMyPermissionsForConnection returns a derived "GET_MY_PERMISSIONS" result.
+// We compute it from:
+// - auth result (current user_id)
+// - server summary (allow_channel_creation)
+// - member list (member role)
+func (a *App) MeshServerGetMyPermissionsForConnection(ctx context.Context, connection, serverID string) (*meshserver.MyPermissions, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	auth := client.AuthResult()
+	if auth == nil {
+		return nil, fmt.Errorf("meshserver client not authenticated")
+	}
+
+	// Server-level settings (e.g. allow_channel_creation).
+	serversResp, err := client.ListServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var allowChannelCreation bool
+	serverFound := false
+	for _, s := range serversResp.Servers {
+		if s != nil && s.ServerId == serverID {
+			allowChannelCreation = s.AllowChannelCreation
+			serverFound = true
+			break
+		}
+	}
+	if !serverFound {
+		return nil, fmt.Errorf("server not found: %s", serverID)
+	}
+
+	// Find my member role by paginating server members.
+	myRole := sessionv1.MemberRole_MEMBER_ROLE_UNSPECIFIED
+	found := false
+	var after uint64
+	limit := uint32(50)
+	for {
+		membersResp, err := client.ListServerMembers(ctx, serverID, after, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range membersResp.Members {
+			if m != nil && m.UserId == auth.UserId {
+				myRole = m.Role
+				found = true
+				break
+			}
+		}
+		if found || !membersResp.HasMore {
+			break
+		}
+		after = membersResp.NextAfterMemberId
+	}
+
+	isAdmin := myRole == sessionv1.MemberRole_OWNER || myRole == sessionv1.MemberRole_ADMIN
+	return &meshserver.MyPermissions{
+		ServerID: serverID,
+		Role:     myRole,
+
+		CanCreateChannel:      allowChannelCreation && isAdmin,
+		CanManageMembers:      isAdmin,
+		CanSetMemberRoles:     isAdmin,
+		CanSetChannelCreation: isAdmin,
+	}, nil
+}
+
+// MeshServerListMyServersForConnection returns the servers where the current authenticated user
+// is already a member (i.e. has an entry in LIST_SERVER_MEMBERS).
+func (a *App) MeshServerListMyServersForConnection(ctx context.Context, connection string) (*meshserver.MyServersResp, error) {
+	if a == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+
+	// Cache key is the meshserver connection name / peer id (default name == peer id).
+	cacheKey := strings.TrimSpace(connection)
+	if cacheKey == "" && a.meshServer != nil {
+		cacheKey = a.meshServer.DefaultName()
+	}
+
+	// Try live calculation first.
+	if a.meshServer != nil {
+		client, err := a.meshServerClient(connection)
+		if err == nil && client != nil {
+			auth := client.AuthResult()
+			if auth == nil {
+				return nil, fmt.Errorf("meshserver client not authenticated")
+			}
+
+			serversResp, err := client.ListServers(ctx)
+			if err != nil {
+				// Fall through to cache.
+			} else {
+				if serversResp == nil || len(serversResp.Servers) == 0 {
+					resp := &meshserver.MyServersResp{Servers: []*meshserver.MyServer{}}
+					if a.myServersStore != nil {
+						_ = a.myServersStore.Put(cacheKey, resp)
+					}
+					return resp, nil
+				}
+
+				out := make([]*meshserver.MyServer, 0, len(serversResp.Servers))
+				for _, s := range serversResp.Servers {
+					if s == nil || s.ServerId == "" {
+						continue
+					}
+
+					var myRole sessionv1.MemberRole = sessionv1.MemberRole_MEMBER_ROLE_UNSPECIFIED
+					found := false
+					after := uint64(0)
+					limit := uint32(50)
+					for {
+						membersResp, err := client.ListServerMembers(ctx, s.ServerId, after, limit)
+						if err != nil {
+							// Fall through to cache.
+							goto cache_fallback
+						}
+						for _, m := range membersResp.Members {
+							if m != nil && m.UserId == auth.UserId {
+								myRole = m.Role
+								found = true
+								break
+							}
+						}
+						if found || !membersResp.HasMore {
+							break
+						}
+						after = membersResp.NextAfterMemberId
+					}
+
+					if found {
+						out = append(out, &meshserver.MyServer{Server: s, Role: myRole})
+					}
+				}
+
+				resp := &meshserver.MyServersResp{Servers: out}
+				if a.myServersStore != nil {
+					_ = a.myServersStore.Put(cacheKey, resp)
+				}
+				return resp, nil
+			}
+		}
+	}
+
+	// Cache fallback.
+	if a.myServersStore != nil && cacheKey != "" {
+		if resp, ok := a.myServersStore.Get(cacheKey); ok {
+			return resp, nil
+		}
+	}
+	return nil, fmt.Errorf("meshserver client not available")
+
+cache_fallback:
+	if a.myServersStore != nil && cacheKey != "" {
+		if resp, ok := a.myServersStore.Get(cacheKey); ok {
+			return resp, nil
+		}
+	}
+	return nil, fmt.Errorf("meshserver client not available")
+}
+
+// MeshServerListMyGroupsForConnection returns the groups (GROUP-type channels)
+// that the current authenticated user can view in the given Space.
+//
+// The response is cached locally as a best-effort fallback.
+func (a *App) MeshServerListMyGroupsForConnection(ctx context.Context, connection, spaceID string) (*meshserver.MyGroupsResp, error) {
+	if a == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	spaceID = strings.TrimSpace(spaceID)
+	if spaceID == "" {
+		return nil, fmt.Errorf("space_id is required")
+	}
+
+	cacheKey := strings.TrimSpace(connection)
+	if cacheKey == "" && a.meshServer != nil {
+		cacheKey = a.meshServer.DefaultName()
+	}
+	cacheKey = cacheKey + "|" + spaceID
+
+	// Try live calculation first.
+	if a.meshServer != nil {
+		client, err := a.meshServerClient(connection)
+		if err == nil && client != nil {
+			channelsResp, err := client.ListChannels(ctx, spaceID)
+			if err == nil {
+				groups := make([]*meshserver.MyGroup, 0)
+				for _, ch := range channelsResp.Channels {
+					if ch == nil {
+						continue
+					}
+					if ch.Type != sessionv1.ChannelType_GROUP {
+						continue
+					}
+					// LIST_CHANNELS is user-permission aware; interpret can_view as membership/joined group.
+					if !ch.CanView {
+						continue
+					}
+					groups = append(groups, &meshserver.MyGroup{
+						ID: func() int {
+							if a.resourceIDsStore == nil {
+								return 0
+							}
+							id, _ := a.resourceIDsStore.GetOrCreateChannelID(ch.ChannelId)
+							return id
+						}(),
+						ChannelID:        ch.ChannelId,
+						Type:             ch.Type,
+						Name:             ch.Name,
+						Description:      ch.Description,
+						Visibility:       ch.Visibility,
+						SlowModeSeconds:  ch.SlowModeSeconds,
+						LastSeq:          ch.LastSeq,
+						CanView:          ch.CanView,
+						CanSendMessage:  ch.CanSendMessage,
+						CanSendImage:    ch.CanSendImage,
+						CanSendFile:     ch.CanSendFile,
+					})
+				}
+				resp := &meshserver.MyGroupsResp{SpaceID: spaceID, Groups: groups}
+				if a.myGroupsStore != nil {
+					_ = a.myGroupsStore.Put(cacheKey, resp)
+				}
+				return resp, nil
+			}
+		}
+	}
+
+	// Cache fallback.
+	if a.myGroupsStore != nil {
+		if resp, ok := a.myGroupsStore.Get(cacheKey); ok {
+			return resp, nil
+		}
+	}
+	return nil, fmt.Errorf("meshserver client not available")
+}
+
+func (a *App) MeshServerListChannels(ctx context.Context, serverID string) (*sessionv1.ListChannelsResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerListChannelsFor(ctx, "", serverID)
+}
+
+func (a *App) MeshServerListChannelsForConnection(ctx context.Context, connection, serverID string) (*sessionv1.ListChannelsResp, error) {
+	return a.MeshServerListChannelsFor(ctx, connection, serverID)
+}
+
+func (a *App) MeshServerCreateGroup(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerCreateGroupFor(ctx, "", serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerCreateGroupForConnection(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	return a.MeshServerCreateGroupFor(ctx, connection, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerCreateChannel(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerCreateChannelFor(ctx, "", serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerCreateChannelForConnection(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	return a.MeshServerCreateChannelFor(ctx, connection, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) MeshServerSubscribeChannel(ctx context.Context, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerSubscribeChannelFor(ctx, "", channelID, lastSeenSeq)
+}
+
+func (a *App) MeshServerSubscribeChannelForConnection(ctx context.Context, connection, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+	return a.MeshServerSubscribeChannelFor(ctx, connection, channelID, lastSeenSeq)
+}
+
+func (a *App) MeshServerUnsubscribeChannel(ctx context.Context, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerUnsubscribeChannelFor(ctx, "", channelID)
+}
+
+func (a *App) MeshServerUnsubscribeChannelForConnection(ctx context.Context, connection, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+	return a.MeshServerUnsubscribeChannelFor(ctx, connection, channelID)
+}
+
+func (a *App) MeshServerSendText(ctx context.Context, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerSendTextFor(ctx, "", channelID, clientMsgID, text)
+}
+
+func (a *App) MeshServerSendTextForConnection(ctx context.Context, connection, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
+	return a.MeshServerSendTextFor(ctx, connection, channelID, clientMsgID, text)
+}
+
+func (a *App) MeshServerSendMessage(ctx context.Context, channelID, clientMsgID string, messageType sessionv1.MessageType, text string, images []*sessionv1.MediaImage, files []*sessionv1.MediaFile) (*sessionv1.SendMessageAck, error) {
+	return a.MeshServerSendMessageForConnection(ctx, "", channelID, clientMsgID, messageType, text, images, files)
+}
+
+func (a *App) MeshServerSendMessageForConnection(ctx context.Context, connection, channelID, clientMsgID string, messageType sessionv1.MessageType, text string, images []*sessionv1.MediaImage, files []*sessionv1.MediaFile) (*sessionv1.SendMessageAck, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.SendMessage(ctx, channelID, clientMsgID, messageType, text, images, files)
+}
+
+func (a *App) MeshServerGetMediaForConnection(ctx context.Context, connection, mediaID string) (*sessionv1.MediaFile, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.GetMedia(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.File == nil {
+		return nil, fmt.Errorf("media not found")
+	}
+	return resp.File, nil
+}
+
+func (a *App) MeshServerSyncChannel(ctx context.Context, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	if a == nil || a.meshServer == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return a.MeshServerSyncChannelFor(ctx, "", channelID, afterSeq, limit)
+}
+
+func (a *App) MeshServerSyncChannelForConnection(ctx context.Context, connection, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	return a.MeshServerSyncChannelFor(ctx, connection, channelID, afterSeq, limit)
+}
+
+func (a *App) ListServers(ctx context.Context) (*sessionv1.ListServersResp, error) {
+	return a.MeshServerListServers(ctx)
+}
+
+func (a *App) ListChannels(ctx context.Context, serverID string) (*sessionv1.ListChannelsResp, error) {
+	return a.MeshServerListChannels(ctx, serverID)
+}
+
+func (a *App) CreateGroup(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	return a.MeshServerCreateGroup(ctx, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) CreateChannel(ctx context.Context, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	return a.MeshServerCreateChannel(ctx, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (a *App) SubscribeChannel(ctx context.Context, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+	return a.MeshServerSubscribeChannel(ctx, channelID, lastSeenSeq)
+}
+
+func (a *App) UnsubscribeChannel(ctx context.Context, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+	return a.MeshServerUnsubscribeChannel(ctx, channelID)
+}
+
+func (a *App) SendText(ctx context.Context, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
+	return a.MeshServerSendText(ctx, channelID, clientMsgID, text)
+}
+
+func (a *App) SyncChannel(ctx context.Context, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	return a.MeshServerSyncChannel(ctx, channelID, afterSeq, limit)
+}
+
 func (a *App) LocalAPIListen() string {
 	if a == nil || a.localAPI == nil {
 		return ""
@@ -606,6 +1325,193 @@ func (a *App) ListCircuits() []protocol.CircuitInfo {
 		return nil
 	}
 	return a.circuitStore.GetAll()
+}
+
+// meshServerAPIAdapter adapts App meshserver helpers to api.MeshServerProvider.
+type meshServerAPIAdapter struct {
+	app *App
+}
+
+func (m *meshServerAPIAdapter) ListConnections() []meshserver.ConnectionInfo {
+	if m == nil || m.app == nil {
+		return nil
+	}
+	return m.app.MeshServerConnections()
+}
+
+func (m *meshServerAPIAdapter) ListConnectedServers() []meshserver.ConnectionInfo {
+	if m == nil || m.app == nil {
+		return nil
+	}
+	return m.app.MeshServerListConnectedServers()
+}
+
+func (m *meshServerAPIAdapter) GetOrCreateSpaceID(serverID string) (int, error) {
+	if m == nil || m.app == nil {
+		return 0, nil
+	}
+	return m.app.MeshServerGetOrCreateSpaceID(serverID)
+}
+
+func (m *meshServerAPIAdapter) GetServerIDBySpaceID(spaceID int) (string, error) {
+	if m == nil || m.app == nil {
+		return "", nil
+	}
+	return m.app.MeshServerGetServerIDBySpaceID(spaceID)
+}
+
+func (m *meshServerAPIAdapter) GetOrCreateChannelID(channelID string) (int, error) {
+	if m == nil || m.app == nil {
+		return 0, nil
+	}
+	return m.app.MeshServerGetOrCreateChannelID(channelID)
+}
+
+func (m *meshServerAPIAdapter) GetChannelIDByChannelIDIntID(channelIDIntID int) (string, error) {
+	if m == nil || m.app == nil {
+		return "", nil
+	}
+	return m.app.MeshServerGetChannelIDByChannelIDIntID(channelIDIntID)
+}
+
+func (m *meshServerAPIAdapter) Connect(ctx context.Context, name, peerID, clientAgent, protocolID string) (meshserver.ConnectionInfo, error) {
+	if m == nil || m.app == nil {
+		return meshserver.ConnectionInfo{}, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerConnect(ctx, name, peerID, clientAgent, protocolID)
+}
+
+func (m *meshServerAPIAdapter) Disconnect(name string) error {
+	if m == nil || m.app == nil {
+		return fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerDisconnect(name)
+}
+
+func (m *meshServerAPIAdapter) ListServers(ctx context.Context, connection string) (*sessionv1.ListServersResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerListServersForConnection(ctx, connection)
+}
+
+func (m *meshServerAPIAdapter) JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerJoinServerForConnection(ctx, connection, serverID)
+}
+
+func (m *meshServerAPIAdapter) InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerInviteServerMemberForConnection(ctx, connection, serverID, targetUserID)
+}
+
+func (m *meshServerAPIAdapter) KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerKickServerMemberForConnection(ctx, connection, serverID, targetUserID)
+}
+
+func (m *meshServerAPIAdapter) BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerBanServerMemberForConnection(ctx, connection, serverID, targetUserID)
+}
+
+func (m *meshServerAPIAdapter) ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerListServerMembersForConnection(ctx, connection, serverID, afterMemberID, limit)
+}
+
+func (m *meshServerAPIAdapter) ListChannels(ctx context.Context, connection, serverID string) (*sessionv1.ListChannelsResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerListChannelsForConnection(ctx, connection, serverID)
+}
+
+func (m *meshServerAPIAdapter) CreateGroup(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerCreateGroupForConnection(ctx, connection, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (m *meshServerAPIAdapter) CreateChannel(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerCreateChannelForConnection(ctx, connection, serverID, name, description, visibility, slowModeSeconds)
+}
+
+func (m *meshServerAPIAdapter) SubscribeChannel(ctx context.Context, connection, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerSubscribeChannelForConnection(ctx, connection, channelID, lastSeenSeq)
+}
+
+func (m *meshServerAPIAdapter) UnsubscribeChannel(ctx context.Context, connection, channelID string) (*sessionv1.UnsubscribeChannelResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerUnsubscribeChannelForConnection(ctx, connection, channelID)
+}
+
+func (m *meshServerAPIAdapter) SendText(ctx context.Context, connection, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerSendTextForConnection(ctx, connection, channelID, clientMsgID, text)
+}
+
+func (m *meshServerAPIAdapter) SendMessage(ctx context.Context, connection, channelID, clientMsgID string, messageType sessionv1.MessageType, text string, images []*sessionv1.MediaImage, files []*sessionv1.MediaFile) (*sessionv1.SendMessageAck, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerSendMessageForConnection(ctx, connection, channelID, clientMsgID, messageType, text, images, files)
+}
+
+func (m *meshServerAPIAdapter) GetMedia(ctx context.Context, connection, mediaID string) (*sessionv1.MediaFile, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerGetMediaForConnection(ctx, connection, mediaID)
+}
+
+func (m *meshServerAPIAdapter) SyncChannel(ctx context.Context, connection, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerSyncChannelForConnection(ctx, connection, channelID, afterSeq, limit)
+}
+
+func (m *meshServerAPIAdapter) GetMyPermissions(ctx context.Context, connection, serverID string) (*meshserver.MyPermissions, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerGetMyPermissionsForConnection(ctx, connection, serverID)
+}
+
+func (m *meshServerAPIAdapter) ListMyServers(ctx context.Context, connection string) (*meshserver.MyServersResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerListMyServersForConnection(ctx, connection)
+}
+
+func (m *meshServerAPIAdapter) ListMyGroups(ctx context.Context, connection, spaceID string) (*meshserver.MyGroupsResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerListMyGroupsForConnection(ctx, connection, spaceID)
 }
 
 // streamsAPIAdapter adapts StreamManager to api.StreamsProvider.

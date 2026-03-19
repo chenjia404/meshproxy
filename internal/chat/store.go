@@ -65,6 +65,12 @@ type outboxRecoveryItem struct {
 	CreatedAt      time.Time
 }
 
+type friendRequestRetryItem struct {
+	RequestID string
+	PeerID    string
+	RetryCount int
+}
+
 type messageRevokeRetryItem struct {
 	MsgID          string
 	ConversationID string
@@ -253,6 +259,15 @@ func (s *Store) migrate() error {
 			conversation_id TEXT NOT NULL,
 			peer_id TEXT NOT NULL,
 			msg_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			retry_count INTEGER NOT NULL,
+			next_retry_at TEXT NOT NULL,
+			last_transport_attempt TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS friend_request_jobs (
+			job_id TEXT PRIMARY KEY,
+			peer_id TEXT NOT NULL,
 			status TEXT NOT NULL,
 			retry_count INTEGER NOT NULL,
 			next_retry_at TEXT NOT NULL,
@@ -949,7 +964,30 @@ func (s *Store) SaveOutgoingRequest(req Request) error {
 }
 
 func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
-	rows, err := s.db.Query(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE from_peer_id=? OR to_peer_id=? ORDER BY created_at DESC`, localPeerID, localPeerID)
+	rows, err := s.db.Query(`
+		SELECT
+			r.request_id,
+			r.from_peer_id,
+			r.to_peer_id,
+			r.state,
+			r.intro_text,
+			r.nickname,
+			r.bio,
+			r.avatar,
+			r.retention_minutes,
+			r.remote_chat_kex_pub,
+			r.conversation_id,
+			r.last_transport_mode,
+			COALESCE(fj.retry_count, 0) AS retry_count,
+			COALESCE(fj.next_retry_at, '') AS next_retry_at,
+			COALESCE(fj.status, '') AS retry_job_status,
+			r.created_at,
+			r.updated_at
+		FROM requests r
+		LEFT JOIN friend_request_jobs fj ON fj.job_id = r.request_id
+		WHERE r.from_peer_id=? OR r.to_peer_id=?
+		ORDER BY r.created_at DESC
+	`, localPeerID, localPeerID)
 	if err != nil {
 		return nil, err
 	}
@@ -958,11 +996,31 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 	for rows.Next() {
 		var r Request
 		var createdAt, updatedAt string
-		if err := rows.Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.Avatar, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt); err != nil {
+		var nextRetryAt string
+		if err := rows.Scan(
+			&r.RequestID,
+			&r.FromPeerID,
+			&r.ToPeerID,
+			&r.State,
+			&r.IntroText,
+			&r.Nickname,
+			&r.Bio,
+			&r.Avatar,
+			&r.RetentionMinutes,
+			&r.RemoteChatKexPub,
+			&r.ConversationID,
+			&r.LastTransportMode,
+			&r.RetryCount,
+			&nextRetryAt,
+			&r.RetryJobStatus,
+			&createdAt,
+			&updatedAt,
+		); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = parseDBTime(createdAt)
 		r.UpdatedAt = parseDBTime(updatedAt)
+		r.NextRetryAt = parseDBTime(nextRetryAt)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -971,13 +1029,54 @@ func (s *Store) ListRequests(localPeerID string) ([]Request, error) {
 func (s *Store) GetRequest(requestID string) (Request, error) {
 	var r Request
 	var createdAt, updatedAt string
-	err := s.db.QueryRow(`SELECT request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at FROM requests WHERE request_id=?`, requestID).
-		Scan(&r.RequestID, &r.FromPeerID, &r.ToPeerID, &r.State, &r.IntroText, &r.Nickname, &r.Bio, &r.Avatar, &r.RetentionMinutes, &r.RemoteChatKexPub, &r.ConversationID, &r.LastTransportMode, &createdAt, &updatedAt)
+	var nextRetryAt string
+	err := s.db.QueryRow(`
+		SELECT
+			r.request_id,
+			r.from_peer_id,
+			r.to_peer_id,
+			r.state,
+			r.intro_text,
+			r.nickname,
+			r.bio,
+			r.avatar,
+			r.retention_minutes,
+			r.remote_chat_kex_pub,
+			r.conversation_id,
+			r.last_transport_mode,
+			COALESCE(fj.retry_count, 0) AS retry_count,
+			COALESCE(fj.next_retry_at, '') AS next_retry_at,
+			COALESCE(fj.status, '') AS retry_job_status,
+			r.created_at,
+			r.updated_at
+		FROM requests r
+		LEFT JOIN friend_request_jobs fj ON fj.job_id = r.request_id
+		WHERE r.request_id=?
+	`, requestID).Scan(
+		&r.RequestID,
+		&r.FromPeerID,
+		&r.ToPeerID,
+		&r.State,
+		&r.IntroText,
+		&r.Nickname,
+		&r.Bio,
+		&r.Avatar,
+		&r.RetentionMinutes,
+		&r.RemoteChatKexPub,
+		&r.ConversationID,
+		&r.LastTransportMode,
+		&r.RetryCount,
+		&nextRetryAt,
+		&r.RetryJobStatus,
+		&createdAt,
+		&updatedAt,
+	)
 	if err != nil {
 		return Request{}, err
 	}
 	r.CreatedAt = parseDBTime(createdAt)
 	r.UpdatedAt = parseDBTime(updatedAt)
+	r.NextRetryAt = parseDBTime(nextRetryAt)
 	return r, nil
 }
 
@@ -1167,6 +1266,58 @@ func (s *Store) UpdateMessageState(msgID, state string) error {
 	}
 	_, err := s.db.Exec(`UPDATE messages SET state=? WHERE msg_id=?`, state, msgID)
 	return err
+}
+
+func (s *Store) UpsertFriendRequestJob(requestID, peerID, status string, retryCount int, nextRetryAt, lastTransportAttempt time.Time) error {
+	if requestID == "" || peerID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO friend_request_jobs(job_id,peer_id,status,retry_count,next_retry_at,last_transport_attempt,created_at)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(job_id) DO UPDATE SET
+			peer_id=excluded.peer_id,
+			status=excluded.status,
+			retry_count=excluded.retry_count,
+			next_retry_at=excluded.next_retry_at,
+			last_transport_attempt=excluded.last_transport_attempt
+	`, requestID, peerID, status, retryCount, formatDBTime(nextRetryAt), formatDBTime(lastTransportAttempt), formatDBTime(now))
+	return err
+}
+
+func (s *Store) DeleteFriendRequestJob(requestID string) error {
+	if requestID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM friend_request_jobs WHERE job_id=?`, requestID)
+	return err
+}
+
+func (s *Store) ListFriendRequestJobsForRetry(now time.Time, limit int) ([]friendRequestRetryItem, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.Query(`
+		SELECT job_id, peer_id, retry_count
+		FROM friend_request_jobs
+		WHERE status=? AND next_retry_at != '' AND next_retry_at <= ?
+		ORDER BY next_retry_at ASC, last_transport_attempt ASC
+		LIMIT ?
+	`, MessageStateQueuedForRetry, formatDBTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []friendRequestRetryItem
+	for rows.Next() {
+		var item friendRequestRetryItem
+		if err := rows.Scan(&item.RequestID, &item.PeerID, &item.RetryCount); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UpsertOutboxJob(msgID, peerID, status string, retryCount int, nextRetryAt, lastTransportAttempt time.Time) error {

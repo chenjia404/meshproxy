@@ -50,6 +50,9 @@ type Config struct {
 	// Client configures client-side retry and failover.
 	Client ClientConfig `yaml:"client"`
 
+	// MeshServer configures the centralized meshserver integration.
+	MeshServer MeshServerConfig `yaml:"meshserver"`
+
 	// Exit 僅在 mode=relay+exit 時生效，用於出口節點運營策略（允許/拒絕端口、域名、peer 等）。
 	Exit *ExitConfig `yaml:"exit"`
 }
@@ -111,6 +114,28 @@ type ClientConfig struct {
 	ExitSelection ExitSelectionConfig `yaml:"exit_selection"`
 	// GeoIP configures how to resolve exit node country from IP (when descriptor has no ExitInfo.Country).
 	GeoIP GeoIPConfig `yaml:"geoip"`
+}
+
+// MeshServerConfig configures the centralized meshserver integration.
+type MeshServerConfig struct {
+	// Enabled is kept for backward compatibility and ignored by runtime wiring.
+	Enabled bool `yaml:"enabled"`
+	// PeerID is the legacy single-server connection target. Prefer Servers.
+	PeerID string `yaml:"peer_id"`
+	// Servers contains one or more meshserver connections.
+	Servers []MeshServerConnectionConfig `yaml:"servers"`
+	// ClientAgent is the legacy default client agent for single-server setups.
+	ClientAgent string `yaml:"client_agent"`
+	// ProtocolID is the legacy default protocol id for single-server setups.
+	ProtocolID string `yaml:"protocol_id"`
+}
+
+// MeshServerConnectionConfig configures one meshserver connection.
+type MeshServerConnectionConfig struct {
+	Name        string `yaml:"name"`
+	PeerID      string `yaml:"peer_id"`
+	ClientAgent string `yaml:"client_agent"`
+	ProtocolID  string `yaml:"protocol_id"`
 }
 
 // GeoIPConfig configures IP-to-country resolution for exit node selection/display.
@@ -256,6 +281,11 @@ func Default() Config {
 				CacheTTLMinutes: 1440,
 			},
 		},
+		MeshServer: MeshServerConfig{
+			Enabled:     false,
+			ClientAgent: "meshproxy-client",
+			ProtocolID:  "/meshserver/session/1.0.0",
+		},
 	}
 }
 
@@ -363,6 +393,35 @@ func (c *Config) postProcess() error {
 	if c.Client.ExitSelection.Mode == "" {
 		c.Client.ExitSelection.Mode = ExitSelectionAuto
 	}
+	if c.MeshServer.ClientAgent == "" {
+		c.MeshServer.ClientAgent = "meshproxy-client"
+	}
+	if c.MeshServer.ProtocolID == "" {
+		c.MeshServer.ProtocolID = "/meshserver/session/1.0.0"
+	}
+	if len(c.MeshServer.Servers) == 0 && c.MeshServer.PeerID != "" {
+		c.MeshServer.Servers = []MeshServerConnectionConfig{{
+			Name:        "default",
+			PeerID:      c.MeshServer.PeerID,
+			ClientAgent: c.MeshServer.ClientAgent,
+			ProtocolID:  c.MeshServer.ProtocolID,
+		}}
+	}
+	for i := range c.MeshServer.Servers {
+		if c.MeshServer.Servers[i].Name == "" {
+			if c.MeshServer.Servers[i].PeerID != "" {
+				c.MeshServer.Servers[i].Name = c.MeshServer.Servers[i].PeerID
+			} else {
+				c.MeshServer.Servers[i].Name = fmt.Sprintf("meshserver-%d", i+1)
+			}
+		}
+		if c.MeshServer.Servers[i].ClientAgent == "" {
+			c.MeshServer.Servers[i].ClientAgent = c.MeshServer.ClientAgent
+		}
+		if c.MeshServer.Servers[i].ProtocolID == "" {
+			c.MeshServer.Servers[i].ProtocolID = c.MeshServer.ProtocolID
+		}
+	}
 	if c.Mode == ModeRelayExit && c.Exit == nil {
 		exit := defaultExitConfig()
 		c.Exit = &exit
@@ -370,6 +429,11 @@ func (c *Config) postProcess() error {
 	if c.Exit != nil {
 		if err := c.Exit.Policy.Validate(); err != nil {
 			return err
+		}
+	}
+	for _, srv := range c.MeshServer.Servers {
+		if srv.PeerID == "" {
+			return errors.New("meshserver.servers.peer_id must not be empty")
 		}
 	}
 	return nil
@@ -437,6 +501,24 @@ func (c *Config) Validate() error {
 		return errors.New("client.exit_selection.fixed_exit_peer_id required when mode is fixed_peer")
 	}
 	return nil
+}
+
+// MeshServerConnections returns the normalized list of meshserver connections.
+func (c Config) MeshServerConnections() []MeshServerConnectionConfig {
+	if len(c.MeshServer.Servers) == 0 && c.MeshServer.PeerID == "" {
+		return nil
+	}
+	out := make([]MeshServerConnectionConfig, 0, len(c.MeshServer.Servers))
+	if len(c.MeshServer.Servers) > 0 {
+		out = append(out, c.MeshServer.Servers...)
+		return out
+	}
+	return []MeshServerConnectionConfig{{
+		Name:        "default",
+		PeerID:      c.MeshServer.PeerID,
+		ClientAgent: c.MeshServer.ClientAgent,
+		ProtocolID:  c.MeshServer.ProtocolID,
+	}}
 }
 
 // Write 將配置寫入 YAML 文件（用於持久化出口選擇等運行時修改）。

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -65,6 +66,12 @@ const (
 	directProfileSyncBackoff    = 1 * time.Minute
 	directProfileSyncMaxBackoff = 1 * time.Hour
 	directAvatarFetchTTL        = 1 * time.Minute
+
+	friendRequestRetryDeadline       = 7 * 24 * time.Hour
+	friendRequestRetryTickInterval   = 20 * time.Second
+	friendRequestRetryBatchSize      = 32
+	friendRequestRetryBaseDelay       = 10 * time.Second
+	friendRequestRetryMaxDelay        = 30 * time.Minute
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -76,6 +83,8 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 		localPeer: h.ID().String(),
 		avatarDir: avatarDir,
 	}
+	// Used for jitter when scheduling retries.
+	rand.Seed(time.Now().UTC().UnixNano())
 	if err := os.MkdirAll(avatarDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create avatar dir: %w", err)
 	}
@@ -95,6 +104,7 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
 	safe.Go("chat.recoverOutboxLoop", func() { s.recoverMissingOutboxJobs() })
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
+	safe.Go("chat.friendRequestRetryLoop", func() { s.runFriendRequestRetryLoop() })
 	return s, nil
 }
 
@@ -666,9 +676,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	if conv, err := s.store.GetConversationByPeer(toPeerID); err == nil {
 		retentionMinutes = conv.RetentionMinutes
 	}
-	if err := s.ensurePeerConnected(toPeerID); err != nil {
-		return Request{}, err
-	}
+	now := time.Now().UTC()
 	req := Request{
 		RequestID:         uuid.NewString(),
 		FromPeerID:        s.localPeer,
@@ -680,8 +688,8 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		Avatar:            targetAvatar,
 		RetentionMinutes:  retentionMinutes,
 		LastTransportMode: TransportModeDirect,
-		CreatedAt:         time.Now(),
-		UpdatedAt:         time.Now(),
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	wire := SessionRequest{
 		Type:             MessageTypeSessionRequest,
@@ -694,7 +702,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		RetentionMinutes: retentionMinutes,
 		IntroText:        req.IntroText,
 		ChatKexPub:       profile.ChatKexPub,
-		SentAtUnix:       time.Now().UnixMilli(),
+		SentAtUnix:       now.UnixMilli(),
 	}
 	req.RemoteChatKexPub = profile.ChatKexPub
 	if err := s.store.SaveOutgoingRequest(req); err != nil {
@@ -702,7 +710,11 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 	}
 	_ = s.store.UpsertPeer(toPeerID, "", "")
 	if err := s.sendEnvelope(toPeerID, wire); err != nil {
-		return Request{}, err
+		// Can't reach the friend right now: persist + retry with backoff for up to 1 week.
+		log.Printf("[chat] send friend request queued request=%s peer=%s err=%v", req.RequestID, toPeerID, err)
+		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, toPeerID, 0); retryErr != nil {
+			log.Printf("[chat] schedule friend request retry failed request=%s peer=%s err=%v", req.RequestID, toPeerID, retryErr)
+		}
 	}
 	return s.store.GetRequest(req.RequestID)
 }
@@ -1127,6 +1139,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 				_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
 			}
 			_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
+			_ = s.store.DeleteFriendRequestJob(accept.RequestID)
 			return
 		} else if err != sql.ErrNoRows {
 			log.Printf("[chat] lookup existing accepted conversation failed: %v", err)
@@ -1164,12 +1177,14 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			}
 		}
 		_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
+		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
 	case MessageTypeSessionReject:
 		var reject SessionReject
 		if err := remarshal(env, &reject); err != nil {
 			return
 		}
 		_ = s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+		_ = s.store.DeleteFriendRequestJob(reject.RequestID)
 	case MessageTypeProfileSync:
 		var sync ProfileSync
 		if err := remarshal(env, &sync); err != nil {
@@ -1559,7 +1574,11 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 					return err
 				}
 			}
-			return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
+			if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
+				return err
+			}
+			_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+			return nil
 		} else if err != sql.ErrNoRows {
 			return err
 		}
@@ -1593,13 +1612,21 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 				return err
 			}
 		}
-		return s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
+		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID); err != nil {
+			return err
+		}
+		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+		return nil
 	case MessageTypeSessionReject:
 		var reject SessionReject
 		if err := remarshal(env, &reject); err != nil {
 			return err
 		}
-		return s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
+		if err := s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, ""); err != nil {
+			return err
+		}
+		_ = s.store.DeleteFriendRequestJob(reject.RequestID)
+		return nil
 	case MessageTypeProfileSync:
 		var sync ProfileSync
 		if err := remarshal(env, &sync); err != nil {
@@ -2164,6 +2191,111 @@ func (s *Service) recoverMissingOutboxJobs() error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) runFriendRequestRetryLoop() {
+	ticker := time.NewTicker(friendRequestRetryTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := s.processFriendRequestRetries(now.UTC()); err != nil {
+				log.Printf("[chat] friend request retry loop failed: %v", err)
+			}
+		}
+	}
+}
+
+func (s *Service) processFriendRequestRetries(now time.Time) error {
+	items, err := s.store.ListFriendRequestJobsForRetry(now, friendRequestRetryBatchSize)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := s.retryFriendRequestJob(item, now); err != nil {
+			log.Printf("[chat] friend request retry failed request=%s peer=%s retry_count=%d err=%v", item.RequestID, item.PeerID, item.RetryCount, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Time) error {
+	req, err := s.store.GetRequest(item.RequestID)
+	if err != nil {
+		_ = s.store.DeleteFriendRequestJob(item.RequestID)
+		return err
+	}
+	// Request no longer pending: stop retrying.
+	if req.State != RequestStatePending {
+		return s.store.DeleteFriendRequestJob(item.RequestID)
+	}
+
+	// Abandon after 1 week.
+	if !req.CreatedAt.IsZero() && now.After(req.CreatedAt.Add(friendRequestRetryDeadline)) {
+		if err := s.store.UpdateRequestState(req.RequestID, RequestStateRejected, ""); err != nil {
+			return err
+		}
+		return s.store.DeleteFriendRequestJob(item.RequestID)
+	}
+
+	if contact, err := s.store.GetPeer(item.PeerID); err == nil && contact.Blocked {
+		_ = s.store.UpdateRequestState(req.RequestID, RequestStateBlocked, "")
+		return s.store.DeleteFriendRequestJob(item.RequestID)
+	}
+
+	profile, _, err := s.store.GetProfile(s.localPeer)
+	if err != nil {
+		return err
+	}
+
+	wire := SessionRequest{
+		Type:             MessageTypeSessionRequest,
+		RequestID:        req.RequestID,
+		FromPeerID:       s.localPeer,
+		ToPeerID:         req.ToPeerID,
+		Nickname:         req.Nickname,
+		Bio:              req.Bio,
+		AvatarName:       profile.Avatar,
+		RetentionMinutes: req.RetentionMinutes,
+		IntroText:        req.IntroText,
+		ChatKexPub:       req.RemoteChatKexPub,
+		SentAtUnix:       now.UnixMilli(),
+	}
+
+	if err := s.sendEnvelope(item.PeerID, wire); err == nil {
+		return s.store.DeleteFriendRequestJob(item.RequestID)
+	} else {
+		if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
+			return fmt.Errorf("schedule retry failed after send error: send=%v schedule=%v", err, scheduleErr)
+		}
+		return err
+	}
+}
+
+func (s *Service) scheduleFriendRequestRetry(requestID, peerID string, retryCount int) error {
+	now := time.Now().UTC()
+	if retryCount < 0 {
+		retryCount = 0
+	}
+
+	exp := retryCount
+	if exp > 10 {
+		exp = 10 // prevent overflow and keep backoff bounded.
+	}
+	mult := time.Duration(1 << uint(exp))
+	delay := friendRequestRetryBaseDelay * mult
+	if delay > friendRequestRetryMaxDelay {
+		delay = friendRequestRetryMaxDelay
+	}
+	jitterMax := delay / 10
+	var jitter time.Duration
+	if jitterMax > 0 {
+		jitter = time.Duration(rand.Int63n(int64(jitterMax)))
+	}
+	nextRetryAt := now.Add(delay + jitter)
+	return s.store.UpsertFriendRequestJob(requestID, peerID, MessageStateQueuedForRetry, retryCount, nextRetryAt, now)
 }
 
 func (s *Service) runRetentionLoop() {

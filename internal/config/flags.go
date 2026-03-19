@@ -74,6 +74,15 @@ func (b flagBinder) registerStruct(fs *flag.FlagSet, t reflect.Type, path []int,
 				continue
 			}
 			return fmt.Errorf("unsupported pointer flag type for %s: %s", nextPrefix, sf.Type)
+		case reflect.Slice:
+			switch sf.Type.Elem().Kind() {
+			case reflect.String, reflect.Bool,
+				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				fs.Var(newBoundValue(&flagTarget{root: b.root, path: nextPath}, sf.Type, false), nextPrefix, flagUsage(nextPrefix, sf.Type))
+			default:
+				// Complex slices (e.g. slice of structs) are intentionally skipped from CLI binding.
+			}
 		default:
 			fs.Var(newBoundValue(&flagTarget{root: b.root, path: nextPath}, sf.Type, sf.Type.Kind() == reflect.Bool), nextPrefix, flagUsage(nextPrefix, sf.Type))
 		}

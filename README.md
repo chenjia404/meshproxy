@@ -1,7 +1,7 @@
 meshproxy
 =========
 
-meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地 SOCKS5 Agent”原型实现，目前处于早期 MVP 阶段。
+meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地 SOCKS5 Agent + 匿名聊天”原型实现，目前处于早期 MVP 阶段。
 
 安卓客户端 https://github.com/chenjia404/meshproxy-android
 
@@ -20,6 +20,7 @@ meshproxy 是一个使用 Go 编写的“去中心化匿名代理网络 + 本地
 - **`internal/client`**：本地 SOCKS5、路径选择器（PathSelector）、CircuitManager、StreamManager。
 - **`internal/relay` / `internal/exit`**：relay / exit 服务实现，relay 仅解一层洋葱并转发，exit 解最后一层并连接目标 TCP。
 - **`internal/api`**：本地管理 HTTP API 与内嵌 Web 控制台（`/console/`），提供节点状态、已知节点、电路、stream、错误与指标等信息。
+- **`meshserver-api.md`**：meshserver 中心化群的本地 API 说明，包含连接、服务器、频道、消息和同步接口示例。
 - **`internal/store`**：内存 KV store 与 circuit store。
 - **`proto/meshproxy.proto`**：后续用于生成 Protobuf 类型。
 - **`configs/config.example.yaml`**：示例配置。

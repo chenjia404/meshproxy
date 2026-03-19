@@ -84,6 +84,9 @@ type Request struct {
 	RemoteChatKexPub  string    `json:"remote_chat_kex_pub"`
 	ConversationID    string    `json:"conversation_id,omitempty"`
 	LastTransportMode string    `json:"last_transport_mode"`
+	RetryCount        int       `json:"retry_count,omitempty"`
+	NextRetryAt       time.Time `json:"next_retry_at,omitempty"`
+	RetryJobStatus    string    `json:"retry_job_status,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

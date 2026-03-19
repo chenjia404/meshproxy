@@ -9,13 +9,18 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
+	"github.com/chenjia404/meshproxy/internal/meshserver"
+	"github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/update"
 )
@@ -168,6 +173,7 @@ type LocalAPIOpts struct {
 	ExitService *exit.Service
 	// ChatService provides first-stage direct chat APIs.
 	ChatService    ChatProvider
+	MeshServer     MeshServerProvider
 	UpdateService  UpdateProvider
 	UpdateSettings UpdateSettingsProvider
 }
@@ -180,6 +186,50 @@ type UpdateProvider interface {
 type UpdateSettingsProvider interface {
 	GetAutoUpdate() bool
 	SetAutoUpdate(enabled bool) error
+}
+
+// MeshServerProvider exposes centralized server chat APIs.
+type MeshServerProvider interface {
+	ListConnections() []meshserver.ConnectionInfo
+	// ListConnectedServers returns the persisted list of meshserver connections.
+	ListConnectedServers() []meshserver.ConnectionInfo
+	// GetOrCreateSpaceID maps server_id (space) to a stable auto-increment int id.
+	GetOrCreateSpaceID(serverID string) (int, error)
+	// GetServerIDBySpaceID maps stable auto-increment int id back to meshserver server_id.
+	GetServerIDBySpaceID(spaceID int) (string, error)
+	// GetOrCreateChannelID maps channel_id (group/channel) to a stable auto-increment int id.
+	GetOrCreateChannelID(channelID string) (int, error)
+	// GetChannelIDByChannelIDIntID maps stable auto-increment int id back to meshserver channel_id.
+	GetChannelIDByChannelIDIntID(channelIDIntID int) (string, error)
+	Connect(ctx context.Context, name, peerID, clientAgent, protocolID string) (meshserver.ConnectionInfo, error)
+	Disconnect(name string) error
+	ListServers(ctx context.Context, connection string) (*sessionv1.ListServersResp, error)
+	JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinServerResp, error)
+	InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteServerMemberResp, error)
+	KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickServerMemberResp, error)
+	BanServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.BanServerMemberResp, error)
+	ListServerMembers(ctx context.Context, connection, serverID string, afterMemberID uint64, limit uint32) (*sessionv1.ListServerMembersResp, error)
+	ListChannels(ctx context.Context, connection, serverID string) (*sessionv1.ListChannelsResp, error)
+	CreateGroup(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateGroupResp, error)
+	CreateChannel(ctx context.Context, connection, serverID, name, description string, visibility sessionv1.Visibility, slowModeSeconds uint32) (*sessionv1.CreateChannelResp, error)
+	SubscribeChannel(ctx context.Context, connection, channelID string, lastSeenSeq uint64) (*sessionv1.SubscribeChannelResp, error)
+	UnsubscribeChannel(ctx context.Context, connection, channelID string) (*sessionv1.UnsubscribeChannelResp, error)
+	SendText(ctx context.Context, connection, channelID, clientMsgID, text string) (*sessionv1.SendMessageAck, error)
+	// SendMessage sends text/image/file/system message to a channel.
+	// For images/files, caller should pass MediaImage/MediaFile with InlineData.
+	SendMessage(ctx context.Context, connection, channelID, clientMsgID string, messageType sessionv1.MessageType, text string, images []*sessionv1.MediaImage, files []*sessionv1.MediaFile) (*sessionv1.SendMessageAck, error)
+	// GetMedia fetches an image/file by media_id and returns the full inline payload.
+	GetMedia(ctx context.Context, connection, mediaID string) (*sessionv1.MediaFile, error)
+	SyncChannel(ctx context.Context, connection, channelID string, afterSeq uint64, limit uint32) (*sessionv1.SyncChannelResp, error)
+	// GetMyPermissions returns the caller's permissions in the given server.
+	// It is exposed for front-end via a HTTP endpoint that corresponds to GET_MY_PERMISSIONS.
+	GetMyPermissions(ctx context.Context, connection, serverID string) (*meshserver.MyPermissions, error)
+	// ListMyServers returns servers where the caller is already a member.
+	// It is exposed for front-end via a HTTP endpoint.
+	ListMyServers(ctx context.Context, connection string) (*meshserver.MyServersResp, error)
+	// ListMyGroups returns joined groups (GROUP-type channels) for a space.
+	// It is exposed for front-end via a HTTP endpoint.
+	ListMyGroups(ctx context.Context, connection, spaceID string) (*meshserver.MyGroupsResp, error)
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -283,6 +333,14 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
+	mux.HandleFunc("/api/v1/meshserver/spaces", api.handleMeshServerServers)
+	mux.HandleFunc("/api/v1/meshserver/spaces/", api.handleMeshServerServerItem)
+	mux.HandleFunc("/api/v1/meshserver/servers", api.handleMeshServerConnectedServers)
+	mux.HandleFunc("/api/v1/meshserver/my_servers", api.handleMeshServerMyServers)
+	mux.HandleFunc("/api/v1/meshserver/media/", api.handleMeshServerMediaItem)
+	mux.HandleFunc("/api/v1/meshserver/channels/", api.handleMeshServerChannelItem)
+	mux.HandleFunc("/api/v1/meshserver/connections", api.handleMeshServerConnections)
+	mux.HandleFunc("/api/v1/meshserver/connections/", api.handleMeshServerConnectionItem)
 	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
 	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
 	mux.HandleFunc("/api/v1/update/settings", api.handleUpdateSettings)
@@ -1576,6 +1634,784 @@ func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (a *LocalAPI) handleMeshServerServers(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := a.opts.MeshServer.ListServers(r.Context(), strings.TrimSpace(r.URL.Query().Get("connection")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Convert server terminology to Space terminology for the response.
+	type spaceSummary struct {
+		ID                   int                `json:"id"`
+		SpaceID              string             `json:"space_id"`
+		Name                 string             `json:"name"`
+		AvatarUrl            string             `json:"avatar_url"`
+		Description          string             `json:"description"`
+		Visibility           sessionv1.Visibility `json:"visibility"`
+		MemberCount          uint32             `json:"member_count"`
+		AllowChannelCreation bool              `json:"allow_channel_creation"`
+	}
+	type listSpacesResp struct {
+		Spaces []*spaceSummary `json:"spaces"`
+	}
+
+	out := &listSpacesResp{
+		Spaces: make([]*spaceSummary, 0, len(resp.Servers)),
+	}
+	for _, s := range resp.Servers {
+		if s == nil {
+			continue
+		}
+		spaceIntID, _ := a.opts.MeshServer.GetOrCreateSpaceID(s.ServerId)
+		out.Spaces = append(out.Spaces, &spaceSummary{
+			ID:                   spaceIntID,
+			SpaceID:              s.ServerId,
+			Name:                 s.Name,
+			AvatarUrl:            s.AvatarUrl,
+			Description:          s.Description,
+			Visibility:           s.Visibility,
+			MemberCount:          s.MemberCount,
+			AllowChannelCreation: s.AllowChannelCreation,
+		})
+	}
+	writeJSON(w, out)
+}
+
+func (a *LocalAPI) handleMeshServerConnectedServers(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Persistent "connected meshservers" list from local JSON DB.
+	writeJSON(w, map[string]any{"servers": a.opts.MeshServer.ListConnectedServers()})
+}
+
+func (a *LocalAPI) handleMeshServerMediaItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	mediaID := strings.TrimPrefix(r.URL.Path, "/api/v1/meshserver/media/")
+	mediaID = strings.Trim(strings.TrimSpace(mediaID), "/")
+	if mediaID == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
+	file, err := a.opts.MeshServer.GetMedia(r.Context(), connection, mediaID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if file == nil || len(file.InlineData) == 0 {
+		http.Error(w, "media inline_data is empty", http.StatusBadRequest)
+		return
+	}
+
+	mimeType := strings.TrimSpace(file.MimeType)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mimeType)
+	// Best-effort attachment name.
+	if strings.TrimSpace(file.FileName) != "" {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(file.FileName)+`"`)
+	} else {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+mediaID+`"`)
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(file.InlineData)
+}
+
+func (a *LocalAPI) handleMeshServerMyServers(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := a.opts.MeshServer.ListMyServers(r.Context(), strings.TrimSpace(r.URL.Query().Get("connection")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Convert server terminology to Space terminology for nested response fields.
+	type spaceSummary struct {
+		ID                   int                `json:"id"`
+		SpaceID              string             `json:"space_id"`
+		Name                 string             `json:"name"`
+		AvatarUrl            string             `json:"avatar_url"`
+		Description          string             `json:"description"`
+		Visibility           sessionv1.Visibility `json:"visibility"`
+		MemberCount          uint32             `json:"member_count"`
+		AllowChannelCreation bool              `json:"allow_channel_creation"`
+	}
+	type mySpaceItem struct {
+		Space *spaceSummary          `json:"space"`
+		Role  sessionv1.MemberRole  `json:"role"`
+	}
+	type listMySpacesResp struct {
+		Servers []*mySpaceItem `json:"servers"`
+	}
+
+	if resp == nil {
+		writeJSON(w, &listMySpacesResp{Servers: []*mySpaceItem{}})
+		return
+	}
+
+	out := &listMySpacesResp{Servers: make([]*mySpaceItem, 0, len(resp.Servers))}
+	for _, it := range resp.Servers {
+		if it == nil || it.Server == nil {
+			continue
+		}
+		spaceIntID, _ := a.opts.MeshServer.GetOrCreateSpaceID(it.Server.ServerId)
+		out.Servers = append(out.Servers, &mySpaceItem{
+			Space: &spaceSummary{
+				ID:                   spaceIntID,
+				SpaceID:              it.Server.ServerId,
+				Name:                 it.Server.Name,
+				AvatarUrl:            it.Server.AvatarUrl,
+				Description:          it.Server.Description,
+				Visibility:           it.Server.Visibility,
+				MemberCount:          it.Server.MemberCount,
+				AllowChannelCreation: it.Server.AllowChannelCreation,
+			},
+			Role: it.Role,
+		})
+	}
+	writeJSON(w, out)
+}
+
+func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/meshserver/spaces/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	serverID := parts[0]
+	// Accept front-end numeric `id` as well as raw meshserver `server_id`.
+	// If the segment is a pure integer, treat it as stable space `id` and map back to `server_id`.
+	if spaceIntID, err := strconv.Atoi(serverID); err == nil && spaceIntID > 0 {
+		mapped, mapErr := a.opts.MeshServer.GetServerIDBySpaceID(spaceIntID)
+		if mapErr != nil {
+			http.Error(w, mapErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if mapped == "" {
+			http.Error(w, "space not found", http.StatusBadRequest)
+			return
+		}
+		serverID = mapped
+	}
+	action := parts[1]
+	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
+	switch action {
+	case "channels":
+		if len(parts) == 2 {
+			switch r.Method {
+			case http.MethodGet:
+				resp, err := a.opts.MeshServer.ListChannels(r.Context(), connection, serverID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				type channelSummaryWithID struct {
+					ID                int                `json:"id"`
+					ChannelId         string             `json:"channel_id"`
+					ServerId          string             `json:"server_id"`
+					Type              sessionv1.ChannelType `json:"type"`
+					Name              string             `json:"name"`
+					Description       string             `json:"description"`
+					Visibility        sessionv1.Visibility `json:"visibility"`
+					SlowModeSeconds  uint32             `json:"slow_mode_seconds"`
+					LastSeq          uint64             `json:"last_seq"`
+					CanView           bool               `json:"can_view"`
+					CanSendMessage   bool               `json:"can_send_message"`
+					CanSendImage     bool               `json:"can_send_image"`
+					CanSendFile      bool               `json:"can_send_file"`
+				}
+				type listChannelsRespWithID struct {
+					ServerId  string                      `json:"server_id"`
+					Channels  []*channelSummaryWithID   `json:"channels"`
+				}
+
+				out := &listChannelsRespWithID{
+					ServerId: serverID,
+					Channels: make([]*channelSummaryWithID, 0),
+				}
+				if resp != nil {
+					out.Channels = make([]*channelSummaryWithID, 0, len(resp.Channels))
+					for _, ch := range resp.Channels {
+						if ch == nil {
+							continue
+						}
+						chIntID, _ := a.opts.MeshServer.GetOrCreateChannelID(ch.ChannelId)
+						out.Channels = append(out.Channels, &channelSummaryWithID{
+							ID:               chIntID,
+							ChannelId:        ch.ChannelId,
+							ServerId:         ch.ServerId,
+							Type:             ch.Type,
+							Name:             ch.Name,
+							Description:      ch.Description,
+							Visibility:       ch.Visibility,
+							SlowModeSeconds: ch.SlowModeSeconds,
+							LastSeq:          ch.LastSeq,
+							CanView:          ch.CanView,
+							CanSendMessage:   ch.CanSendMessage,
+							CanSendImage:     ch.CanSendImage,
+							CanSendFile:      ch.CanSendFile,
+						})
+					}
+				}
+				writeJSON(w, out)
+				return
+			case http.MethodPost:
+				var body struct {
+					Name            string `json:"name"`
+					Description     string `json:"description"`
+					Visibility      string `json:"visibility"`
+					SlowModeSeconds uint32 `json:"slow_mode_seconds"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				resp, err := a.opts.MeshServer.CreateChannel(r.Context(), connection, serverID, body.Name, body.Description, parseMeshServerVisibility(body.Visibility), body.SlowModeSeconds)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				type channelSummaryWithID struct {
+					ID                int                `json:"id"`
+					ChannelId         string             `json:"channel_id"`
+					ServerId          string             `json:"server_id"`
+					Type              sessionv1.ChannelType `json:"type"`
+					Name              string             `json:"name"`
+					Description       string             `json:"description"`
+					Visibility        sessionv1.Visibility `json:"visibility"`
+					SlowModeSeconds  uint32             `json:"slow_mode_seconds"`
+					LastSeq          uint64             `json:"last_seq"`
+					CanView           bool               `json:"can_view"`
+					CanSendMessage   bool               `json:"can_send_message"`
+					CanSendImage     bool               `json:"can_send_image"`
+					CanSendFile      bool               `json:"can_send_file"`
+				}
+				type createChannelRespWithID struct {
+					Ok       bool                      `json:"ok"`
+					ServerID string                   `json:"server_id"`
+					ChannelID string                  `json:"channel_id"`
+					Channel *channelSummaryWithID    `json:"channel"`
+					Message  string                   `json:"message"`
+				}
+				out := &createChannelRespWithID{
+					Ok:        resp.Ok,
+					ServerID:  resp.ServerId,
+					ChannelID: resp.ChannelId,
+					Message:   resp.Message,
+				}
+				if resp.Channel != nil {
+					chID, _ := a.opts.MeshServer.GetOrCreateChannelID(resp.Channel.ChannelId)
+					out.Channel = &channelSummaryWithID{
+						ID:               chID,
+						ChannelId:        resp.Channel.ChannelId,
+						ServerId:         resp.Channel.ServerId,
+						Type:             resp.Channel.Type,
+						Name:             resp.Channel.Name,
+						Description:      resp.Channel.Description,
+						Visibility:       resp.Channel.Visibility,
+						SlowModeSeconds: resp.Channel.SlowModeSeconds,
+						LastSeq:          resp.Channel.LastSeq,
+						CanView:          resp.Channel.CanView,
+						CanSendMessage:  resp.Channel.CanSendMessage,
+						CanSendImage:    resp.Channel.CanSendImage,
+						CanSendFile:     resp.Channel.CanSendFile,
+					}
+				}
+				writeJSON(w, out)
+				return
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+		}
+	case "my_groups":
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			resp, err := a.opts.MeshServer.ListMyGroups(r.Context(), connection, serverID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "members":
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			afterMemberID := uint64(0)
+			limit := uint32(50)
+			if v := strings.TrimSpace(r.URL.Query().Get("after_member_id")); v != "" {
+				if parsed, err := strconv.ParseUint(v, 10, 64); err == nil {
+					afterMemberID = parsed
+				}
+			}
+			if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+				if parsed, err := strconv.ParseUint(v, 10, 32); err == nil {
+					limit = uint32(parsed)
+				}
+			}
+			resp, err := a.opts.MeshServer.ListServerMembers(r.Context(), connection, serverID, afterMemberID, limit)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "my_permissions":
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			resp, err := a.opts.MeshServer.GetMyPermissions(r.Context(), connection, serverID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "join":
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			resp, err := a.opts.MeshServer.JoinServer(r.Context(), connection, serverID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "invite":
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			var body struct {
+				TargetUserID string `json:"target_user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			resp, err := a.opts.MeshServer.InviteServerMember(r.Context(), connection, serverID, body.TargetUserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "kick":
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			var body struct {
+				TargetUserID string `json:"target_user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			resp, err := a.opts.MeshServer.KickServerMember(r.Context(), connection, serverID, body.TargetUserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "ban":
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			var body struct {
+				TargetUserID string `json:"target_user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			resp, err := a.opts.MeshServer.BanServerMember(r.Context(), connection, serverID, body.TargetUserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, resp)
+			return
+		}
+	case "groups":
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			var body struct {
+				Name            string `json:"name"`
+				Description     string `json:"description"`
+				Visibility      string `json:"visibility"`
+				SlowModeSeconds uint32 `json:"slow_mode_seconds"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			resp, err := a.opts.MeshServer.CreateGroup(r.Context(), connection, serverID, body.Name, body.Description, parseMeshServerVisibility(body.Visibility), body.SlowModeSeconds)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			type channelSummaryWithID struct {
+				ID                int                   `json:"id"`
+				ChannelId         string                `json:"channel_id"`
+				ServerId          string                `json:"server_id"`
+				Type              sessionv1.ChannelType `json:"type"`
+				Name              string                `json:"name"`
+				Description       string                `json:"description"`
+				Visibility        sessionv1.Visibility  `json:"visibility"`
+				SlowModeSeconds  uint32                `json:"slow_mode_seconds"`
+				LastSeq          uint64                `json:"last_seq"`
+				CanView           bool                  `json:"can_view"`
+				CanSendMessage   bool                  `json:"can_send_message"`
+				CanSendImage     bool                  `json:"can_send_image"`
+				CanSendFile      bool                  `json:"can_send_file"`
+			}
+			type createGroupRespWithID struct {
+				Ok        bool                   `json:"ok"`
+				ServerID  string                `json:"server_id"`
+				ChannelID string                `json:"channel_id"`
+				Channel   *channelSummaryWithID `json:"channel"`
+				Message   string                `json:"message"`
+			}
+			out := &createGroupRespWithID{
+				Ok:         resp.Ok,
+				ServerID:   resp.ServerId,
+				ChannelID:  resp.ChannelId,
+				Message:    resp.Message,
+			}
+			if resp.Channel != nil {
+				chID, _ := a.opts.MeshServer.GetOrCreateChannelID(resp.Channel.ChannelId)
+				out.Channel = &channelSummaryWithID{
+					ID:               chID,
+					ChannelId:        resp.Channel.ChannelId,
+					ServerId:         resp.Channel.ServerId,
+					Type:             resp.Channel.Type,
+					Name:             resp.Channel.Name,
+					Description:      resp.Channel.Description,
+					Visibility:       resp.Channel.Visibility,
+					SlowModeSeconds: resp.Channel.SlowModeSeconds,
+					LastSeq:          resp.Channel.LastSeq,
+					CanView:          resp.Channel.CanView,
+					CanSendMessage:  resp.Channel.CanSendMessage,
+					CanSendImage:    resp.Channel.CanSendImage,
+					CanSendFile:     resp.Channel.CanSendFile,
+				}
+			}
+			writeJSON(w, out)
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
+func (a *LocalAPI) handleMeshServerChannelItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/meshserver/channels/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	channelID := parts[0]
+	// Accept front-end numeric `id` as well as raw meshserver `channel_id`.
+	if chIntID, err := strconv.Atoi(channelID); err == nil && chIntID > 0 {
+		mapped, mapErr := a.opts.MeshServer.GetChannelIDByChannelIDIntID(chIntID)
+		if mapErr != nil {
+			http.Error(w, mapErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if mapped == "" {
+			http.Error(w, "channel not found", http.StatusBadRequest)
+			return
+		}
+		channelID = mapped
+	}
+	action := parts[1]
+	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
+	switch action {
+	case "join":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			LastSeenSeq uint64 `json:"last_seen_seq"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp, err := a.opts.MeshServer.SubscribeChannel(r.Context(), connection, channelID, body.LastSeenSeq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resp)
+		return
+	case "leave":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		resp, err := a.opts.MeshServer.UnsubscribeChannel(r.Context(), connection, channelID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resp)
+		return
+	case "messages":
+		if r.Method == http.MethodPost {
+			// Supported:
+			// - POST /messages (JSON): text/system messages
+			// - POST /messages/image (multipart): image upload
+			// - POST /messages/file (multipart): file upload
+			if len(parts) == 2 {
+				var body struct {
+					ClientMsgID string `json:"client_msg_id"`
+					MessageType string `json:"message_type"`
+					Text        string `json:"text"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				if body.ClientMsgID == "" {
+					body.ClientMsgID = uuid.NewString()
+				}
+
+				msgType := sessionv1.MessageType_TEXT
+				switch strings.ToLower(strings.TrimSpace(body.MessageType)) {
+				case "image", "file":
+					http.Error(w, "use /messages/image or /messages/file for uploads", http.StatusBadRequest)
+					return
+				case "system":
+					msgType = sessionv1.MessageType_SYSTEM
+				case "", "text":
+					msgType = sessionv1.MessageType_TEXT
+				default:
+					msgType = sessionv1.MessageType_TEXT
+				}
+
+				resp, err := a.opts.MeshServer.SendMessage(r.Context(), connection, channelID, body.ClientMsgID, msgType, body.Text, nil, nil)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, resp)
+				return
+			}
+
+			if len(parts) == 3 && parts[2] == "image" {
+				if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+					http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				clientMsgID := strings.TrimSpace(r.FormValue("client_msg_id"))
+				if clientMsgID == "" {
+					clientMsgID = uuid.NewString()
+				}
+				text := r.FormValue("text")
+
+				file, header, err := r.FormFile("image")
+				if err != nil {
+					// allow fallback field name
+					file, header, err = r.FormFile("file")
+				}
+				if err != nil {
+					http.Error(w, "missing image file: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer file.Close()
+				data, err := chat.ValidateChatFileData(file)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				mimeType := http.DetectContentType(data)
+				media := &sessionv1.MediaImage{
+					MimeType:     mimeType,
+					Size:         uint64(len(data)),
+					InlineData:   data,
+					OriginalName: header.Filename,
+				}
+
+				resp, err := a.opts.MeshServer.SendMessage(r.Context(), connection, channelID, clientMsgID, sessionv1.MessageType_IMAGE, text, []*sessionv1.MediaImage{media}, nil)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, resp)
+				return
+			}
+
+			if len(parts) == 3 && parts[2] == "file" {
+				if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+					http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				clientMsgID := strings.TrimSpace(r.FormValue("client_msg_id"))
+				if clientMsgID == "" {
+					clientMsgID = uuid.NewString()
+				}
+				text := r.FormValue("text")
+
+				file, header, err := r.FormFile("file")
+				if err != nil {
+					http.Error(w, "missing file: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer file.Close()
+				data, err := chat.ValidateChatFileData(file)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				mimeType := http.DetectContentType(data)
+				media := &sessionv1.MediaFile{
+					FileName:   header.Filename,
+					MimeType:   mimeType,
+					Size:       uint64(len(data)),
+					InlineData: data,
+				}
+
+				resp, err := a.opts.MeshServer.SendMessage(r.Context(), connection, channelID, clientMsgID, sessionv1.MessageType_FILE, text, nil, []*sessionv1.MediaFile{media})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, resp)
+				return
+			}
+
+			http.NotFound(w, r)
+			return
+		}
+	case "sync":
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		afterSeq := uint64(0)
+		limit := uint32(50)
+		if v := strings.TrimSpace(r.URL.Query().Get("after_seq")); v != "" {
+			if parsed, err := strconv.ParseUint(v, 10, 64); err == nil {
+				afterSeq = parsed
+			}
+		}
+		if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+			if parsed, err := strconv.ParseUint(v, 10, 32); err == nil {
+				limit = uint32(parsed)
+			}
+		}
+		resp, err := a.opts.MeshServer.SyncChannel(r.Context(), connection, channelID, afterSeq, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, resp)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (a *LocalAPI) handleMeshServerConnections(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"connections": a.opts.MeshServer.ListConnections()})
+	case http.MethodPost:
+		var body struct {
+			Name        string `json:"name"`
+			PeerID      string `json:"peer_id"`
+			ClientAgent string `json:"client_agent"`
+			ProtocolID  string `json:"protocol_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		info, err := a.opts.MeshServer.Connect(r.Context(), body.Name, body.PeerID, body.ClientAgent, body.ProtocolID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "connection": info})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handleMeshServerConnectionItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/meshserver/connections/")
+	name := strings.Trim(strings.TrimSpace(path), "/")
+	if name == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		if err := a.opts.MeshServer.Disconnect(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "name": name})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func parseMeshServerVisibility(value string) sessionv1.Visibility {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "public":
+		return sessionv1.Visibility_PUBLIC
+	default:
+		return sessionv1.Visibility_PRIVATE
 	}
 }
 
