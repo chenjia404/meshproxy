@@ -1696,7 +1696,18 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
 			s.requestAvatarFetch(req.FromPeerID, avatarName)
 		}
-		return s.store.UpsertIncomingRequest(stored)
+		if err := s.store.UpsertIncomingRequest(stored); err != nil {
+			return err
+		}
+		// Notify websocket clients that a new friend request is pending.
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStatePending,
+			stored.RequestID,
+			stored.FromPeerID,
+			stored.ToPeerID,
+			"",
+		))
+		return nil
 	case MessageTypeChatSyncRequest:
 		var req ChatSyncRequest
 		if err := remarshal(env, &req); err != nil {
@@ -1742,6 +1753,14 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 				return err
 			}
 			_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+			// Notify websocket clients: friend request accepted -> conversation available.
+			s.publishChatEvent(newFriendRequestEvent(
+				RequestStateAccepted,
+				accept.RequestID,
+				accept.FromPeerID,
+				accept.ToPeerID,
+				existingConv.ConversationID,
+			))
 			return nil
 		} else if err != sql.ErrNoRows {
 			return err
@@ -1780,6 +1799,14 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+		// Notify websocket clients: friend request accepted -> conversation available.
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStateAccepted,
+			accept.RequestID,
+			accept.FromPeerID,
+			accept.ToPeerID,
+			accept.ConversationID,
+		))
 		return nil
 	case MessageTypeSessionReject:
 		var reject SessionReject
@@ -1790,6 +1817,14 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		_ = s.store.DeleteFriendRequestJob(reject.RequestID)
+		// Notify websocket clients: friend request rejected.
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStateRejected,
+			reject.RequestID,
+			reject.FromPeerID,
+			reject.ToPeerID,
+			"",
+		))
 		return nil
 	case MessageTypeProfileSync:
 		var sync ProfileSync

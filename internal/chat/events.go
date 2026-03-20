@@ -13,6 +13,10 @@ type ChatEvent struct {
 	ConversationID string    `json:"conversation_id"`
 	MsgID          string    `json:"msg_id,omitempty"`
 	MsgType        string    `json:"msg_type,omitempty"`
+	RequestID     string    `json:"request_id,omitempty"`
+	FromPeerID    string    `json:"from_peer_id,omitempty"`
+	ToPeerID      string    `json:"to_peer_id,omitempty"`
+	State         string    `json:"state,omitempty"` // e.g. pending/accepted/rejected
 	AtUnixMillis   int64     `json:"at_unix_millis"`
 }
 
@@ -96,6 +100,19 @@ func newMessageEvent(kind, conversationID, msgID, msgType string) ChatEvent {
 		ConversationID: conversationID,
 		MsgID:           msgID,
 		MsgType:         msgType,
+		AtUnixMillis:   time.Now().UTC().UnixMilli(),
+	}
+}
+
+func newFriendRequestEvent(state, requestID, fromPeerID, toPeerID, conversationID string) ChatEvent {
+	return ChatEvent{
+		Type:            "friend_request",
+		Kind:            "direct",
+		ConversationID: conversationID,
+		RequestID:      requestID,
+		FromPeerID:     fromPeerID,
+		ToPeerID:       toPeerID,
+		State:          state,
 		AtUnixMillis:   time.Now().UTC().UnixMilli(),
 	}
 }
