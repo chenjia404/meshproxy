@@ -2502,12 +2502,9 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 		}
 		if useText {
 			msg := resp.Messages[textIdx]
-			if msg.Counter > expected {
-				if err := s.store.UpdateRecvCounter(conversationID, msg.Counter); err != nil {
-					return err
-				}
-				expected = msg.Counter
-			}
+			// 不在此处单独 UpdateRecvCounter：若先于 handleIncomingChatText 把游标跳到 msg.Counter，
+			// 随后 AddInboundMessageAndAdvanceRecvCounter 失败，会出现「recv 已前进但消息未落库」。
+			// 游标仅由入站处理在事务里与消息一并推进；若存在 counter 空洞，由 handleIncomingChatText 报 gap 并触发同步。
 			if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
 				return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 			}
@@ -2516,12 +2513,6 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			continue
 		}
 		msg := resp.Files[fileIdx]
-		if msg.Counter > expected {
-			if err := s.store.UpdateRecvCounter(conversationID, msg.Counter); err != nil {
-				return err
-			}
-			expected = msg.Counter
-		}
 		if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
 			return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 		}
