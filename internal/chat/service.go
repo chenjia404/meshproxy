@@ -2227,7 +2227,8 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 		Counter:        msg.Counter,
 		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 	}
-	if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
+	// 消息 + recv 游标在同一事务提交后，再发 delivery_ack（见 AddInboundMessageAndAdvanceRecvCounter）。
+	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, msg.Ciphertext, msg.Counter+1); err != nil {
 		return err
 	}
 	// Notify websocket clients that this conversation has a new inbound message.
@@ -2238,7 +2239,6 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 		msgType,
 	))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
-	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 
@@ -2307,7 +2307,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 		Counter:        msg.Counter,
 		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 	}
-	if _, err := s.store.AddMessage(incoming, plain); err != nil {
+	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, plain, msg.Counter+1); err != nil {
 		return err
 	}
 	// Notify websocket clients that this conversation has a new inbound message.
@@ -2318,7 +2318,6 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 		MessageTypeChatFile,
 	))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
-	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 

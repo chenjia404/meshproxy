@@ -1,6 +1,55 @@
 package chat
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+// AddInboundMessageAndAdvanceRecvCounter 在同一 SQLite 事务中：写入入站消息、更新会话时间戳、
+// 推进 session_states.recv_counter。提交成功后，上层再发 delivery_ack，避免「已回执但游标/库不一致」。
+func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext []byte, newRecvCounter uint64) error {
+	deliveredAt := ""
+	if !msg.DeliveredAt.IsZero() {
+		deliveredAt = msg.DeliveredAt.UTC().Format(time.RFC3339Nano)
+	}
+	createdAt := msg.CreatedAt.UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
+		createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE session_states SET recv_counter=? WHERE conversation_id=?`, newRecvCounter, msg.ConversationID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("session_states missing for conversation %s", msg.ConversationID)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
 
 func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 	deliveredAt := ""
