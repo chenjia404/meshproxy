@@ -109,6 +109,9 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	if err := s.repairHistoricalDirectState(); err != nil {
 		log.Printf("[chat] startup direct data repair failed: %v", err)
 	}
+	if err := s.repairOrphanPendingSessionAccepts(); err != nil {
+		log.Printf("[chat] startup orphan session accept repair failed: %v", err)
+	}
 	h.SetStreamHandler(p2p.ProtocolChatRequest, s.handleRequestStream)
 	h.SetStreamHandler(p2p.ProtocolChatMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolChatAck, s.handleAckStream)
@@ -594,6 +597,54 @@ func (s *Service) UpdateConversationRetention(conversationID string, minutes int
 
 func (s *Service) ListContacts() ([]Contact, error) {
 	return s.store.ListContacts()
+}
+
+// DeleteConversationLocal removes the conversation and all local messages/cursors only (no network).
+func (s *Service) DeleteConversationLocal(conversationID string) error {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	conv, err := s.store.GetConversation(conversationID)
+	if err != nil {
+		return err
+	}
+	if conv.PeerID == s.localPeer {
+		return errors.New("invalid conversation")
+	}
+	if err := s.store.DeleteConversationData(conversationID); err != nil {
+		return err
+	}
+	s.publishChatEvent(newConversationDeletedEvent(conversationID, conv.PeerID))
+	return nil
+}
+
+// DeleteContactLocal deletes local conversations with that peer + their messages, then removes the peer and friend requests.
+func (s *Service) DeleteContactLocal(peerID string) error {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" {
+		return errors.New("peer_id is empty")
+	}
+	if peerID == s.localPeer {
+		return errors.New("cannot delete self")
+	}
+	for {
+		conv, err := s.store.GetConversationByPeer(peerID)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.store.DeleteConversationData(conv.ConversationID); err != nil {
+			return err
+		}
+	}
+	if err := s.store.DeletePeerAndRelatedData(peerID); err != nil {
+		return err
+	}
+	s.publishChatEvent(newContactDeletedEvent(peerID))
+	return nil
 }
 
 func (s *Service) UpdateContactNickname(peerID, nickname string) (Contact, error) {
@@ -1326,9 +1377,8 @@ func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, trans
 
 func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publishEvent, sendAck bool) error {
 	avatarName := NormalizeAvatarFileName(accept.AvatarName)
-	if strings.TrimSpace(accept.ChatKexPub) != "" {
-		_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
-	}
+	// Do not persist RemoteChatKexPub until session + conversation are created successfully.
+	// Early writes caused pending requests with no conversation if deriveSessionState failed.
 	if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
 		targetConvID := deriveStableConversationID(s.localPeer, accept.FromPeerID)
 		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
@@ -1369,6 +1419,9 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		}, sess)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(accept.ChatKexPub) != "" {
+			_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
 		}
 		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, targetConvID); err != nil {
 			return err
@@ -1440,6 +1493,9 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		if _, err := s.store.UpdateConversationRetention(convID, accept.RetentionMinutes); err != nil {
 			return err
 		}
+	}
+	if strings.TrimSpace(accept.ChatKexPub) != "" {
+		_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
 	}
 	if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, convID); err != nil {
 		return err

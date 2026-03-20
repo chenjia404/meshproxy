@@ -117,3 +117,23 @@ func newFriendRequestEvent(state, requestID, fromPeerID, toPeerID, conversationI
 	}
 }
 
+// newConversationDeletedEvent notifies WebSocket clients to refetch conversations/messages (local delete only).
+func newConversationDeletedEvent(conversationID, peerID string) ChatEvent {
+	return ChatEvent{
+		Type:            "conversation_deleted",
+		Kind:            "direct",
+		ConversationID: conversationID,
+		FromPeerID:      peerID,
+		AtUnixMillis:    time.Now().UTC().UnixMilli(),
+	}
+}
+
+func newContactDeletedEvent(peerID string) ChatEvent {
+	return ChatEvent{
+		Type:         "contact_deleted",
+		Kind:         "direct",
+		FromPeerID:   peerID,
+		AtUnixMillis: time.Now().UTC().UnixMilli(),
+	}
+}
+

@@ -193,11 +193,49 @@ GET /api/v1/meshserver/spaces?connection=12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## 3. Space 与频道
 
-### 3.1 获取 Space 列表
+### 3.1 Space 列表与创建
 
-`GET /api/v1/meshserver/spaces?connection=...`
+**列出：** `GET /api/v1/meshserver/spaces?connection=...`
+
+### 3.1.0 创建 Space
+
+`POST /api/v1/meshserver/spaces?connection=...`
+
+请求体（JSON）：
+
+```json
+{
+  "name": "我的 Space",
+  "description": "可选说明",
+  "visibility": "public",
+  "allow_channel_creation": true
+}
+```
+
+- `visibility`：`"public"` 或 `"private"`（省略或非 `public` 时按 private 处理，与列表频道等接口一致）。
+- `connection`：多连接时必填，与 `GET` 列表相同。
 
 响应示例：
+
+```json
+{
+  "ok": true,
+  "space_id": 42,
+  "message": "",
+  "space": {
+    "id": 42,
+    "space_id": 42,
+    "name": "我的 Space",
+    "avatar_url": "",
+    "description": "",
+    "visibility": 1,
+    "member_count": 1,
+    "allow_channel_creation": true
+  }
+}
+```
+
+**列出** 响应示例：
 
 ```json
 {

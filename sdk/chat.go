@@ -60,6 +60,14 @@ func (c *ChatService) ListConversations() ([]Conversation, error) {
 	return c.inner.ListConversations()
 }
 
+func (c *ChatService) DeleteConversationLocal(conversationID string) error {
+	return c.inner.DeleteConversationLocal(conversationID)
+}
+
+func (c *ChatService) DeleteContactLocal(peerID string) error {
+	return c.inner.DeleteContactLocal(peerID)
+}
+
 func (c *ChatService) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
 	return c.inner.UpdateConversationRetention(conversationID, minutes)
 }

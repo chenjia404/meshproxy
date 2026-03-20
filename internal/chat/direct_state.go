@@ -396,3 +396,85 @@ func (s *Service) maybeSendSessionRejectForConversation(fromPeerID string) bool 
 	})
 	return true
 }
+
+// repairOrphanPendingSessionAccepts fixes a historical bug where RemoteChatKexPub was written
+// before deriveSessionState/CreateConversation; failures left requests stuck as pending with
+// no active conversation, so contacts and messages never appeared.
+func (s *Service) repairOrphanPendingSessionAccepts() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	requests, err := s.store.ListRequests(s.localPeer)
+	if err != nil {
+		return err
+	}
+	_, priv, err := s.store.GetProfile(s.localPeer)
+	if err != nil {
+		return err
+	}
+	fixed := 0
+	for _, req := range requests {
+		if req.State != RequestStatePending {
+			continue
+		}
+		if strings.TrimSpace(req.RemoteChatKexPub) == "" {
+			continue
+		}
+		peerID := s.peerIDForRequest(req)
+		if peerID == "" {
+			continue
+		}
+		targetConvID := deriveStableConversationID(s.localPeer, peerID)
+		if conv, err := s.store.GetConversationByPeer(peerID); err == nil {
+			if conv.State == ConversationStateActive {
+				if _, err := s.store.GetSessionState(conv.ConversationID); err == nil {
+					if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, conv.ConversationID); err != nil {
+						log.Printf("[chat] orphan accept repair: update request state failed request=%s err=%v", req.RequestID, err)
+					} else {
+						fixed++
+					}
+					continue
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		sess, err := deriveSessionState(targetConvID, s.localPeer, peerID, priv, req.RemoteChatKexPub)
+		if err != nil {
+			log.Printf("[chat] orphan accept repair skipped request=%s peer=%s: %v", req.RequestID, peerID, err)
+			continue
+		}
+		retention := req.RetentionMinutes
+		now := time.Now().UTC()
+		if _, err := s.store.CreateConversation(Conversation{
+			ConversationID:    targetConvID,
+			PeerID:            peerID,
+			State:             ConversationStateActive,
+			LastTransportMode: TransportModeDirect,
+			RetentionMinutes:  retention,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}, sess); err != nil {
+			log.Printf("[chat] orphan accept repair: create conversation failed request=%s peer=%s err=%v", req.RequestID, peerID, err)
+			continue
+		}
+		_ = s.store.UpsertPeer(peerID, req.Nickname, req.Bio)
+		if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
+			log.Printf("[chat] orphan accept repair: update request state failed request=%s err=%v", req.RequestID, err)
+			continue
+		}
+		_ = s.store.DeleteFriendRequestJob(req.RequestID)
+		fixed++
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStateAccepted,
+			req.RequestID,
+			peerID,
+			s.localPeer,
+			targetConvID,
+		))
+	}
+	if fixed > 0 {
+		log.Printf("[chat] repair orphan pending session accepts fixed=%d", fixed)
+	}
+	return nil
+}

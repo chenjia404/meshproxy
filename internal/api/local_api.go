@@ -253,6 +253,10 @@ type ChatProvider interface {
 	AcceptRequest(requestID string) (chat.Conversation, error)
 	RejectRequest(requestID string) error
 	ListConversations() ([]chat.Conversation, error)
+	// DeleteConversationLocal removes one direct chat and all local messages (no network).
+	DeleteConversationLocal(conversationID string) error
+	// DeleteContactLocal removes local conversations/messages with that peer and deletes the contact row + requests.
+	DeleteContactLocal(peerID string) error
 	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
 	ListMessagesPage(conversationID string, limit, offset int) ([]chat.Message, int, error)
@@ -1166,6 +1170,22 @@ func (a *LocalAPI) handleChatContactItem(w http.ResponseWriter, r *http.Request)
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/contacts/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.opts.ChatService.DeleteContactLocal(parts[0]); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "peer_id": parts[0]})
+		return
+	}
 	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
@@ -1271,8 +1291,20 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 2 {
+	if len(parts) < 1 || parts[0] == "" {
 		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.opts.ChatService.DeleteConversationLocal(parts[0]); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "conversation_id": parts[0]})
 		return
 	}
 	conversationID, action := parts[0], parts[1]

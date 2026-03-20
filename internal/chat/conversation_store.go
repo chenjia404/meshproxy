@@ -3,7 +3,11 @@ package chat
 import (
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"log"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -107,7 +111,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Conversation
+	byPeer := make(map[string]Conversation)
 	for rows.Next() {
 		var c Conversation
 		var lastMessageAt, retentionSyncedAt, createdAt, updatedAt string
@@ -118,9 +122,25 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 		c.RetentionSyncedAt = parseDBTime(retentionSyncedAt)
 		c.CreatedAt = parseDBTime(createdAt)
 		c.UpdatedAt = parseDBTime(updatedAt)
+		if prev, ok := byPeer[c.PeerID]; !ok || c.UpdatedAt.After(prev.UpdatedAt) ||
+			(c.UpdatedAt.Equal(prev.UpdatedAt) && c.ConversationID > prev.ConversationID) {
+			byPeer[c.PeerID] = c
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Conversation, 0, len(byPeer))
+	for _, c := range byPeer {
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].ConversationID > out[j].ConversationID
+	})
+	return out, nil
 }
 
 func (s *Store) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
@@ -254,4 +274,133 @@ func (s *Store) UpdateSendCounter(conversationID string, counter uint64) error {
 func (s *Store) UpdateRecvCounter(conversationID string, counter uint64) error {
 	_, err := s.db.Exec(`UPDATE session_states SET recv_counter=? WHERE conversation_id=?`, counter, conversationID)
 	return err
+}
+
+// DeleteConversationData removes a direct chat conversation and all local messages/cursors for it.
+// Does not remove the peers row; use DeletePeerAndRelatedData to drop the contact.
+func (s *Store) DeleteConversationData(conversationID string) error {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	if _, err := s.GetConversation(conversationID); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`DELETE FROM outbox_jobs WHERE msg_id IN (SELECT msg_id FROM messages WHERE conversation_id=?)`, conversationID); err != nil {
+		return fmt.Errorf("delete outbox for conversation: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM message_revoke_jobs WHERE conversation_id=?`, conversationID); err != nil {
+		return fmt.Errorf("delete message_revoke_jobs: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_id=?`, conversationID); err != nil {
+		return fmt.Errorf("delete messages: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM session_states WHERE conversation_id=?`, conversationID); err != nil {
+		return fmt.Errorf("delete session_states: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM friend_request_jobs WHERE job_id IN (SELECT request_id FROM requests WHERE conversation_id=?)`, conversationID); err != nil {
+		return fmt.Errorf("delete friend_request_jobs for conversation: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE requests SET conversation_id=?, updated_at=? WHERE conversation_id=?`, "", now, conversationID); err != nil {
+		return fmt.Errorf("clear request conversation_id: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM conversations WHERE conversation_id=?`, conversationID); err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// DedupeConversationsByPeer merges multiple conversation rows that share the same peer_id
+// (possible on legacy DBs before peer_id UNIQUE was enforced) into one row per peer.
+func (s *Store) DedupeConversationsByPeer() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT peer_id FROM conversations GROUP BY peer_id HAVING COUNT(*) > 1`)
+	if err != nil {
+		return fmt.Errorf("list duplicate conversation peers: %w", err)
+	}
+	var dupPeers []string
+	for rows.Next() {
+		var peerID string
+		if err := rows.Scan(&peerID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		dupPeers = append(dupPeers, peerID)
+	}
+	_ = rows.Close()
+	if len(dupPeers) == 0 {
+		return nil
+	}
+	merged := 0
+	for _, peerID := range dupPeers {
+		crows, err := s.db.Query(
+			`SELECT conversation_id FROM conversations WHERE peer_id=? ORDER BY updated_at DESC, conversation_id DESC`,
+			peerID,
+		)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for crows.Next() {
+			var id string
+			if err := crows.Scan(&id); err != nil {
+				_ = crows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		_ = crows.Close()
+		if len(ids) < 2 {
+			continue
+		}
+		desired := deriveStableConversationID(s.localPeerID, peerID)
+		keeper := ""
+		for _, id := range ids {
+			if id == desired {
+				keeper = desired
+				break
+			}
+		}
+		if keeper == "" {
+			keeper = ids[0]
+		}
+		for _, id := range ids {
+			if id == keeper {
+				continue
+			}
+			if err := s.MigrateConversationID(id, keeper); err != nil {
+				log.Printf("[chat] dedupe conversations: merge %s -> %s peer=%s err=%v", id, keeper, peerID, err)
+				continue
+			}
+			merged++
+		}
+		if keeper != desired {
+			if err := s.MigrateConversationID(keeper, desired); err != nil {
+				log.Printf("[chat] dedupe conversations: canonicalize %s -> %s peer=%s err=%v", keeper, desired, peerID, err)
+			} else {
+				merged++
+			}
+		}
+	}
+	if merged > 0 {
+		log.Printf("[chat] dedupe conversations merged=%d duplicate_peer_rows=%d", merged, len(dupPeers))
+	}
+	return nil
 }

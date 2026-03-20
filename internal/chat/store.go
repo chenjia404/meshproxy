@@ -3,8 +3,10 @@ package chat
 import (
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +159,14 @@ func NewStore(path, localPeerID string) (*Store, error) {
 	if err := s.CleanupArchivedGroups(now); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("startup cleanup archived groups: %w", err)
+	}
+	if err := s.DedupeConversationsByPeer(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("dedupe conversations by peer: %w", err)
+	}
+	if err := s.DedupePeersByPeerID(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("dedupe peers by peer_id: %w", err)
 	}
 	return s, nil
 }
@@ -599,7 +609,128 @@ func (s *Store) UpdatePeerAvatar(peerID, avatar string) error {
 	return err
 }
 
+// DedupePeersByPeerID deletes duplicate rows in peers that share the same peer_id (legacy DBs
+// without a working PRIMARY KEY). Keeps the newest row by updated_at and merges fields.
+func (s *Store) DedupePeersByPeerID() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT peer_id FROM peers GROUP BY peer_id HAVING COUNT(*) > 1`)
+	if err != nil {
+		return fmt.Errorf("list duplicate peer ids: %w", err)
+	}
+	var dupPeers []string
+	for rows.Next() {
+		var peerID string
+		if err := rows.Scan(&peerID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		dupPeers = append(dupPeers, peerID)
+	}
+	_ = rows.Close()
+	if len(dupPeers) == 0 {
+		return nil
+	}
+	deleted := 0
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, peerID := range dupPeers {
+		rrows, err := s.db.Query(`
+			SELECT rowid, nickname, bio, avatar, blocked, last_seen_at, updated_at
+			FROM peers WHERE peer_id=? ORDER BY updated_at DESC, rowid DESC`, peerID)
+		if err != nil {
+			return err
+		}
+		type peerRow struct {
+			rowid                                  int64
+			nickname, bio, avatar, lastSeen, updatedAt string
+			blocked                                int
+		}
+		var list []peerRow
+		for rrows.Next() {
+			var r peerRow
+			if err := rrows.Scan(&r.rowid, &r.nickname, &r.bio, &r.avatar, &r.blocked, &r.lastSeen, &r.updatedAt); err != nil {
+				_ = rrows.Close()
+				return err
+			}
+			list = append(list, r)
+		}
+		_ = rrows.Close()
+		if len(list) < 2 {
+			continue
+		}
+		keeper := list[0]
+		for _, r := range list[1:] {
+			if strings.TrimSpace(keeper.nickname) == "" && strings.TrimSpace(r.nickname) != "" {
+				keeper.nickname = r.nickname
+			}
+			if strings.TrimSpace(keeper.bio) == "" && strings.TrimSpace(r.bio) != "" {
+				keeper.bio = r.bio
+			}
+			if strings.TrimSpace(keeper.avatar) == "" && strings.TrimSpace(r.avatar) != "" {
+				keeper.avatar = r.avatar
+			}
+			if r.blocked != 0 {
+				keeper.blocked = 1
+			}
+			if parseDBTime(r.lastSeen).After(parseDBTime(keeper.lastSeen)) {
+				keeper.lastSeen = r.lastSeen
+			}
+			if _, err := s.db.Exec(`DELETE FROM peers WHERE rowid=?`, r.rowid); err != nil {
+				return fmt.Errorf("delete duplicate peer row peer_id=%s rowid=%d: %w", peerID, r.rowid, err)
+			}
+			deleted++
+		}
+		if _, err := s.db.Exec(`UPDATE peers SET nickname=?, bio=?, avatar=?, blocked=?, last_seen_at=?, updated_at=? WHERE rowid=?`,
+			keeper.nickname, keeper.bio, keeper.avatar, keeper.blocked, keeper.lastSeen, now, keeper.rowid); err != nil {
+			return fmt.Errorf("merge deduped peer row peer_id=%s: %w", peerID, err)
+		}
+	}
+	if deleted > 0 {
+		log.Printf("[chat] dedupe peers: removed duplicate rows=%d peer_ids=%d", deleted, len(dupPeers))
+	}
+	return nil
+}
+
+// DeletePeerAndRelatedData removes the contact row, friend requests, and retry jobs for that peer.
+// Call DeleteConversationData first for each conversation with this peer.
+func (s *Store) DeletePeerAndRelatedData(peerID string) error {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" {
+		return errors.New("peer_id is empty")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`DELETE FROM friend_request_jobs WHERE job_id IN (SELECT request_id FROM requests WHERE from_peer_id=? OR to_peer_id=?)`, peerID, peerID); err != nil {
+		return fmt.Errorf("delete friend_request_jobs by request: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM requests WHERE from_peer_id=? OR to_peer_id=?`, peerID, peerID); err != nil {
+		return fmt.Errorf("delete requests: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM friend_request_jobs WHERE peer_id=?`, peerID); err != nil {
+		return fmt.Errorf("delete friend_request_jobs by peer: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM peers WHERE peer_id=?`, peerID); err != nil {
+		return fmt.Errorf("delete peer: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func (s *Store) ListContacts() ([]Contact, error) {
+	// JOIN must follow FROM immediately (SQLite does not allow WHERE between FROM and JOIN).
+	// peers.peer_id is PRIMARY KEY, so no rowid disambiguation needed.
 	rows, err := s.db.Query(`
 		SELECT
 			p.peer_id,
@@ -614,15 +745,21 @@ func (s *Store) ListContacts() ([]Contact, error) {
 				SELECT r.nickname
 				FROM requests r
 				WHERE r.nickname != ''
-				  AND ((r.from_peer_id = p.peer_id AND r.to_peer_id = ?) OR (r.to_peer_id = p.peer_id AND r.from_peer_id = ?))
+				  AND r.from_peer_id = p.peer_id AND r.to_peer_id = ?
 				ORDER BY r.updated_at DESC, r.created_at DESC
 				LIMIT 1
 			), '')
 		FROM peers p
 		INNER JOIN conversations c ON c.peer_id = p.peer_id
-		WHERE c.state = ?
+			AND c.state = ?
+			AND c.conversation_id = (
+				SELECT c2.conversation_id FROM conversations c2
+				WHERE c2.peer_id = p.peer_id AND c2.state = ?
+				ORDER BY c2.updated_at DESC, c2.conversation_id DESC
+				LIMIT 1
+			)
 		ORDER BY c.updated_at DESC, p.updated_at DESC
-	`, s.localPeerID, s.localPeerID, ConversationStateActive)
+	`, s.localPeerID, ConversationStateActive, ConversationStateActive)
 	if err != nil {
 		return nil, err
 	}
@@ -661,14 +798,19 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 				SELECT r.nickname
 				FROM requests r
 				WHERE r.nickname != ''
-				  AND ((r.from_peer_id = p.peer_id AND r.to_peer_id = ?) OR (r.to_peer_id = p.peer_id AND r.from_peer_id = ?))
+				  AND r.from_peer_id = p.peer_id AND r.to_peer_id = ?
 				ORDER BY r.updated_at DESC, r.created_at DESC
 				LIMIT 1
 			), '')
 		FROM peers p
-		LEFT JOIN conversations c ON c.peer_id = p.peer_id
+		LEFT JOIN conversations c ON c.conversation_id = (
+			SELECT c2.conversation_id FROM conversations c2
+			WHERE c2.peer_id = p.peer_id
+			ORDER BY c2.updated_at DESC, c2.conversation_id DESC
+			LIMIT 1
+		)
 		WHERE p.peer_id=?
-	`, s.localPeerID, s.localPeerID, peerID).
+	`, s.localPeerID, peerID).
 		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
@@ -907,6 +1049,10 @@ func shortPeerID(v string) string {
 }
 
 func deriveSessionState(conversationID, localPeerID, remotePeerID string, localPriv []byte, remotePubB64 string) (sessionState, error) {
+	remotePubB64 = strings.TrimSpace(remotePubB64)
+	if remotePubB64 == "" {
+		return sessionState{}, fmt.Errorf("remote chat kex pub is empty")
+	}
 	remotePub, err := base64.StdEncoding.DecodeString(remotePubB64)
 	if err != nil {
 		return sessionState{}, err
