@@ -1995,11 +1995,28 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	}
 	conv, err := s.store.GetConversation(msg.ConversationID)
 	if err != nil {
-		return err
+		// 如果本地尚未落库 conversation/session，而我们先收到 chat_text，
+		// 则尝试从 accepted 的 friend request 中恢复 session/counter 相关状态。
+		if errors.Is(err, sql.ErrNoRows) {
+			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
+				conv, err = s.store.GetConversation(msg.ConversationID)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
+
 	sess, err := s.store.GetSessionState(msg.ConversationID)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
+				sess, err = s.store.GetSessionState(msg.ConversationID)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
 	if err != nil || duplicate {
@@ -2051,6 +2068,68 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 
+func (s *Service) recoverConversationAndSessionFromRequest(conversationID, fromPeerID, transportMode string) error {
+	if s == nil || s.store == nil {
+		return errors.New("chat service not initialized")
+	}
+
+	// conversationID = sort(a,b) + ":" + requestID (requestID is a UUID, no extra ':')
+	lastColon := strings.LastIndex(conversationID, ":")
+	if lastColon <= 0 || lastColon >= len(conversationID)-1 {
+		return errors.New("invalid conversation_id format")
+	}
+	requestID := conversationID[lastColon+1:]
+	if _, err := uuid.Parse(requestID); err != nil {
+		return errors.New("invalid request_id extracted from conversation_id: " + err.Error())
+	}
+
+	req, err := s.store.GetRequest(requestID)
+	if err != nil {
+		return err
+	}
+	if req.ToPeerID != s.localPeer || req.FromPeerID != fromPeerID {
+		return fmt.Errorf("request mismatch: req.from=%s req.to=%s local=%s got_from=%s",
+			req.FromPeerID, req.ToPeerID, s.localPeer, fromPeerID)
+	}
+	if req.State != RequestStateAccepted {
+		return fmt.Errorf("request is not accepted: state=%s", req.State)
+	}
+
+	profile, priv, err := s.store.GetProfile(s.localPeer)
+	if err != nil {
+		return err
+	}
+	if priv == nil {
+		return errors.New("local private key missing")
+	}
+
+	sess, err := deriveSessionState(conversationID, s.localPeer, fromPeerID, priv, req.RemoteChatKexPub)
+	if err != nil {
+		return err
+	}
+
+	conv := Conversation{
+		ConversationID:    conversationID,
+		PeerID:            fromPeerID,
+		State:             ConversationStateActive,
+		LastTransportMode: transportMode,
+		// session/counter will be recovered from subsequent messages/sync.
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := s.store.CreateConversation(conv, sess); err != nil {
+		return err
+	}
+
+	// Best-effort: make sure request references conversation_id.
+	_ = s.store.UpdateRequestState(requestID, RequestStateAccepted, conversationID)
+	_ = s.store.DeleteFriendRequestJob(requestID)
+
+	log.Printf("[chat] recovered conversation from request request=%s peer=%s conversation=%s", requestID, fromPeerID, conversationID)
+	_ = profile // keep same lookup side-effect pattern; profile isn't needed beyond priv.
+	return nil
+}
+
 func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) error {
 	var payload GroupInviteNoticePayload
 	if err := json.Unmarshal(plain, &payload); err != nil {
@@ -2083,11 +2162,26 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 	}
 	conv, err := s.store.GetConversation(msg.ConversationID)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
+				conv, err = s.store.GetConversation(msg.ConversationID)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
+
 	sess, err := s.store.GetSessionState(msg.ConversationID)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
+				sess, err = s.store.GetSessionState(msg.ConversationID)
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
 	if err != nil || duplicate {
