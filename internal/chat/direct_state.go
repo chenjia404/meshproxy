@@ -339,7 +339,11 @@ func (s *Service) loadIncomingDirectState(conversationID, fromPeerID, transportM
 	return s.repairIncomingDirectState(conversationID, fromPeerID, transportMode)
 }
 
-func (s *Service) handleIncomingRetentionUpdate(update RetentionUpdate, transportMode string) error {
+func (s *Service) handleIncomingRetentionUpdate(update RetentionUpdate, transportMode string, streamPeerID string) error {
+	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, update.FromPeerID) {
+		log.Printf("[chat] retention update ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, update.FromPeerID)
+		return nil
+	}
 	conv, _, _, err := s.loadIncomingDirectState(update.ConversationID, update.FromPeerID, transportMode)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

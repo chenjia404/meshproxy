@@ -139,6 +139,7 @@ type SessionRequest struct {
 	IntroText        string `json:"intro_text"`
 	ChatKexPub       string `json:"chat_kex_pub"`
 	SentAtUnix       int64  `json:"sent_at_unix"`
+	Signature        []byte `json:"signature,omitempty"`
 }
 
 type SessionAccept struct {
@@ -152,6 +153,7 @@ type SessionAccept struct {
 	RetentionMinutes int    `json:"retention_minutes"`
 	ChatKexPub       string `json:"chat_kex_pub"`
 	SentAtUnix       int64  `json:"sent_at_unix"`
+	Signature        []byte `json:"signature,omitempty"`
 }
 
 // SessionAcceptAck is sent back by the receiver of SessionAccept,
@@ -163,6 +165,7 @@ type SessionAcceptAck struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type SessionReject struct {
@@ -171,6 +174,7 @@ type SessionReject struct {
 	FromPeerID string `json:"from_peer_id"`
 	ToPeerID   string `json:"to_peer_id"`
 	SentAtUnix int64  `json:"sent_at_unix"`
+	Signature  []byte `json:"signature,omitempty"`
 }
 
 type ProfileSync struct {
@@ -181,6 +185,7 @@ type ProfileSync struct {
 	Bio        string `json:"bio"`
 	AvatarName string `json:"avatar_name"`
 	SentAtUnix int64  `json:"sent_at_unix"`
+	Signature  []byte `json:"signature,omitempty"`
 }
 
 type AvatarRequest struct {
@@ -189,6 +194,7 @@ type AvatarRequest struct {
 	ToPeerID   string `json:"to_peer_id"`
 	AvatarName string `json:"avatar_name"`
 	SentAtUnix int64  `json:"sent_at_unix"`
+	Signature  []byte `json:"signature,omitempty"`
 }
 
 type AvatarResponse struct {
@@ -198,6 +204,7 @@ type AvatarResponse struct {
 	AvatarName string `json:"avatar_name"`
 	AvatarData []byte `json:"avatar_data,omitempty"`
 	SentAtUnix int64  `json:"sent_at_unix"`
+	Signature  []byte `json:"signature,omitempty"`
 }
 
 type ChatText struct {
@@ -209,6 +216,7 @@ type ChatText struct {
 	Ciphertext     []byte `json:"ciphertext"`
 	Counter        uint64 `json:"counter"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type ChatFile struct {
@@ -223,6 +231,7 @@ type ChatFile struct {
 	Ciphertext     []byte `json:"ciphertext"`
 	Counter        uint64 `json:"counter"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type DeliveryAck struct {
@@ -232,6 +241,7 @@ type DeliveryAck struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	AckedAtUnix    int64  `json:"acked_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type ChatSyncRequest struct {
@@ -241,14 +251,17 @@ type ChatSyncRequest struct {
 	ToPeerID       string `json:"to_peer_id"`
 	NextCounter    uint64 `json:"next_counter"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type ChatSyncResponse struct {
 	Type              string     `json:"type"`
 	ConversationID    string     `json:"conversation_id"`
+	FromPeerID        string     `json:"from_peer_id,omitempty"`
 	RemoteSendCounter uint64     `json:"remote_send_counter,omitempty"`
 	Messages          []ChatText `json:"messages,omitempty"`
 	Files             []ChatFile `json:"files,omitempty"`
+	Signature         []byte     `json:"signature,omitempty"`
 }
 
 type MessageRevoke struct {
@@ -258,6 +271,7 @@ type MessageRevoke struct {
 	FromPeerID     string `json:"from_peer_id"`
 	ToPeerID       string `json:"to_peer_id"`
 	RevokedAtUnix  int64  `json:"revoked_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
 }
 
 type RetentionAck struct {
@@ -267,6 +281,7 @@ type RetentionAck struct {
 	ToPeerID         string `json:"to_peer_id"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	AckedAtUnix      int64  `json:"acked_at_unix"`
+	Signature        []byte `json:"signature,omitempty"`
 }
 
 type RetentionUpdate struct {
@@ -276,4 +291,5 @@ type RetentionUpdate struct {
 	ToPeerID         string `json:"to_peer_id"`
 	RetentionMinutes int    `json:"retention_minutes"`
 	UpdatedAtUnix    int64  `json:"updated_at_unix"`
+	Signature        []byte `json:"signature,omitempty"`
 }

@@ -1657,7 +1657,8 @@ func (s *Service) serveMessageStream(str network.Stream) {
 	if err := tunnel.ReadJSONFrame(str, &env); err != nil {
 		return
 	}
-	if err := s.processDirectEnvelope(env); err != nil {
+	remotePeer := str.Conn().RemotePeer().String()
+	if err := s.processDirectEnvelope(env, remotePeer); err != nil {
 		log.Printf("[chat] process direct envelope failed: %v", err)
 	}
 }
@@ -1668,7 +1669,7 @@ func (s *Service) serveAckStream(str network.Stream) {
 	if err := tunnel.ReadJSONFrame(str, &ack); err != nil {
 		return
 	}
-	_ = s.handleIncomingDeliveryAck(ack)
+	_ = s.handleIncomingDeliveryAck(ack, str.Conn().RemotePeer().String())
 }
 
 func (s *Service) serveChatSyncStream(str network.Stream) {
@@ -1834,7 +1835,11 @@ func (s *Service) sendViaRelay(peerID string, v any) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(v)
+	toSend, err := s.attachRelaySignature(v)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(toSend)
 	if err != nil {
 		return err
 	}
@@ -2000,6 +2005,44 @@ func remarshal(in any, out any) error {
 	return json.Unmarshal(b, out)
 }
 
+// streamPeerIdentityOK：直连流上 JSON 里的 peer 字段须与 libp2p RemotePeer 一致，防止冒用 from_peer_id。
+// streamPeerID 为空时表示 relay/本地回放等路径，不做此项校验。
+func streamPeerIdentityOK(streamPeerID, claimedPeerID string) bool {
+	streamPeerID = strings.TrimSpace(streamPeerID)
+	claimedPeerID = strings.TrimSpace(claimedPeerID)
+	if streamPeerID == "" {
+		return true
+	}
+	if claimedPeerID == "" {
+		return false
+	}
+	return streamPeerID == claimedPeerID
+}
+
+// handleIncomingMessageRevoke 仅允许「原消息发送方」在直连流上撤销；须与 stream 身份一致。
+func (s *Service) handleIncomingMessageRevoke(revoke MessageRevoke, streamPeerID string) error {
+	if !streamPeerIdentityOK(streamPeerID, revoke.FromPeerID) {
+		log.Printf("[chat] message revoke ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, revoke.FromPeerID)
+		return nil
+	}
+	m, err := s.store.GetMessage(revoke.MsgID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if m.ConversationID != revoke.ConversationID {
+		log.Printf("[chat] message revoke ignored: conversation mismatch msg=%s", revoke.MsgID)
+		return nil
+	}
+	if m.SenderPeerID != revoke.FromPeerID {
+		log.Printf("[chat] message revoke ignored: not original sender msg=%s", revoke.MsgID)
+		return nil
+	}
+	return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+}
+
 func (s *Service) processEnvelopeBytes(data []byte) error {
 	var env map[string]any
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -2008,6 +2051,12 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 	switch env["type"] {
 	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
 		return s.processGroupEnvelope(env)
+	default:
+		if err := s.verifyRelayInboundEnvelope(env); err != nil {
+			return err
+		}
+	}
+	switch env["type"] {
 	case MessageTypeSessionRequest:
 		var req SessionRequest
 		if err := remarshal(env, &req); err != nil {
@@ -2072,31 +2121,31 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, "relay")
+		return s.handleIncomingChatText(msg, "relay", "")
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatFile(msg, "relay")
+		return s.handleIncomingChatFile(msg, "relay", "")
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
 			return err
 		}
-		return s.handleIncomingDeliveryAck(ack)
+		return s.handleIncomingDeliveryAck(ack, "")
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
 			return err
 		}
-		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+		return s.handleIncomingMessageRevoke(revoke, "")
 	case MessageTypeRetentionUpdate:
 		var update RetentionUpdate
 		if err := remarshal(env, &update); err != nil {
 			return err
 		}
-		return s.handleIncomingRetentionUpdate(update, "relay")
+		return s.handleIncomingRetentionUpdate(update, "relay", "")
 	case MessageTypeRetentionAck:
 		var ack RetentionAck
 		if err := remarshal(env, &ack); err != nil {
@@ -2108,7 +2157,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 	}
 }
 
-func (s *Service) processDirectEnvelope(env map[string]any) error {
+func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string) error {
 	switch env["type"] {
 	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
 		return s.processGroupEnvelope(env)
@@ -2124,29 +2173,33 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, TransportModeDirect)
+		return s.handleIncomingChatText(msg, TransportModeDirect, streamPeerID)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatFile(msg, TransportModeDirect)
+		return s.handleIncomingChatFile(msg, TransportModeDirect, streamPeerID)
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
 			return err
 		}
-		return s.store.DeleteMessage(revoke.ConversationID, revoke.MsgID)
+		return s.handleIncomingMessageRevoke(revoke, streamPeerID)
 	case MessageTypeRetentionUpdate:
 		var update RetentionUpdate
 		if err := remarshal(env, &update); err != nil {
 			return err
 		}
-		return s.handleIncomingRetentionUpdate(update, TransportModeDirect)
+		return s.handleIncomingRetentionUpdate(update, TransportModeDirect, streamPeerID)
 	case MessageTypeRetentionAck:
 		var ack RetentionAck
 		if err := remarshal(env, &ack); err != nil {
 			return err
+		}
+		if !streamPeerIdentityOK(streamPeerID, ack.FromPeerID) {
+			log.Printf("[chat] retention ack ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, ack.FromPeerID)
+			return nil
 		}
 		return s.store.UpdateConversationRetentionSync(ack.ConversationID, "synced", time.UnixMilli(ack.AckedAtUnix))
 	case MessageTypeDeliveryAck:
@@ -2154,11 +2207,15 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &ack); err != nil {
 			return err
 		}
-		return s.handleIncomingDeliveryAck(ack)
+		return s.handleIncomingDeliveryAck(ack, streamPeerID)
 	case MessageTypeProfileSync:
 		var sync ProfileSync
 		if err := remarshal(env, &sync); err != nil {
 			return err
+		}
+		if !streamPeerIdentityOK(streamPeerID, sync.FromPeerID) {
+			log.Printf("[chat] profile sync ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, sync.FromPeerID)
+			return nil
 		}
 		return s.handleProfileSync(sync)
 	case MessageTypeAvatarRequest:
@@ -2166,11 +2223,19 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &req); err != nil {
 			return err
 		}
+		if !streamPeerIdentityOK(streamPeerID, req.FromPeerID) {
+			log.Printf("[chat] avatar request ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, req.FromPeerID)
+			return nil
+		}
 		return s.handleAvatarRequest(req)
 	case MessageTypeAvatarResponse:
 		var resp AvatarResponse
 		if err := remarshal(env, &resp); err != nil {
 			return err
+		}
+		if !streamPeerIdentityOK(streamPeerID, resp.FromPeerID) {
+			log.Printf("[chat] avatar response ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, resp.FromPeerID)
+			return nil
 		}
 		return s.handleAvatarResponse(resp)
 	default:
@@ -2178,7 +2243,11 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 	}
 }
 
-func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) error {
+func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string) error {
+	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
+		log.Printf("[chat] chat text ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
+		return nil
+	}
 	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
@@ -2268,7 +2337,11 @@ func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) er
 	return s.applyRemoteGroupInviteEnvelope(payload.InviteEnvelope, false)
 }
 
-func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) error {
+func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, streamPeerID string) error {
+	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
+		log.Printf("[chat] chat file ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
+		return nil
+	}
 	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
@@ -2346,8 +2419,14 @@ func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) err
 	return s.sendEnvelope(conv.PeerID, ack)
 }
 
-func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck) error {
+func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string) error {
 	if strings.TrimSpace(ack.MsgID) == "" {
+		return nil
+	}
+	// 直连流上回执必须由声明的 from_peer_id 与发流者一致（即接收方本人）。
+	if streamPeerID != "" && strings.TrimSpace(ack.FromPeerID) != "" &&
+		strings.TrimSpace(ack.FromPeerID) != strings.TrimSpace(streamPeerID) {
+		log.Printf("[chat] delivery ack ignored: stream peer mismatch stream=%s ack_from=%s", streamPeerID, ack.FromPeerID)
 		return nil
 	}
 	// 送达回执必须由「该条消息的接收方」发出；否则任意节点可伪造 ack，导致发送端显示已送达但对方从未入库。
@@ -2505,7 +2584,7 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			// 不在此处单独 UpdateRecvCounter：若先于 handleIncomingChatText 把游标跳到 msg.Counter，
 			// 随后 AddInboundMessageAndAdvanceRecvCounter 失败，会出现「recv 已前进但消息未落库」。
 			// 游标仅由入站处理在事务里与消息一并推进；若存在 counter 空洞，由 handleIncomingChatText 报 gap 并触发同步。
-			if err := s.handleIncomingChatText(msg, TransportModeDirect); err != nil {
+			if err := s.handleIncomingChatText(msg, TransportModeDirect, ""); err != nil {
 				return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 			}
 			expected = msg.Counter + 1
@@ -2513,7 +2592,7 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			continue
 		}
 		msg := resp.Files[fileIdx]
-		if err := s.handleIncomingChatFile(msg, TransportModeDirect); err != nil {
+		if err := s.handleIncomingChatFile(msg, TransportModeDirect, ""); err != nil {
 			return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 		}
 		expected = msg.Counter + 1
@@ -2536,6 +2615,7 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 			return ChatSyncResponse{
 				Type:              MessageTypeChatSyncResponse,
 				ConversationID:    req.ConversationID,
+				FromPeerID:        s.localPeer,
 				RemoteSendCounter: 0,
 			}, nil
 		}
@@ -2581,6 +2661,7 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 			return ChatSyncResponse{}, fmt.Errorf("unsupported chat sync wire %T", wire)
 		}
 	}
+	resp.FromPeerID = s.localPeer
 	return resp, nil
 }
 
