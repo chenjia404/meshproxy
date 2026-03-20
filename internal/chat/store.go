@@ -292,6 +292,24 @@ func (s *Store) migrate() error {
 	if err := s.ensureGroupTables(); err != nil {
 		return err
 	}
+	if err := s.ensureMessageIndexes(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureMessageIndexes() error {
+	// Speed up per-conversation listing and counter-based sync queries (no index
+	// on conversation_id caused full table scans as the messages table grew).
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages(conversation_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_conversation_counter ON messages(conversation_id, counter)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("create messages index: %w", err)
+		}
+	}
 	return nil
 }
 

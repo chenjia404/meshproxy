@@ -24,6 +24,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	"github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/update"
 )
 
@@ -1278,10 +1279,15 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if err := a.opts.ChatService.SyncConversation(conversationID); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// Sync involves peer dial + stream/Relay (tens of seconds). Run in background
+		// so the HTTP client returns immediately; poll GET .../messages for updates.
+		cid := conversationID
+		safe.Go("chat.api.syncConversation", func() {
+			if err := a.opts.ChatService.SyncConversation(cid); err != nil {
+				log.Printf("[api] chat sync failed conversation=%s: %v", cid, err)
+			}
+		})
+		w.WriteHeader(http.StatusAccepted)
 		writeJSON(w, map[string]any{
 			"conversation_id": conversationID,
 			"status":          "sync_requested",
