@@ -803,6 +803,14 @@ func (a *App) MeshServerGetCreateSpacePermissionsForConnection(ctx context.Conte
 	return client.GetCreateSpacePermissions(ctx)
 }
 
+func (a *App) MeshServerCreateSpaceFor(ctx context.Context, connection, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error) {
+	client, err := a.meshServerClient(connection)
+	if err != nil {
+		return nil, err
+	}
+	return client.CreateSpace(ctx, name, description, visibility, allowChannelCreation)
+}
+
 func (a *App) MeshServerJoinServer(ctx context.Context, serverID string) (*sessionv1.JoinSpaceResp, error) {
 	return a.MeshServerJoinServerForConnection(ctx, "", serverID)
 }
@@ -1538,6 +1546,13 @@ func (m *meshServerAPIAdapter) GetCreateSpacePermissions(ctx context.Context, co
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerGetCreateSpacePermissionsForConnection(ctx, connection)
+}
+
+func (m *meshServerAPIAdapter) CreateSpace(ctx context.Context, connection, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerCreateSpaceFor(ctx, connection, name, description, visibility, allowChannelCreation)
 }
 
 // streamsAPIAdapter adapts StreamManager to api.StreamsProvider.

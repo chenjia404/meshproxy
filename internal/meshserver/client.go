@@ -374,6 +374,24 @@ func (c *Client) GetCreateSpacePermissions(ctx context.Context) (*sessionv1.GetC
 	return &resp, nil
 }
 
+// CreateSpace sends CREATE_SPACE_REQ to the connected meshserver.
+func (c *Client) CreateSpace(ctx context.Context, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_CREATE_SPACE_REQ, &sessionv1.CreateSpaceReq{
+		Name:                 name,
+		Description:          description,
+		Visibility:           visibility,
+		AllowChannelCreation: allowChannelCreation,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.CreateSpaceResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 func (c *Client) ListChannels(ctx context.Context, spaceID uint32) (*sessionv1.ListChannelsResp, error) {
 	env, err := c.request(ctx, sessionv1.MsgType_LIST_CHANNELS_REQ, &sessionv1.ListChannelsReq{SpaceId: spaceID})
 	if err != nil {

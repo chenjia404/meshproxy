@@ -205,6 +205,8 @@ type MeshServerProvider interface {
 	Connect(ctx context.Context, name, peerID, clientAgent, protocolID string) (meshserver.ConnectionInfo, error)
 	Disconnect(name string) error
 	ListServers(ctx context.Context, connection string) (*sessionv1.ListSpacesResp, error)
+	// CreateSpace creates a new space on the meshserver (CREATE_SPACE).
+	CreateSpace(ctx context.Context, connection, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error)
 	JoinServer(ctx context.Context, connection, serverID string) (*sessionv1.JoinSpaceResp, error)
 	InviteServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.InviteSpaceMemberResp, error)
 	KickServerMember(ctx context.Context, connection, serverID, targetUserID string) (*sessionv1.KickSpaceMemberResp, error)
@@ -1738,51 +1740,95 @@ func (a *LocalAPI) handleMeshServerServers(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "meshserver client not available", http.StatusNotFound)
 		return
 	}
-	if r.Method != http.MethodGet {
+	connection := strings.TrimSpace(r.URL.Query().Get("connection"))
+
+	switch r.Method {
+	case http.MethodGet:
+		resp, err := a.opts.MeshServer.ListServers(r.Context(), connection)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Convert server terminology to Space terminology for the response.
+		type spaceSummary struct {
+			ID                   int                    `json:"id"`
+			SpaceID              uint32                 `json:"space_id"`
+			Name                 string                 `json:"name"`
+			AvatarUrl            string                 `json:"avatar_url"`
+			Description          string                 `json:"description"`
+			Visibility           sessionv1.Visibility   `json:"visibility"`
+			MemberCount          uint32                 `json:"member_count"`
+			AllowChannelCreation bool                   `json:"allow_channel_creation"`
+		}
+		type listSpacesResp struct {
+			Spaces []*spaceSummary `json:"spaces"`
+		}
+
+		out := &listSpacesResp{
+			Spaces: make([]*spaceSummary, 0, len(resp.Spaces)),
+		}
+		for _, s := range resp.Spaces {
+			if s == nil {
+				continue
+			}
+			spaceIntID := a.meshSpaceIntID(s.SpaceId)
+			out.Spaces = append(out.Spaces, &spaceSummary{
+				ID:                   spaceIntID,
+				SpaceID:              s.SpaceId,
+				Name:                 s.Name,
+				AvatarUrl:            s.AvatarUrl,
+				Description:          s.Description,
+				Visibility:           s.Visibility,
+				MemberCount:          s.MemberCount,
+				AllowChannelCreation: s.AllowChannelCreation,
+			})
+		}
+		writeJSON(w, out)
+		return
+
+	case http.MethodPost:
+		var body struct {
+			Name                 string `json:"name"`
+			Description          string `json:"description"`
+			Visibility           string `json:"visibility"`
+			AllowChannelCreation bool   `json:"allow_channel_creation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		visibility := parseMeshServerVisibility(body.Visibility)
+		resp, err := a.opts.MeshServer.CreateSpace(r.Context(), connection, body.Name, body.Description, visibility, body.AllowChannelCreation)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out := map[string]any{
+			"ok":       resp.Ok,
+			"space_id": resp.SpaceId,
+			"message":  resp.Message,
+		}
+		if resp.Space != nil {
+			s := resp.Space
+			out["space"] = map[string]any{
+				"id":                     a.meshSpaceIntID(s.SpaceId),
+				"space_id":               s.SpaceId,
+				"name":                   s.Name,
+				"avatar_url":             s.AvatarUrl,
+				"description":            s.Description,
+				"visibility":             s.Visibility,
+				"member_count":           s.MemberCount,
+				"allow_channel_creation": s.AllowChannelCreation,
+			}
+		}
+		writeJSON(w, out)
+		return
+
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	resp, err := a.opts.MeshServer.ListServers(r.Context(), strings.TrimSpace(r.URL.Query().Get("connection")))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Convert server terminology to Space terminology for the response.
-	type spaceSummary struct {
-		ID                   int                `json:"id"`
-		SpaceID              uint32             `json:"space_id"`
-		Name                 string             `json:"name"`
-		AvatarUrl            string             `json:"avatar_url"`
-		Description          string             `json:"description"`
-		Visibility           sessionv1.Visibility `json:"visibility"`
-		MemberCount          uint32             `json:"member_count"`
-		AllowChannelCreation bool              `json:"allow_channel_creation"`
-	}
-	type listSpacesResp struct {
-		Spaces []*spaceSummary `json:"spaces"`
-	}
-
-	out := &listSpacesResp{
-		Spaces: make([]*spaceSummary, 0, len(resp.Spaces)),
-	}
-	for _, s := range resp.Spaces {
-		if s == nil {
-			continue
-		}
-		spaceIntID := a.meshSpaceIntID(s.SpaceId)
-		out.Spaces = append(out.Spaces, &spaceSummary{
-			ID:                   spaceIntID,
-			SpaceID:              s.SpaceId,
-			Name:                 s.Name,
-			AvatarUrl:            s.AvatarUrl,
-			Description:          s.Description,
-			Visibility:           s.Visibility,
-			MemberCount:          s.MemberCount,
-			AllowChannelCreation: s.AllowChannelCreation,
-		})
-	}
-	writeJSON(w, out)
 }
 
 func (a *LocalAPI) handleMeshServerConnectedServers(w http.ResponseWriter, r *http.Request) {
@@ -2518,7 +2564,12 @@ func (a *LocalAPI) handleMeshServerServerMyPermissions(w http.ResponseWriter, r 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, resp)
+	// Proto json tags use omitempty on can_create_space; always expose it for API clarity.
+	writeJSON(w, map[string]any{
+		"ok":               resp.Ok,
+		"can_create_space": resp.CanCreateSpace,
+		"message":          resp.Message,
+	})
 }
 
 func parseMeshServerVisibility(value string) sessionv1.Visibility {

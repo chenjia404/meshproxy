@@ -38,7 +38,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.UserAgent("meshproxy"),
-		libp2p.ConnectionGater(NewAddrFilterGater()),
+		// libp2p.ConnectionGater(NewAddrFilterGater()),
 
 		//尝试开启upnp协议
 		libp2p.NATPortMap(),
@@ -49,7 +49,6 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 		libp2p.Security(noise.ID, noise.New),
 		// 中繼功能配置
 		libp2p.EnableRelay(),             // 啟用中繼功能
-		libp2p.EnableNATService(),        // 啟用 NAT 服務
 		libp2p.EnableRelayService(),      // 啟用中繼服務
 		libp2p.ForceReachabilityPublic(), // 強制設為公網可達
 
