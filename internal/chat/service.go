@@ -37,6 +37,8 @@ type Service struct {
 	localPeer string
 	avatarDir string
 
+	eventsHub *chatEventHub
+
 	autoConnectSeen      sync.Map
 	profileSyncSeen      sync.Map
 	avatarFetchSeen      sync.Map
@@ -88,6 +90,7 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 		discovery: ds,
 		localPeer: h.ID().String(),
 		avatarDir: avatarDir,
+		eventsHub: newChatEventHub(),
 	}
 	// Used for jitter when scheduling retries.
 	rand.Seed(time.Now().UTC().UnixNano())
@@ -1997,6 +2000,13 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	if _, err := s.store.AddMessage(incoming, msg.Ciphertext); err != nil {
 		return err
 	}
+	// Notify websocket clients that this conversation has a new inbound message.
+	s.publishChatEvent(newMessageEvent(
+		"direct",
+		msg.ConversationID,
+		msg.MsgID,
+		msgType,
+	))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
@@ -2068,6 +2078,13 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 	if _, err := s.store.AddMessage(incoming, plain); err != nil {
 		return err
 	}
+	// Notify websocket clients that this conversation has a new inbound message.
+	s.publishChatEvent(newMessageEvent(
+		"direct",
+		msg.ConversationID,
+		msg.MsgID,
+		MessageTypeChatFile,
+	))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	_ = s.store.UpdateRecvCounter(msg.ConversationID, msg.Counter+1)
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)

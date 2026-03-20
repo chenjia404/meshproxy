@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 
 	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
@@ -349,6 +350,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/requests/", api.handleChatRequestItem)
 	mux.HandleFunc("/api/v1/chat/conversations", api.handleChatConversations)
 	mux.HandleFunc("/api/v1/chat/conversations/", api.handleChatConversationItem)
+	mux.HandleFunc("/api/v1/chat/ws", api.handleChatWebSocket)
 	mux.HandleFunc("/api/v1/chat/network/status", api.handleChatNetworkStatus)
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
@@ -2494,6 +2496,76 @@ func (a *LocalAPI) handleChatNetworkStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, a.opts.ChatService.NetworkStatus())
+}
+
+func (a *LocalAPI) handleChatWebSocket(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type eventSubscriber interface {
+		SubscribeChatEvents() (<-chan chat.ChatEvent, func())
+	}
+
+	sub, ok := a.opts.ChatService.(eventSubscriber)
+	if !ok {
+		http.Error(w, "chat events not available", http.StatusNotFound)
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			// Console/chat are usually served on same host; for convenience we allow all origins.
+			return true
+		},
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	eventsCh, unsubscribe := sub.SubscribeChatEvents()
+	defer unsubscribe()
+
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	})
+	// Drain incoming messages to detect close; we don't need client -> server messages for now.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case evt, ok := <-eventsCh:
+			if !ok {
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteJSON(evt); err != nil {
+				return
+			}
+		case <-done:
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (a *LocalAPI) handleChatPeerRoutes(w http.ResponseWriter, r *http.Request) {
