@@ -77,7 +77,7 @@ const (
 	// Keep a few relay connections warm so that when direct sending fails,
 	// we can quickly switch to relay forwarding without long dial delays.
 	relayKeepConnectedInterval = 30 * time.Second
-	relayKeepConnectedMax      = 3
+	relayKeepConnectedMax      = 5
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
