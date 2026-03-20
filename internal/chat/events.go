@@ -8,8 +8,9 @@ import (
 // ChatEvent is the payload sent to the web/chat websocket clients.
 // For type "message", optional fields mirror chat.Message / GroupMessage so the UI can render
 // without an extra HTTP fetch; other event kinds stay minimal.
+// For type "message_state", the UI should merge MessageState / delivered_at / delivery_summary into the local row.
 type ChatEvent struct {
-	Type           string `json:"type"` // e.g. "message"
+	Type           string `json:"type"` // e.g. "message" | "message_state"
 	Kind           string `json:"kind"` // "direct" | "group"
 	ConversationID string `json:"conversation_id"`
 	MsgID          string `json:"msg_id,omitempty"`
@@ -32,9 +33,12 @@ type ChatEvent struct {
 	TransportMode       string `json:"transport_mode,omitempty"`
 	MessageState        string `json:"message_state,omitempty"` // message row state (not friend_request State)
 	CreatedAtUnixMillis int64  `json:"created_at_unix_millis,omitempty"`
+	DeliveredAtUnixMillis int64 `json:"delivered_at_unix_millis,omitempty"` // direct outbound: peer ack time
 	// Group-only (kind=="group")
 	Epoch     uint64 `json:"epoch,omitempty"`
 	SenderSeq uint64 `json:"sender_seq,omitempty"`
+	// Group-only: per-recipient delivery rollup when kind=="group" and type=="message_state"
+	DeliverySummary *GroupDeliverySummary `json:"delivery_summary,omitempty"`
 }
 
 type chatEventHub struct {
@@ -195,6 +199,46 @@ func newContactDeletedEvent(peerID string) ChatEvent {
 		Kind:         "direct",
 		FromPeerID:   peerID,
 		AtUnixMillis: time.Now().UTC().UnixMilli(),
+	}
+}
+
+// newDirectMessageStateEvent notifies WS clients that a direct message row changed (sent / queued / delivered).
+func newDirectMessageStateEvent(m Message) ChatEvent {
+	evt := ChatEvent{
+		Type:                 "message_state",
+		Kind:                 "direct",
+		ConversationID:       m.ConversationID,
+		MsgID:                m.MsgID,
+		MsgType:              m.MsgType,
+		SenderPeerID:         m.SenderPeerID,
+		ReceiverPeerID:       m.ReceiverPeerID,
+		Direction:            m.Direction,
+		Counter:              m.Counter,
+		MessageState:         m.State,
+		CreatedAtUnixMillis:  m.CreatedAt.UnixMilli(),
+		AtUnixMillis:         time.Now().UTC().UnixMilli(),
+	}
+	if !m.DeliveredAt.IsZero() {
+		evt.DeliveredAtUnixMillis = m.DeliveredAt.UnixMilli()
+	}
+	return evt
+}
+
+// newGroupMessageStateEvent notifies WS clients that a group message aggregate state changed.
+func newGroupMessageStateEvent(m GroupMessage) ChatEvent {
+	ds := m.DeliverySummary
+	return ChatEvent{
+		Type:            "message_state",
+		Kind:            "group",
+		ConversationID:  m.GroupID,
+		MsgID:           m.MsgID,
+		MsgType:         m.MsgType,
+		SenderPeerID:    m.SenderPeerID,
+		Epoch:           m.Epoch,
+		SenderSeq:       m.SenderSeq,
+		MessageState:    m.State,
+		DeliverySummary: &ds,
+		AtUnixMillis:    time.Now().UTC().UnixMilli(),
 	}
 }
 

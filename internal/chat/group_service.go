@@ -2453,7 +2453,15 @@ func (s *Service) handleIncomingGroupAck(ack GroupDeliveryAck) error {
 	if msg.SenderPeerID != s.localPeer {
 		return errors.New("group ack targets a message not sent by local peer")
 	}
-	return s.store.MarkGroupDeliveryState(ack.MsgID, ack.FromPeerID, GroupDeliveryStateDeliveredRemote, time.UnixMilli(ack.AckedAtUnix).UTC())
+	if err := s.store.MarkGroupDeliveryState(ack.MsgID, ack.FromPeerID, GroupDeliveryStateDeliveredRemote, time.UnixMilli(ack.AckedAtUnix).UTC()); err != nil {
+		return err
+	}
+	updated, err := s.store.GetGroupMessage(ack.MsgID)
+	if err != nil {
+		return err
+	}
+	s.publishChatEvent(newGroupMessageStateEvent(updated))
+	return nil
 }
 
 func (s *Service) ensureLocalGroupMessageRevokeAllowed(groupID string, actor GroupMember, msg GroupMessage) error {

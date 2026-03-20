@@ -2428,7 +2428,17 @@ func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string
 	if err := s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix)); err != nil {
 		return err
 	}
+	s.publishDirectMessageStateUpdate(ack.MsgID)
 	return s.store.DeleteOutboxJob(ack.MsgID)
+}
+
+// publishDirectMessageStateUpdate pushes a "message_state" WS event after the DB row is updated.
+func (s *Service) publishDirectMessageStateUpdate(msgID string) {
+	m, err := s.store.GetMessage(msgID)
+	if err != nil {
+		return
+	}
+	s.publishChatEvent(newDirectMessageStateEvent(m))
 }
 
 // completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端；失败则标记 queued 并调度重试。
@@ -2456,6 +2466,7 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 		if retryErr := s.scheduleOutboxRetry(msg.MsgID, msg.ReceiverPeerID, 1); retryErr != nil {
 			log.Printf("[chat] schedule outbox retry failed msg=%s: %v", msg.MsgID, retryErr)
 		}
+		s.publishDirectMessageStateUpdate(msg.MsgID)
 		return
 	}
 	msg.State = MessageStateSentToTransport
@@ -2466,6 +2477,7 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 	if err := s.markOutboxSentToTransport(msg.MsgID, msg.ReceiverPeerID, 0, time.Now().UTC()); err != nil {
 		log.Printf("[chat] mark outbox sent failed msg=%s: %v", msg.MsgID, err)
 	}
+	s.publishDirectMessageStateUpdate(msg.MsgID)
 }
 
 func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cachedCiphertext []byte) error {
@@ -2529,12 +2541,17 @@ func (s *Service) retryOutboxJob(item outboxRetryItem) error {
 	}
 	if err := s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil); err != nil {
 		_ = s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry)
+		s.publishDirectMessageStateUpdate(item.MsgID)
 		return s.scheduleOutboxRetry(item.MsgID, item.PeerID, item.RetryCount+1)
 	}
 	if err := s.store.UpdateMessageState(item.MsgID, MessageStateSentToTransport); err != nil {
 		return err
 	}
-	return s.markOutboxSentToTransport(item.MsgID, item.PeerID, item.RetryCount, time.Now().UTC())
+	if err := s.markOutboxSentToTransport(item.MsgID, item.PeerID, item.RetryCount, time.Now().UTC()); err != nil {
+		return err
+	}
+	s.publishDirectMessageStateUpdate(item.MsgID)
+	return nil
 }
 
 func (s *Service) scheduleOutboxRetry(msgID, peerID string, retryCount int) error {
@@ -2760,6 +2777,7 @@ func (s *Service) recoverMissingOutboxJobs() error {
 			if err := s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry); err != nil {
 				return err
 			}
+			s.publishDirectMessageStateUpdate(item.MsgID)
 		}
 	}
 	return nil

@@ -674,7 +674,9 @@ internal/chat/
 * `POST /api/v1/chat/conversations/{id}/read` — 將該會話 `unread_count` 清零並回傳更新後的會話 JSON
 * `DELETE /api/v1/chat/conversations/{conversation_id}` — 僅刪除本地該會話與其中訊息（不刪 `peers` 聯絡人列；`conversation_id` 路徑需 URL 編碼）
 * `GET /api/v1/chat/conversations/{id}/messages`（無查詢參數時回傳訊息 JSON 陣列；帶 `limit` 和/或 `offset` 時回傳 `{ messages, total, limit, offset, has_more }`，`limit` 預設 100、範圍 1–500）
-* `POST /api/v1/chat/conversations/{id}/messages/text`
+* `POST /api/v1/chat/conversations/{id}/messages/text` — 私聊：先落庫並立即回傳訊息 JSON（`state` 初始為 `local_only`），再非同步發往對端；成功後變為 `sent_to_transport`（失敗則 `queued_for_retry` 並由 outbox 重試）
+* `POST /api/v1/chat/conversations/{id}/files`（multipart）— 與文字相同：先落庫即回傳，發送非阻塞
+* `GET /api/v1/chat/ws`（WebSocket）— 即時推送聊天事件 JSON。除 `type: "message"` 外，當訊息狀態變更時會推送 **`type: "message_state"`**：私聊帶 `message_state`、`delivered_at_unix_millis`（對端送達回執後）；群聊帶 `message_state` 與 `delivery_summary`（成員送達彙總更新）。前端可依 `msg_id` 合併更新本地列表項。
 
 ### 14.4 网络与传输
 
