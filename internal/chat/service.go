@@ -80,6 +80,10 @@ const (
 	// we can quickly switch to relay forwarding without long dial delays.
 	relayKeepConnectedInterval = 30 * time.Second
 	relayKeepConnectedMax      = 10
+
+	// Periodic retry for queued outbox_jobs (e.g. relay path temporarily unavailable).
+	outboxRetryTickInterval = 5 * time.Second
+	outboxRetryBatchSize    = 64
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -102,6 +106,9 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 		return nil, err
 	}
 	s.store = store
+	if err := s.repairHistoricalDirectState(); err != nil {
+		log.Printf("[chat] startup direct data repair failed: %v", err)
+	}
 	h.SetStreamHandler(p2p.ProtocolChatRequest, s.handleRequestStream)
 	h.SetStreamHandler(p2p.ProtocolChatMsg, s.handleMessageStream)
 	h.SetStreamHandler(p2p.ProtocolChatAck, s.handleAckStream)
@@ -112,10 +119,375 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	s.runRetentionSweep(time.Now().UTC())
 	safe.Go("chat.retentionLoop", func() { s.runRetentionLoop() })
 	safe.Go("chat.recoverOutboxLoop", func() { s.recoverMissingOutboxJobs() })
+	safe.Go("chat.outboxRetryLoop", func() { s.runOutboxRetryLoop() })
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
 	safe.Go("chat.friendRequestRetryLoop", func() { s.runFriendRequestRetryLoop() })
 	safe.Go("chat.relayKeepConnectedLoop", func() { s.runRelayKeepConnectedLoop() })
 	return s, nil
+}
+
+func (s *Service) repairHistoricalDirectState() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+
+	requests, err := s.store.ListRequests(s.localPeer)
+	if err != nil {
+		return err
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+
+	conversations, err := s.store.ListConversations()
+	if err != nil {
+		return err
+	}
+
+	acceptedRequests := make([]Request, 0, len(requests))
+	inboundPubByPeer := make(map[string]string)
+	for _, req := range requests {
+		peerID := s.peerIDForRequest(req)
+		if peerID == "" {
+			continue
+		}
+		if req.State == RequestStateAccepted {
+			acceptedRequests = append(acceptedRequests, req)
+		}
+		if req.ToPeerID == s.localPeer {
+			if _, ok := inboundPubByPeer[peerID]; !ok {
+				if pub := strings.TrimSpace(req.RemoteChatKexPub); pub != "" {
+					inboundPubByPeer[peerID] = pub
+				}
+			}
+		}
+	}
+	if len(acceptedRequests) == 0 {
+		return nil
+	}
+
+	_, priv, err := s.store.GetProfile(s.localPeer)
+	if err != nil {
+		return err
+	}
+
+	conversationsByPeer := make(map[string]Conversation, len(conversations))
+	for _, conv := range conversations {
+		if conv.PeerID == "" {
+			continue
+		}
+		conversationsByPeer[conv.PeerID] = conv
+	}
+
+	now := time.Now().UTC()
+	scanned := 0
+	requestsFixed := 0
+	conversationsFixed := 0
+	sessionStatesFixed := 0
+	skipped := 0
+
+	for _, req := range acceptedRequests {
+		peerID := s.peerIDForRequest(req)
+		if peerID == "" {
+			continue
+		}
+		scanned++
+
+		existingConv, hasConv := conversationsByPeer[peerID]
+		targetConvID := strings.TrimSpace(req.ConversationID)
+		if hasConv {
+			targetConvID = existingConv.ConversationID
+		}
+		if targetConvID == "" {
+			targetConvID = deriveConversationID(s.localPeer, peerID, req.RequestID)
+		}
+
+		if strings.TrimSpace(req.ConversationID) != targetConvID {
+			if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
+				return err
+			}
+			req.ConversationID = targetConvID
+			requestsFixed++
+		}
+
+		sess, err := s.store.GetSessionState(targetConvID)
+		hadSession := err == nil
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if !hadSession {
+			remotePub := s.remoteChatKexPubForRepair(req, peerID, inboundPubByPeer)
+			if remotePub == "" {
+				skipped++
+				log.Printf("[chat] startup repair skipped request=%s peer=%s conversation=%s: missing remote chat kex pub", req.RequestID, peerID, targetConvID)
+				continue
+			}
+			sess, err = deriveSessionState(targetConvID, s.localPeer, peerID, priv, remotePub)
+			if err != nil {
+				skipped++
+				log.Printf("[chat] startup repair skipped request=%s peer=%s conversation=%s: derive session failed: %v", req.RequestID, peerID, targetConvID, err)
+				continue
+			}
+		}
+
+		needsConversationRepair := !hasConv || existingConv.State != ConversationStateActive || !hadSession
+		if !needsConversationRepair {
+			continue
+		}
+
+		retentionMinutes := req.RetentionMinutes
+		if hasConv && existingConv.RetentionMinutes > retentionMinutes {
+			retentionMinutes = existingConv.RetentionMinutes
+		}
+		transportMode := strings.TrimSpace(req.LastTransportMode)
+		if transportMode == "" {
+			transportMode = TransportModeDirect
+		}
+		if hasConv && strings.TrimSpace(existingConv.LastTransportMode) != "" {
+			transportMode = existingConv.LastTransportMode
+		}
+		createdAt := req.CreatedAt
+		if hasConv && !existingConv.CreatedAt.IsZero() {
+			createdAt = existingConv.CreatedAt
+		}
+		if createdAt.IsZero() {
+			createdAt = now
+		}
+
+		sess.ConversationID = targetConvID
+		sess.PeerID = peerID
+		repairedConv, err := s.store.CreateConversation(Conversation{
+			ConversationID:    targetConvID,
+			PeerID:            peerID,
+			State:             ConversationStateActive,
+			LastTransportMode: transportMode,
+			RetentionMinutes:  retentionMinutes,
+			CreatedAt:         createdAt,
+			UpdatedAt:         now,
+		}, sess)
+		if err != nil {
+			return err
+		}
+		conversationsByPeer[peerID] = repairedConv
+		if !hadSession {
+			sessionStatesFixed++
+		}
+		if !hasConv || existingConv.State != ConversationStateActive {
+			conversationsFixed++
+		}
+	}
+
+	if requestsFixed > 0 || conversationsFixed > 0 || sessionStatesFixed > 0 || skipped > 0 {
+		log.Printf(
+			"[chat] startup direct data repair scanned=%d requests_fixed=%d conversations_fixed=%d session_states_fixed=%d skipped=%d",
+			scanned,
+			requestsFixed,
+			conversationsFixed,
+			sessionStatesFixed,
+			skipped,
+		)
+	}
+	return nil
+}
+
+func (s *Service) peerIDForRequest(req Request) string {
+	switch {
+	case req.FromPeerID == s.localPeer:
+		return strings.TrimSpace(req.ToPeerID)
+	case req.ToPeerID == s.localPeer:
+		return strings.TrimSpace(req.FromPeerID)
+	default:
+		return ""
+	}
+}
+
+func (s *Service) remoteChatKexPubForRepair(req Request, peerID string, inboundPubByPeer map[string]string) string {
+	if req.ToPeerID == s.localPeer {
+		return strings.TrimSpace(req.RemoteChatKexPub)
+	}
+	return strings.TrimSpace(inboundPubByPeer[peerID])
+}
+
+func (s *Service) findAcceptedRequestForPeer(peerID, preferredConversationID string) (Request, string, error) {
+	requests, err := s.store.ListRequests(s.localPeer)
+	if err != nil {
+		return Request{}, "", err
+	}
+
+	inboundPub := ""
+	for _, req := range requests {
+		if s.peerIDForRequest(req) != peerID {
+			continue
+		}
+		if req.ToPeerID == s.localPeer {
+			if pub := strings.TrimSpace(req.RemoteChatKexPub); pub != "" {
+				inboundPub = pub
+				break
+			}
+		}
+	}
+
+	var selected *Request
+	for _, req := range requests {
+		if s.peerIDForRequest(req) != peerID || req.State != RequestStateAccepted {
+			continue
+		}
+		reqCopy := req
+		if preferredConversationID != "" && strings.TrimSpace(req.ConversationID) == preferredConversationID {
+			selected = &reqCopy
+			break
+		}
+		if selected == nil {
+			selected = &reqCopy
+		}
+	}
+	if selected == nil {
+		return Request{}, "", sql.ErrNoRows
+	}
+
+	remotePub := s.remoteChatKexPubForRepair(*selected, peerID, map[string]string{peerID: inboundPub})
+	return *selected, remotePub, nil
+}
+
+func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transportMode string) (Conversation, sessionState, bool, error) {
+	if s == nil || s.store == nil || conversationID == "" || fromPeerID == "" {
+		return Conversation{}, sessionState{}, false, sql.ErrNoRows
+	}
+
+	req, remotePub, err := s.findAcceptedRequestForPeer(fromPeerID, conversationID)
+	if err != nil {
+		return Conversation{}, sessionState{}, false, err
+	}
+
+	existingConv, err := s.store.GetConversationByPeer(fromPeerID)
+	hasConv := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, sessionState{}, false, err
+	}
+
+	migrated := false
+	if hasConv && existingConv.ConversationID != conversationID {
+		oldConversationID := existingConv.ConversationID
+		if err := s.store.MigrateConversationID(oldConversationID, conversationID); err != nil {
+			return Conversation{}, sessionState{}, false, err
+		}
+		existingConv, err = s.store.GetConversation(conversationID)
+		if err != nil {
+			return Conversation{}, sessionState{}, false, err
+		}
+		hasConv = true
+		migrated = true
+		log.Printf("[chat] repaired incoming direct conversation id peer=%s from=%s to=%s", fromPeerID, oldConversationID, conversationID)
+	}
+
+	sess, err := s.store.GetSessionState(conversationID)
+	hadSession := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, sessionState{}, false, err
+	}
+	if !hadSession {
+		if remotePub == "" {
+			return Conversation{}, sessionState{}, false, sql.ErrNoRows
+		}
+		_, priv, err := s.store.GetProfile(s.localPeer)
+		if err != nil {
+			return Conversation{}, sessionState{}, false, err
+		}
+		sess, err = deriveSessionState(conversationID, s.localPeer, fromPeerID, priv, remotePub)
+		if err != nil {
+			return Conversation{}, sessionState{}, false, err
+		}
+	}
+
+	now := time.Now().UTC()
+	retentionMinutes := req.RetentionMinutes
+	if hasConv && existingConv.RetentionMinutes > retentionMinutes {
+		retentionMinutes = existingConv.RetentionMinutes
+	}
+	lastTransportMode := transportMode
+	if hasConv && strings.TrimSpace(existingConv.LastTransportMode) != "" {
+		lastTransportMode = existingConv.LastTransportMode
+	}
+	createdAt := req.CreatedAt
+	if hasConv && !existingConv.CreatedAt.IsZero() {
+		createdAt = existingConv.CreatedAt
+	}
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+
+	sess.ConversationID = conversationID
+	sess.PeerID = fromPeerID
+	conv, err := s.store.CreateConversation(Conversation{
+		ConversationID:    conversationID,
+		PeerID:            fromPeerID,
+		State:             ConversationStateActive,
+		LastTransportMode: lastTransportMode,
+		RetentionMinutes:  retentionMinutes,
+		CreatedAt:         createdAt,
+		UpdatedAt:         now,
+	}, sess)
+	if err != nil {
+		return Conversation{}, sessionState{}, false, err
+	}
+
+	if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, conversationID); err != nil {
+		return Conversation{}, sessionState{}, false, err
+	}
+	if remotePub != "" {
+		_ = s.store.UpdateRequestRemoteChatKexPub(req.RequestID, remotePub)
+	}
+
+	if migrated || !hasConv || existingConv.State != ConversationStateActive || !hadSession {
+		log.Printf("[chat] repaired incoming direct state peer=%s conversation=%s migrated=%t session_rebuilt=%t", fromPeerID, conversationID, migrated, !hadSession)
+	}
+	return conv, sess, true, nil
+}
+
+func (s *Service) loadIncomingDirectState(conversationID, fromPeerID, transportMode string) (Conversation, sessionState, bool, error) {
+	conv, err := s.store.GetConversation(conversationID)
+	if err == nil {
+		sess, err := s.store.GetSessionState(conversationID)
+		if err == nil {
+			return conv, sess, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Conversation{}, sessionState{}, false, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, sessionState{}, false, err
+	}
+
+	return s.repairIncomingDirectState(conversationID, fromPeerID, transportMode)
+}
+
+func (s *Service) handleIncomingRetentionUpdate(update RetentionUpdate, transportMode string) error {
+	conv, _, _, err := s.loadIncomingDirectState(update.ConversationID, update.FromPeerID, transportMode)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if s.maybeSendSessionRejectForConversation(update.ConversationID, update.FromPeerID) {
+				return nil
+			}
+		}
+		return err
+	}
+
+	conv, err = s.store.UpdateConversationRetention(conv.ConversationID, update.RetentionMinutes)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdateConversationRetentionSync(conv.ConversationID, "synced", time.Now()); err != nil {
+		return err
+	}
+	ack := RetentionAck{
+		Type:             MessageTypeRetentionAck,
+		ConversationID:   conv.ConversationID,
+		FromPeerID:       s.localPeer,
+		ToPeerID:         update.FromPeerID,
+		RetentionMinutes: conv.RetentionMinutes,
+		AckedAtUnix:      time.Now().UnixMilli(),
+	}
+	return s.sendEnvelope(conv.PeerID, ack)
 }
 
 func (s *Service) runRelayKeepConnectedLoop() {
@@ -801,15 +1173,29 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		if existingConv.RetentionMinutes > retentionMinutes {
 			retentionMinutes = existingConv.RetentionMinutes
 		}
+		// Ensure conversation is active and session_states exist after re-adding friends.
+		sess, err := deriveSessionState(existingConv.ConversationID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
+		if err != nil {
+			return Conversation{}, err
+		}
+		updatedConv, err := s.store.CreateConversation(Conversation{
+			ConversationID:    existingConv.ConversationID,
+			PeerID:            req.FromPeerID,
+			State:             ConversationStateActive,
+			LastTransportMode: TransportModeDirect,
+			RetentionMinutes:  retentionMinutes,
+			CreatedAt:         existingConv.CreatedAt,
+			UpdatedAt:         time.Now(),
+		}, sess)
+		if err != nil {
+			return Conversation{}, err
+		}
+		existingConv = updatedConv
 		if err := s.store.UpdateRequestState(requestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
 			return Conversation{}, err
 		}
 		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
-		if retentionMinutes != existingConv.RetentionMinutes {
-			if updatedConv, err := s.store.UpdateConversationRetention(existingConv.ConversationID, retentionMinutes); err == nil {
-				existingConv = updatedConv
-			}
-		}
+		// retentionMinutes already applied in CreateConversation.
 		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
 			wire := SessionAccept{
 				Type:             MessageTypeSessionAccept,
@@ -829,6 +1215,9 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 				if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
 					log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
 				}
+			} else {
+				// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
+				_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
 			}
 		} else {
 			// Can't connect now: schedule accept retry.
@@ -891,6 +1280,9 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
 			log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
 		}
+	} else {
+		// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
+		_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
 	}
 	return conv, nil
 }
@@ -1188,31 +1580,7 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if err := remarshal(env, &req); err != nil {
 			return
 		}
-		if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
-			return
-		}
-		avatarName := NormalizeAvatarFileName(req.AvatarName)
-		stored := Request{
-			RequestID:         req.RequestID,
-			FromPeerID:        req.FromPeerID,
-			ToPeerID:          req.ToPeerID,
-			State:             RequestStatePending,
-			IntroText:         req.IntroText,
-			Nickname:          req.Nickname,
-			Bio:               req.Bio,
-			Avatar:            avatarName,
-			RetentionMinutes:  req.RetentionMinutes,
-			RemoteChatKexPub:  req.ChatKexPub,
-			LastTransportMode: TransportModeDirect,
-			CreatedAt:         time.UnixMilli(req.SentAtUnix),
-			UpdatedAt:         time.Now(),
-		}
-		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
-		if avatarName != "" {
-			_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
-			s.requestAvatarFetch(req.FromPeerID, avatarName)
-		}
-		if err := s.store.UpsertIncomingRequest(stored); err != nil {
+		if err := s.handleIncomingSessionRequestEnvelope(req, TransportModeDirect, true); err != nil {
 			log.Printf("[chat] save request failed: %v", err)
 		}
 	case MessageTypeSessionAccept:
@@ -1220,72 +1588,25 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if err := remarshal(env, &accept); err != nil {
 			return
 		}
-		avatarName := NormalizeAvatarFileName(accept.AvatarName)
-		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
-			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
-			if avatarName != "" {
-				_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
-				s.requestAvatarFetch(accept.FromPeerID, avatarName)
-			}
-			targetRetention := accept.RetentionMinutes
-			if existingConv.RetentionMinutes > targetRetention {
-				targetRetention = existingConv.RetentionMinutes
-			}
-			if targetRetention != existingConv.RetentionMinutes {
-				if updatedConv, err := s.store.UpdateConversationRetention(existingConv.ConversationID, targetRetention); err == nil {
-					existingConv = updatedConv
-				}
-			}
-			if avatarName != "" {
-				_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
-			}
-			_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID)
-			_ = s.store.DeleteFriendRequestJob(accept.RequestID)
-			return
-		} else if err != sql.ErrNoRows {
-			log.Printf("[chat] lookup existing accepted conversation failed: %v", err)
-			return
+		if err := s.handleIncomingSessionAcceptEnvelope(accept, true, true); err != nil {
+			log.Printf("[chat] handle session accept failed request=%s peer=%s err=%v", accept.RequestID, accept.FromPeerID, err)
 		}
-		_, priv, err := s.store.GetProfile(s.localPeer)
-		if err != nil {
-			return
-		}
-		sess, err := deriveSessionState(accept.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
-		if err != nil {
-			return
-		}
-		conv := Conversation{
-			ConversationID:    accept.ConversationID,
-			PeerID:            accept.FromPeerID,
-			State:             ConversationStateActive,
-			LastTransportMode: TransportModeDirect,
-			CreatedAt:         time.Now(),
-			UpdatedAt:         time.Now(),
-		}
-		if _, err := s.store.CreateConversation(conv, sess); err != nil {
-			log.Printf("[chat] create accepted conversation failed: %v", err)
-			return
-		}
-		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
-		if avatarName != "" {
-			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
-			_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
-			s.requestAvatarFetch(accept.FromPeerID, avatarName)
-		}
-		if accept.RetentionMinutes > 0 {
-			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
-				log.Printf("[chat] apply accepted retention failed: %v", err)
-			}
-		}
-		_ = s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID)
-		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
 	case MessageTypeSessionReject:
 		var reject SessionReject
 		if err := remarshal(env, &reject); err != nil {
 			return
 		}
-		_ = s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, "")
-		_ = s.store.DeleteFriendRequestJob(reject.RequestID)
+		if err := s.handleIncomingSessionRejectEnvelope(reject, true); err != nil {
+			log.Printf("[chat] handle session reject failed request=%s peer=%s err=%v", reject.RequestID, reject.FromPeerID, err)
+		}
+	case MessageTypeSessionAcceptAck:
+		var ack SessionAcceptAck
+		if err := remarshal(env, &ack); err != nil {
+			return
+		}
+		if err := s.handleIncomingSessionAcceptAckEnvelope(ack); err != nil {
+			log.Printf("[chat] handle session accept ack failed request=%s err=%v", ack.RequestID, err)
+		}
 	case MessageTypeProfileSync:
 		var sync ProfileSync
 		if err := remarshal(env, &sync); err != nil {
@@ -1313,6 +1634,210 @@ func (s *Service) serveRequestStream(str network.Stream) {
 			log.Printf("[chat] handle avatar response failed peer=%s avatar=%s err=%v", resp.FromPeerID, resp.AvatarName, err)
 		}
 	}
+}
+
+func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, transportMode string, publishEvent bool) error {
+	if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
+		return nil
+	}
+	avatarName := NormalizeAvatarFileName(req.AvatarName)
+	stored := Request{
+		RequestID:         req.RequestID,
+		FromPeerID:        req.FromPeerID,
+		ToPeerID:          req.ToPeerID,
+		State:             RequestStatePending,
+		IntroText:         req.IntroText,
+		Nickname:          req.Nickname,
+		Bio:               req.Bio,
+		Avatar:            avatarName,
+		RetentionMinutes:  req.RetentionMinutes,
+		RemoteChatKexPub:  req.ChatKexPub,
+		LastTransportMode: transportMode,
+		CreatedAt:         time.UnixMilli(req.SentAtUnix),
+		UpdatedAt:         time.Now(),
+	}
+	_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
+	if avatarName != "" {
+		_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
+		s.requestAvatarFetch(req.FromPeerID, avatarName)
+	}
+	if err := s.store.UpsertIncomingRequest(stored); err != nil {
+		return err
+	}
+	if publishEvent {
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStatePending,
+			stored.RequestID,
+			stored.FromPeerID,
+			stored.ToPeerID,
+			"",
+		))
+	}
+	return nil
+}
+
+func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publishEvent, sendAck bool) error {
+	avatarName := NormalizeAvatarFileName(accept.AvatarName)
+	if strings.TrimSpace(accept.ChatKexPub) != "" {
+		_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
+	}
+	if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
+		if accept.ConversationID != "" && existingConv.ConversationID != accept.ConversationID {
+			oldConversationID := existingConv.ConversationID
+			if err := s.store.MigrateConversationID(oldConversationID, accept.ConversationID); err != nil {
+				return err
+			}
+			migratedConv, err := s.store.GetConversation(accept.ConversationID)
+			if err != nil {
+				return err
+			}
+			existingConv = migratedConv
+			log.Printf("[chat] aligned accepted direct conversation id peer=%s from=%s to=%s", accept.FromPeerID, oldConversationID, accept.ConversationID)
+		}
+		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+		if avatarName != "" {
+			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
+			_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
+			s.requestAvatarFetch(accept.FromPeerID, avatarName)
+		}
+		targetRetention := accept.RetentionMinutes
+		if existingConv.RetentionMinutes > targetRetention {
+			targetRetention = existingConv.RetentionMinutes
+		}
+		// 会话行已存在时也要恢复 active 状态并补建 session_states，
+		// 否则会出现“好友已接受但仍无法发消息”的半成功状态。
+		_, priv, err := s.store.GetProfile(s.localPeer)
+		if err != nil {
+			return err
+		}
+		sess, err := deriveSessionState(existingConv.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
+		if err != nil {
+			return err
+		}
+		existingConv, err = s.store.CreateConversation(Conversation{
+			ConversationID:    existingConv.ConversationID,
+			PeerID:            accept.FromPeerID,
+			State:             ConversationStateActive,
+			LastTransportMode: TransportModeDirect,
+			RetentionMinutes:  targetRetention,
+			CreatedAt:         existingConv.CreatedAt,
+			UpdatedAt:         time.Now(),
+		}, sess)
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
+			return err
+		}
+		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+		if publishEvent {
+			s.publishChatEvent(newFriendRequestEvent(
+				RequestStateAccepted,
+				accept.RequestID,
+				accept.FromPeerID,
+				accept.ToPeerID,
+				existingConv.ConversationID,
+			))
+		}
+		if sendAck {
+			_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
+				Type:           MessageTypeSessionAcceptAck,
+				RequestID:      accept.RequestID,
+				ConversationID: existingConv.ConversationID,
+				FromPeerID:     s.localPeer,
+				ToPeerID:       accept.FromPeerID,
+				SentAtUnix:     time.Now().UTC().UnixMilli(),
+			})
+		}
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	_, priv, err := s.store.GetProfile(s.localPeer)
+	if err != nil {
+		return err
+	}
+	sess, err := deriveSessionState(accept.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
+	if err != nil {
+		return err
+	}
+	conv := Conversation{
+		ConversationID:    accept.ConversationID,
+		PeerID:            accept.FromPeerID,
+		State:             ConversationStateActive,
+		LastTransportMode: TransportModeDirect,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	if _, err := s.store.CreateConversation(conv, sess); err != nil {
+		return err
+	}
+	_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
+	if avatarName != "" {
+		_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
+		_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
+		s.requestAvatarFetch(accept.FromPeerID, avatarName)
+	}
+	if accept.RetentionMinutes > 0 {
+		if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
+			return err
+		}
+	}
+	if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID); err != nil {
+		return err
+	}
+	_ = s.store.DeleteFriendRequestJob(accept.RequestID)
+	if publishEvent {
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStateAccepted,
+			accept.RequestID,
+			accept.FromPeerID,
+			accept.ToPeerID,
+			accept.ConversationID,
+		))
+	}
+	if sendAck {
+		_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
+			Type:           MessageTypeSessionAcceptAck,
+			RequestID:      accept.RequestID,
+			ConversationID: accept.ConversationID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       accept.FromPeerID,
+			SentAtUnix:     time.Now().UTC().UnixMilli(),
+		})
+	}
+	return nil
+}
+
+func (s *Service) handleIncomingSessionRejectEnvelope(reject SessionReject, publishEvent bool) error {
+	if err := s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, ""); err != nil {
+		return err
+	}
+	_ = s.store.DeleteFriendRequestJob(reject.RequestID)
+	convID := deriveConversationID(s.localPeer, reject.FromPeerID, reject.RequestID)
+	if err := s.store.UpdateConversationState(convID, ConversationStateNoFriend); err != nil {
+		log.Printf("[chat] update conversation state failed request=%s conversation=%s err=%v", reject.RequestID, convID, err)
+	}
+	if publishEvent {
+		s.publishChatEvent(newFriendRequestEvent(
+			RequestStateRejected,
+			reject.RequestID,
+			reject.FromPeerID,
+			reject.ToPeerID,
+			convID,
+		))
+	}
+	return nil
+}
+
+func (s *Service) handleIncomingSessionAcceptAckEnvelope(ack SessionAcceptAck) error {
+	if ack.ToPeerID != s.localPeer {
+		return nil
+	}
+	if err := s.store.DeleteFriendRequestJob(ack.RequestID); err != nil {
+		log.Printf("[chat] delete friend request job on accept ack failed request=%s err=%v", ack.RequestID, err)
+	}
+	return nil
 }
 
 func (s *Service) serveMessageStream(str network.Stream) {
@@ -1606,7 +2131,7 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 
 func protocolForEnvelope(v any) coreprotocol.ID {
 	switch v.(type) {
-	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, ProfileSync, *ProfileSync, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
+	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, SessionAcceptAck, *SessionAcceptAck, ProfileSync, *ProfileSync, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
 		return p2p.ProtocolChatRequest
 	case ChatText, *ChatText:
 		return p2p.ProtocolChatMsg
@@ -1677,41 +2202,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &req); err != nil {
 			return err
 		}
-		if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
-			return nil
-		}
-		avatarName := NormalizeAvatarFileName(req.AvatarName)
-		stored := Request{
-			RequestID:         req.RequestID,
-			FromPeerID:        req.FromPeerID,
-			ToPeerID:          req.ToPeerID,
-			State:             RequestStatePending,
-			IntroText:         req.IntroText,
-			Nickname:          req.Nickname,
-			Bio:               req.Bio,
-			Avatar:            avatarName,
-			RemoteChatKexPub:  req.ChatKexPub,
-			LastTransportMode: "relay",
-			CreatedAt:         time.UnixMilli(req.SentAtUnix),
-			UpdatedAt:         time.Now(),
-		}
-		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
-		if avatarName != "" {
-			_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
-			s.requestAvatarFetch(req.FromPeerID, avatarName)
-		}
-		if err := s.store.UpsertIncomingRequest(stored); err != nil {
-			return err
-		}
-		// Notify websocket clients that a new friend request is pending.
-		s.publishChatEvent(newFriendRequestEvent(
-			RequestStatePending,
-			stored.RequestID,
-			stored.FromPeerID,
-			stored.ToPeerID,
-			"",
-		))
-		return nil
+		return s.handleIncomingSessionRequestEnvelope(req, "relay", true)
 	case MessageTypeChatSyncRequest:
 		var req ChatSyncRequest
 		if err := remarshal(env, &req); err != nil {
@@ -1734,102 +2225,19 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &accept); err != nil {
 			return err
 		}
-		avatarName := NormalizeAvatarFileName(accept.AvatarName)
-		if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
-			_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
-			if avatarName != "" {
-				_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
-				_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
-				s.requestAvatarFetch(accept.FromPeerID, avatarName)
-			}
-			targetRetention := accept.RetentionMinutes
-			if existingConv.RetentionMinutes > targetRetention {
-				targetRetention = existingConv.RetentionMinutes
-			}
-			if targetRetention != existingConv.RetentionMinutes {
-				var err error
-				existingConv, err = s.store.UpdateConversationRetention(existingConv.ConversationID, targetRetention)
-				if err != nil {
-					return err
-				}
-			}
-			if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
-				return err
-			}
-			_ = s.store.DeleteFriendRequestJob(accept.RequestID)
-			// Notify websocket clients: friend request accepted -> conversation available.
-			s.publishChatEvent(newFriendRequestEvent(
-				RequestStateAccepted,
-				accept.RequestID,
-				accept.FromPeerID,
-				accept.ToPeerID,
-				existingConv.ConversationID,
-			))
-			return nil
-		} else if err != sql.ErrNoRows {
-			return err
-		}
-		_, priv, err := s.store.GetProfile(s.localPeer)
-		if err != nil {
-			return err
-		}
-		sess, err := deriveSessionState(accept.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
-		if err != nil {
-			return err
-		}
-		conv := Conversation{
-			ConversationID:    accept.ConversationID,
-			PeerID:            accept.FromPeerID,
-			State:             ConversationStateActive,
-			LastTransportMode: "relay",
-			CreatedAt:         time.Now(),
-			UpdatedAt:         time.Now(),
-		}
-		if _, err := s.store.CreateConversation(conv, sess); err != nil {
-			return err
-		}
-		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
-		if avatarName != "" {
-			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
-			_ = s.store.UpdateRequestAvatar(accept.RequestID, avatarName)
-			s.requestAvatarFetch(accept.FromPeerID, avatarName)
-		}
-		if accept.RetentionMinutes > 0 {
-			if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
-				return err
-			}
-		}
-		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID); err != nil {
-			return err
-		}
-		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
-		// Notify websocket clients: friend request accepted -> conversation available.
-		s.publishChatEvent(newFriendRequestEvent(
-			RequestStateAccepted,
-			accept.RequestID,
-			accept.FromPeerID,
-			accept.ToPeerID,
-			accept.ConversationID,
-		))
-		return nil
+		return s.handleIncomingSessionAcceptEnvelope(accept, true, true)
 	case MessageTypeSessionReject:
 		var reject SessionReject
 		if err := remarshal(env, &reject); err != nil {
 			return err
 		}
-		if err := s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, ""); err != nil {
+		return s.handleIncomingSessionRejectEnvelope(reject, true)
+	case MessageTypeSessionAcceptAck:
+		var ack SessionAcceptAck
+		if err := remarshal(env, &ack); err != nil {
 			return err
 		}
-		_ = s.store.DeleteFriendRequestJob(reject.RequestID)
-		// Notify websocket clients: friend request rejected.
-		s.publishChatEvent(newFriendRequestEvent(
-			RequestStateRejected,
-			reject.RequestID,
-			reject.FromPeerID,
-			reject.ToPeerID,
-			"",
-		))
-		return nil
+		return s.handleIncomingSessionAcceptAckEnvelope(ack)
 	case MessageTypeProfileSync:
 		var sync ProfileSync
 		if err := remarshal(env, &sync); err != nil {
@@ -1877,22 +2285,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &update); err != nil {
 			return err
 		}
-		conv, err := s.store.UpdateConversationRetention(update.ConversationID, update.RetentionMinutes)
-		if err != nil {
-			return err
-		}
-		if err := s.store.UpdateConversationRetentionSync(update.ConversationID, "synced", time.Now()); err != nil {
-			return err
-		}
-		ack := RetentionAck{
-			Type:             MessageTypeRetentionAck,
-			ConversationID:   update.ConversationID,
-			FromPeerID:       s.localPeer,
-			ToPeerID:         update.FromPeerID,
-			RetentionMinutes: conv.RetentionMinutes,
-			AckedAtUnix:      time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingRetentionUpdate(update, "relay")
 	case MessageTypeRetentionAck:
 		var ack RetentionAck
 		if err := remarshal(env, &ack); err != nil {
@@ -1938,22 +2331,7 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 		if err := remarshal(env, &update); err != nil {
 			return err
 		}
-		conv, err := s.store.UpdateConversationRetention(update.ConversationID, update.RetentionMinutes)
-		if err != nil {
-			return err
-		}
-		if err := s.store.UpdateConversationRetentionSync(update.ConversationID, "synced", time.Now()); err != nil {
-			return err
-		}
-		ack := RetentionAck{
-			Type:             MessageTypeRetentionAck,
-			ConversationID:   update.ConversationID,
-			FromPeerID:       s.localPeer,
-			ToPeerID:         update.FromPeerID,
-			RetentionMinutes: conv.RetentionMinutes,
-			AckedAtUnix:      time.Now().UnixMilli(),
-		}
-		return s.sendEnvelope(conv.PeerID, ack)
+		return s.handleIncomingRetentionUpdate(update, TransportModeDirect)
 	case MessageTypeRetentionAck:
 		var ack RetentionAck
 		if err := remarshal(env, &ack); err != nil {
@@ -1993,30 +2371,15 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
-	conv, err := s.store.GetConversation(msg.ConversationID)
-	if err != nil {
-		// 如果本地尚未落库 conversation/session，而我们先收到 chat_text，
-		// 则尝试从 accepted 的 friend request 中恢复 session/counter 相关状态。
-		if errors.Is(err, sql.ErrNoRows) {
-			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
-				conv, err = s.store.GetConversation(msg.ConversationID)
-			}
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	sess, err := s.store.GetSessionState(msg.ConversationID)
+	conv, sess, _, err := s.loadIncomingDirectState(msg.ConversationID, msg.FromPeerID, transportMode)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
-				sess, err = s.store.GetSessionState(msg.ConversationID)
+			// 对方尚未建立好友关系，或者本地仍无法恢复会话状态：直接拒绝发送方。
+			if s.maybeSendSessionRejectForConversation(msg.ConversationID, msg.FromPeerID) {
+				return nil
 			}
 		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
 	if err != nil || duplicate {
@@ -2068,66 +2431,48 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 
-func (s *Service) recoverConversationAndSessionFromRequest(conversationID, fromPeerID, transportMode string) error {
-	if s == nil || s.store == nil {
-		return errors.New("chat service not initialized")
+// maybeSendSessionRejectForConversation tries to detect "no friend relationship".
+// If the conversation_id points to a friend request that is not accepted (or missing),
+// it sends a SessionReject back to the sender so the sender side can mark the conversation.
+func (s *Service) maybeSendSessionRejectForConversation(conversationID, fromPeerID string) bool {
+	if s == nil || s.store == nil || conversationID == "" || fromPeerID == "" {
+		return false
 	}
 
-	// conversationID = sort(a,b) + ":" + requestID (requestID is a UUID, no extra ':')
+	// conversationID = sort(a,b) + ":" + requestID (requestID is UUID, no extra ':')
 	lastColon := strings.LastIndex(conversationID, ":")
 	if lastColon <= 0 || lastColon >= len(conversationID)-1 {
-		return errors.New("invalid conversation_id format")
+		return false
 	}
 	requestID := conversationID[lastColon+1:]
 	if _, err := uuid.Parse(requestID); err != nil {
-		return errors.New("invalid request_id extracted from conversation_id: " + err.Error())
+		return false
 	}
 
 	req, err := s.store.GetRequest(requestID)
-	if err != nil {
-		return err
-	}
-	if req.ToPeerID != s.localPeer || req.FromPeerID != fromPeerID {
-		return fmt.Errorf("request mismatch: req.from=%s req.to=%s local=%s got_from=%s",
-			req.FromPeerID, req.ToPeerID, s.localPeer, fromPeerID)
-	}
-	if req.State != RequestStateAccepted {
-		return fmt.Errorf("request is not accepted: state=%s", req.State)
+	if err == nil {
+		// If already accepted for this sender/receiver pair, don't reject.
+		if req.ToPeerID == s.localPeer && req.FromPeerID == fromPeerID && req.State == RequestStateAccepted {
+			return false
+		}
 	}
 
-	profile, priv, err := s.store.GetProfile(s.localPeer)
-	if err != nil {
-		return err
-	}
-	if priv == nil {
-		return errors.New("local private key missing")
-	}
-
-	sess, err := deriveSessionState(conversationID, s.localPeer, fromPeerID, priv, req.RemoteChatKexPub)
-	if err != nil {
-		return err
+	// Best-effort: conversation_id may embed an old request_id (because we keep one
+	// conversation per peer_id). If there is any accepted request between the pair,
+	// don't reject (avoid endless rejections after re-adding friends).
+	if hasAccepted, _ := s.store.HasAcceptedRequest(fromPeerID, s.localPeer); hasAccepted {
+		return false
 	}
 
-	conv := Conversation{
-		ConversationID:    conversationID,
-		PeerID:            fromPeerID,
-		State:             ConversationStateActive,
-		LastTransportMode: transportMode,
-		// session/counter will be recovered from subsequent messages/sync.
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-	if _, err := s.store.CreateConversation(conv, sess); err != nil {
-		return err
-	}
-
-	// Best-effort: make sure request references conversation_id.
-	_ = s.store.UpdateRequestState(requestID, RequestStateAccepted, conversationID)
-	_ = s.store.DeleteFriendRequestJob(requestID)
-
-	log.Printf("[chat] recovered conversation from request request=%s peer=%s conversation=%s", requestID, fromPeerID, conversationID)
-	_ = profile // keep same lookup side-effect pattern; profile isn't needed beyond priv.
-	return nil
+	// If no accepted request exists => reject.
+	_ = s.sendEnvelope(fromPeerID, SessionReject{
+		Type:       MessageTypeSessionReject,
+		RequestID:  requestID,
+		FromPeerID: s.localPeer,
+		ToPeerID:   fromPeerID,
+		SentAtUnix: time.Now().UTC().UnixMilli(),
+	})
+	return true
 }
 
 func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) error {
@@ -2160,28 +2505,15 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
-	conv, err := s.store.GetConversation(msg.ConversationID)
+	conv, sess, _, err := s.loadIncomingDirectState(msg.ConversationID, msg.FromPeerID, transportMode)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
-				conv, err = s.store.GetConversation(msg.ConversationID)
+			// 对方尚未建立好友关系，或者本地仍无法恢复会话状态：直接拒绝发送方。
+			if s.maybeSendSessionRejectForConversation(msg.ConversationID, msg.FromPeerID) {
+				return nil
 			}
 		}
-		if err != nil {
-			return err
-		}
-	}
-
-	sess, err := s.store.GetSessionState(msg.ConversationID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			if recErr := s.recoverConversationAndSessionFromRequest(msg.ConversationID, msg.FromPeerID, transportMode); recErr == nil {
-				sess, err = s.store.GetSessionState(msg.ConversationID)
-			}
-		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
 	if err != nil || duplicate {
@@ -2414,6 +2746,14 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 	}
 	conv, err := s.store.GetConversation(req.ConversationID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Best-effort: return empty response instead of failing relay/direct processing.
+			return ChatSyncResponse{
+				Type:              MessageTypeChatSyncResponse,
+				ConversationID:    req.ConversationID,
+				RemoteSendCounter: 0,
+			}, nil
+		}
 		return ChatSyncResponse{}, err
 	}
 	if conv.PeerID != remotePeerID || req.ToPeerID != s.localPeer {
@@ -2551,6 +2891,28 @@ func (s *Service) recoverMissingOutboxJobs() error {
 	return nil
 }
 
+func (s *Service) runOutboxRetryLoop() {
+	ticker := time.NewTicker(outboxRetryTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			items, err := s.store.ListOutboxJobsForRetry(now.UTC(), outboxRetryBatchSize)
+			if err != nil {
+				log.Printf("[chat] outbox retry list failed err=%v", err)
+				continue
+			}
+			for _, item := range items {
+				if err := s.retryOutboxJob(item); err != nil {
+					log.Printf("[chat] outbox retry failed job=%s msg=%s peer=%s err=%v", item.JobID, item.MsgID, item.PeerID, err)
+				}
+			}
+		}
+	}
+}
+
 func (s *Service) runFriendRequestRetryLoop() {
 	ticker := time.NewTicker(friendRequestRetryTickInterval)
 	defer ticker.Stop()
@@ -2664,12 +3026,18 @@ func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Ti
 			SentAtUnix:       now.UnixMilli(),
 		}
 		if err := s.sendEnvelope(item.PeerID, wire); err == nil {
-			return s.store.DeleteFriendRequestJob(item.RequestID)
+			// Ack may still be in-flight; keep retry job alive until we receive SessionAcceptAck.
+			if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
+				return fmt.Errorf("schedule retry (accept wait) failed: schedule=%v", scheduleErr)
+			}
+			return nil
+		} else {
+			// Transport send failed: also schedule retry (still waiting for ack).
+			if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
+				return fmt.Errorf("schedule retry (accept) failed after send error: send=%v schedule=%v", err, scheduleErr)
+			}
+			return err
 		}
-		if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
-			return fmt.Errorf("schedule retry (accept) failed after send error: send=%v schedule=%v", err, scheduleErr)
-		}
-		return err
 	}
 
 	// Should not reach here, but be safe.

@@ -6,6 +6,7 @@ const (
 	MessageTypeSessionRequest    = "session_request"
 	MessageTypeSessionAccept     = "session_accept"
 	MessageTypeSessionReject     = "session_reject"
+	MessageTypeSessionAcceptAck  = "session_accept_ack"
 	MessageTypeProfileSync       = "profile_sync"
 	MessageTypeAvatarRequest     = "avatar_request"
 	MessageTypeAvatarResponse    = "avatar_response"
@@ -30,6 +31,9 @@ const (
 
 const (
 	ConversationStateActive = "active"
+	// ConversationStateNoFriend means the friend relationship isn't established
+	// (e.g. we got a SessionReject after sending messages).
+	ConversationStateNoFriend = "no_friend"
 )
 
 const (
@@ -148,6 +152,17 @@ type SessionAccept struct {
 	RetentionMinutes int    `json:"retention_minutes"`
 	ChatKexPub       string `json:"chat_kex_pub"`
 	SentAtUnix       int64  `json:"sent_at_unix"`
+}
+
+// SessionAcceptAck is sent back by the receiver of SessionAccept,
+// so the sender can confirm that the conversation/session is established.
+type SessionAcceptAck struct {
+	Type           string `json:"type"`
+	RequestID      string `json:"request_id"`
+	ConversationID string `json:"conversation_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	SentAtUnix     int64  `json:"sent_at_unix"`
 }
 
 type SessionReject struct {

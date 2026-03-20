@@ -66,8 +66,8 @@ type outboxRecoveryItem struct {
 }
 
 type friendRequestRetryItem struct {
-	RequestID string
-	PeerID    string
+	RequestID  string
+	PeerID     string
 	RetryCount int
 }
 
@@ -473,6 +473,24 @@ func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 		p.CreatedAt = t
 	}
 	return p, priv, nil
+}
+
+// HasAcceptedRequest reports whether there exists at least one accepted
+// friend request from `fromPeerID` to `toPeerID`.
+// This is used as a best-effort guard against conversation_id embedding an old request_id.
+func (s *Store) HasAcceptedRequest(fromPeerID, toPeerID string) (bool, error) {
+	var existsInt int
+	err := s.db.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM requests
+			WHERE from_peer_id=? AND to_peer_id=? AND state=?
+			LIMIT 1
+		)`,
+		fromPeerID,
+		toPeerID,
+		RequestStateAccepted,
+	).Scan(&existsInt)
+	return existsInt != 0, err
 }
 
 func (s *Store) UpdateProfile(localPeerID, nickname, bio string) (Profile, error) {
@@ -1104,6 +1122,12 @@ func (s *Store) UpdateRequestAvatar(requestID, avatar string) error {
 	return err
 }
 
+func (s *Store) UpdateRequestRemoteChatKexPub(requestID, remoteChatKexPub string) error {
+	_, err := s.db.Exec(`UPDATE requests SET remote_chat_kex_pub=?, updated_at=? WHERE request_id=?`,
+		strings.TrimSpace(remoteChatKexPub), time.Now().UTC().Format(time.RFC3339Nano), requestID)
+	return err
+}
+
 func (s *Store) UpdateRequestsAvatar(peerID, avatar string) error {
 	_, err := s.db.Exec(`UPDATE requests SET avatar=?, updated_at=? WHERE from_peer_id=? OR to_peer_id=?`,
 		strings.TrimSpace(avatar), time.Now().UTC().Format(time.RFC3339Nano), peerID, peerID)
@@ -1230,6 +1254,82 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) MigrateConversationID(oldConversationID, newConversationID string) error {
+	oldConversationID = strings.TrimSpace(oldConversationID)
+	newConversationID = strings.TrimSpace(newConversationID)
+	if oldConversationID == "" || newConversationID == "" || oldConversationID == newConversationID {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var peerID, state, lastMessageAt, lastTransportMode string
+	var unreadCount, retentionMinutes int
+	var retentionSyncState, retentionSyncedAt, createdAt string
+	if err := tx.QueryRow(`
+		SELECT peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at
+		FROM conversations
+		WHERE conversation_id=?
+	`, oldConversationID).Scan(
+		&peerID,
+		&state,
+		&lastMessageAt,
+		&lastTransportMode,
+		&unreadCount,
+		&retentionMinutes,
+		&retentionSyncState,
+		&retentionSyncedAt,
+		&createdAt,
+	); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`
+		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	`, newConversationID, peerID, state, lastMessageAt, lastTransportMode, unreadCount, retentionMinutes, retentionSyncState, retentionSyncedAt, createdAt, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT OR REPLACE INTO session_states(conversation_id,peer_id,send_key,recv_key,send_counter,recv_counter)
+		SELECT ?, peer_id, send_key, recv_key, send_counter, recv_counter
+		FROM session_states
+		WHERE conversation_id=?
+	`, newConversationID, oldConversationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE messages SET conversation_id=? WHERE conversation_id=?`, newConversationID, oldConversationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE message_revoke_jobs SET conversation_id=? WHERE conversation_id=?`, newConversationID, oldConversationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE requests SET conversation_id=?, updated_at=? WHERE conversation_id=?`, newConversationID, now, oldConversationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM session_states WHERE conversation_id=?`, oldConversationID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM conversations WHERE conversation_id=?`, oldConversationID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
 }
 
 func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
@@ -1744,6 +1844,21 @@ func (s *Store) UpdateConversationRetention(conversationID string, minutes int) 
 		}
 	}
 	return s.GetConversation(conversationID)
+}
+
+// UpdateConversationState flips conversation state (e.g. no_friend).
+// It does not delete messages; it only updates the conversations.state column.
+func (s *Store) UpdateConversationState(conversationID string, state string) error {
+	if conversationID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE conversations SET state=?, updated_at=? WHERE conversation_id=?`,
+		state,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		conversationID,
+	)
+	return err
 }
 
 func (s *Store) UpdateConversationRetentionSync(conversationID, syncState string, syncedAt time.Time) error {
