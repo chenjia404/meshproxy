@@ -479,6 +479,8 @@ func (s *Service) handleIncomingRetentionUpdate(update RetentionUpdate, transpor
 	if err := s.store.UpdateConversationRetentionSync(conv.ConversationID, "synced", time.Now()); err != nil {
 		return err
 	}
+	// Push websocket event so UI can refresh (deleted messages may shrink list).
+	s.publishChatEvent(newMessageEvent("direct", conv.ConversationID, "", MessageTypeRetentionUpdate))
 	ack := RetentionAck{
 		Type:             MessageTypeRetentionAck,
 		ConversationID:   conv.ConversationID,
@@ -950,6 +952,9 @@ func (s *Service) UpdateConversationRetention(conversationID string, minutes int
 	if err := s.store.UpdateConversationRetentionSync(conversationID, "pending", time.Time{}); err != nil {
 		return Conversation{}, err
 	}
+	// Notify websocket clients so they can refresh message list (messages may be deleted).
+	s.publishChatEvent(newMessageEvent("direct", updated.ConversationID, "", MessageTypeRetentionUpdate))
+
 	return s.store.GetConversation(updated.ConversationID)
 }
 
