@@ -1006,10 +1006,30 @@ func (s *Service) SyncConversation(conversationID string) error {
 }
 
 func (s *Service) NetworkStatus() map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"local_peer_id":   s.localPeer,
 		"connected_peers": len(s.host.Network().Peers()),
 	}
+
+	// Provide which relay peers are currently connected so the console can display it.
+	if s.discovery != nil {
+		connectedRelays := make([]string, 0)
+		for _, relayDesc := range s.discovery.ListRelays() {
+			if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer {
+				continue
+			}
+			pid, err := peer.Decode(relayDesc.PeerID)
+			if err != nil {
+				continue
+			}
+			if s.host.Network().Connectedness(pid) == network.Connected {
+				connectedRelays = append(connectedRelays, relayDesc.PeerID)
+			}
+		}
+		out["connected_relays"] = connectedRelays
+	}
+
+	return out
 }
 
 func (s *Service) PeerStatus(peerID string) (map[string]any, error) {

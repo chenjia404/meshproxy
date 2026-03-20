@@ -530,10 +530,23 @@
       return '<div class="card"><h3>' + title + '</h3><table><thead><tr><th>Peer ID</th><th>版本</th><th>角色</th><th>国家/地区</th></tr></thead><tbody>' +
         list.map(function(n){ return '<tr><td><code>' + escapeHtml(n.peer_id) + '</code></td><td>' + escapeHtml(n.version || '-') + '</td><td>' + (n.exit && n.relay ? 'relay+exit' : n.exit ? 'exit' : 'relay') + '</td><td>' + escapeHtml(n.country || '-') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }
-    function renderRelaysExits(relays, exits) {
+    function renderRelaysExits(relays, exits, connectedRelays) {
       var r = Array.isArray(relays) ? relays : [];
       var e = Array.isArray(exits) ? exits : [];
-      return '<h1>Relay / Exit</h1>' + renderNodeTable(r, '已知 Relay') + renderNodeTable(e, '已知 Exit');
+      var cr = Array.isArray(connectedRelays) ? connectedRelays : [];
+      // 从“已连接 relays 的 peer_id 列表”反查完整节点信息，和已知 Relay/Exit 用同一张表格展示。
+      var knownByPid = {};
+      r.concat(e).forEach(function(n) {
+        if (n && n.peer_id) knownByPid[n.peer_id] = n;
+      });
+      var connectedDetails = cr.map(function(pid) {
+        var pidStr = pid || '';
+        return knownByPid[pidStr] || { peer_id: pidStr, version: '-', country: '-', exit: false, relay: true };
+      }).filter(function(n) { return n && n.peer_id; });
+      var crHtml = connectedDetails.length
+        ? renderNodeTable(connectedDetails, '已连接 Relay')
+        : '<div class="card"><h3>已连接 Relay</h3><p class="empty">暂无已连接的 relay</p></div>';
+      return '<h1>Relay / Exit</h1>' + crHtml + renderNodeTable(r, '已知 Relay') + renderNodeTable(e, '已知 Exit');
     }
     function renderCircuits(data) {
       var list = Array.isArray(data) ? data : [];
@@ -965,7 +978,19 @@
     }
     var pages = {
       status: function(){ return get('/api/v1/status').then(renderStatus); },
-      relays: function(){ return Promise.all([get('/api/v1/relays').catch(function(){ return []; }), get('/api/v1/exits').catch(function(){ return []; })]).then(function(r){ return renderRelaysExits(r[0], r[1]); }); },
+      relays: function(){
+        return Promise.all([
+          get('/api/v1/relays').catch(function(){ return []; }),
+          get('/api/v1/exits').catch(function(){ return []; }),
+          get('/api/v1/chat/network/status').catch(function(){ return {}; })
+        ]).then(function(r){
+          var relays = r[0] || [];
+          var exits = r[1] || [];
+          var st = r[2] || {};
+          var connected = Array.isArray(st.connected_relays) ? st.connected_relays : [];
+          return renderRelaysExits(relays, exits, connected);
+        });
+      },
       circuits: function(){ return get('/api/v1/circuits').then(renderCircuits); },
       streams: function(){ return get('/api/v1/streams').then(renderStreams); },
       'circuit-pool': function(){ return renderCircuitPoolConfig(); },
