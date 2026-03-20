@@ -60,6 +60,10 @@ func (c *ChatService) ListConversations() ([]Conversation, error) {
 	return c.inner.ListConversations()
 }
 
+func (c *ChatService) ClearConversationUnreadCount(conversationID string) (Conversation, error) {
+	return c.inner.ClearConversationUnreadCount(conversationID)
+}
+
 func (c *ChatService) DeleteConversationLocal(conversationID string) error {
 	return c.inner.DeleteConversationLocal(conversationID)
 }

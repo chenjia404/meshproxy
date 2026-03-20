@@ -89,6 +89,18 @@ func (s *Store) GetConversation(id string) (Conversation, error) {
 	return c, nil
 }
 
+// ClearConversationUnreadCount sets unread_count to 0 for the conversation.
+func (s *Store) ClearConversationUnreadCount(conversationID string) (Conversation, error) {
+	if _, err := s.GetConversation(conversationID); err != nil {
+		return Conversation{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.Exec(`UPDATE conversations SET unread_count=0, updated_at=? WHERE conversation_id=?`, now, conversationID); err != nil {
+		return Conversation{}, err
+	}
+	return s.GetConversation(conversationID)
+}
+
 func (s *Store) GetConversationByPeer(peerID string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string

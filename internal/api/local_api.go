@@ -253,6 +253,8 @@ type ChatProvider interface {
 	AcceptRequest(requestID string) (chat.Conversation, error)
 	RejectRequest(requestID string) error
 	ListConversations() ([]chat.Conversation, error)
+	// ClearConversationUnreadCount sets unread_count to 0 for a conversation (local UI state).
+	ClearConversationUnreadCount(conversationID string) (chat.Conversation, error)
 	// DeleteConversationLocal removes one direct chat and all local messages (no network).
 	DeleteConversationLocal(conversationID string) error
 	// DeleteContactLocal removes local conversations/messages with that peer and deletes the contact row + requests.
@@ -1327,6 +1329,18 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 			"conversation_id": conversationID,
 			"status":          "sync_requested",
 		})
+		return
+	case "read":
+		if len(parts) != 2 || r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		conv, err := a.opts.ChatService.ClearConversationUnreadCount(conversationID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, conv)
 		return
 	case "messages":
 		if len(parts) == 4 && parts[3] == "revoke" {

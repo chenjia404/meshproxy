@@ -6,8 +6,9 @@ import (
 )
 
 // AddInboundMessageAndAdvanceRecvCounter 在同一 SQLite 事务中：写入入站消息、更新会话时间戳、
-// 推进 session_states.recv_counter。提交成功后，上层再发 delivery_ack，避免「已回执但游标/库不一致」。
-func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext []byte, newRecvCounter uint64) error {
+// 推进 session_states.recv_counter。若 incrementUnread 为 true，同时将 conversations.unread_count 加 1（实时入站；
+// 历史同步回放应传 false）。提交成功后，上层再发 delivery_ack，避免「已回执但游标/库不一致」。
+func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext []byte, newRecvCounter uint64, incrementUnread bool) error {
 	deliveredAt := ""
 	if !msg.DeliveredAt.IsZero() {
 		deliveredAt = msg.DeliveredAt.UTC().Format(time.RFC3339Nano)
@@ -29,9 +30,16 @@ func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext [
 	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
-		createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
-		return err
+	if incrementUnread {
+		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=?, unread_count=unread_count+1 WHERE conversation_id=?`,
+			createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
+			createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+			return err
+		}
 	}
 	res, err := tx.Exec(`UPDATE session_states SET recv_counter=? WHERE conversation_id=?`, newRecvCounter, msg.ConversationID)
 	if err != nil {

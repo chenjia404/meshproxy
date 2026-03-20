@@ -570,6 +570,15 @@ func (s *Service) ListConversations() ([]Conversation, error) {
 	return s.store.ListConversations()
 }
 
+// ClearConversationUnreadCount resets the local unread counter for a direct conversation.
+func (s *Service) ClearConversationUnreadCount(conversationID string) (Conversation, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return Conversation{}, errors.New("conversation_id is empty")
+	}
+	return s.store.ClearConversationUnreadCount(conversationID)
+}
+
 func (s *Service) UpdateConversationRetention(conversationID string, minutes int) (Conversation, error) {
 	conv, err := s.store.GetConversation(conversationID)
 	if err != nil {
@@ -2121,13 +2130,13 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, "relay", "")
+		return s.handleIncomingChatText(msg, "relay", "", true)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatFile(msg, "relay", "")
+		return s.handleIncomingChatFile(msg, "relay", "", true)
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
@@ -2173,13 +2182,13 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, TransportModeDirect, streamPeerID)
+		return s.handleIncomingChatText(msg, TransportModeDirect, streamPeerID, true)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatFile(msg, TransportModeDirect, streamPeerID)
+		return s.handleIncomingChatFile(msg, TransportModeDirect, streamPeerID, true)
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
@@ -2243,7 +2252,7 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 	}
 }
 
-func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string) error {
+func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string, incrementUnread bool) error {
 	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
 		log.Printf("[chat] chat text ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
 		return nil
@@ -2297,7 +2306,7 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 	}
 	// 消息 + recv 游标在同一事务提交后，再发 delivery_ack（见 AddInboundMessageAndAdvanceRecvCounter）。
-	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, msg.Ciphertext, msg.Counter+1); err != nil {
+	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, msg.Ciphertext, msg.Counter+1, incrementUnread); err != nil {
 		return err
 	}
 	// Notify websocket clients that this conversation has a new inbound message (include body for UI).
@@ -2332,7 +2341,7 @@ func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) er
 	return s.applyRemoteGroupInviteEnvelope(payload.InviteEnvelope, false)
 }
 
-func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, streamPeerID string) error {
+func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, streamPeerID string, incrementUnread bool) error {
 	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
 		log.Printf("[chat] chat file ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
 		return nil
@@ -2375,7 +2384,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 		Counter:        msg.Counter,
 		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 	}
-	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, plain, msg.Counter+1); err != nil {
+	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, plain, msg.Counter+1, incrementUnread); err != nil {
 		return err
 	}
 	// Notify websocket clients (metadata + empty plaintext; file bytes via GET if needed).
@@ -2574,7 +2583,7 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			// 不在此处单独 UpdateRecvCounter：若先于 handleIncomingChatText 把游标跳到 msg.Counter，
 			// 随后 AddInboundMessageAndAdvanceRecvCounter 失败，会出现「recv 已前进但消息未落库」。
 			// 游标仅由入站处理在事务里与消息一并推进；若存在 counter 空洞，由 handleIncomingChatText 报 gap 并触发同步。
-			if err := s.handleIncomingChatText(msg, TransportModeDirect, ""); err != nil {
+			if err := s.handleIncomingChatText(msg, TransportModeDirect, "", false); err != nil {
 				return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 			}
 			expected = msg.Counter + 1
@@ -2582,7 +2591,7 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			continue
 		}
 		msg := resp.Files[fileIdx]
-		if err := s.handleIncomingChatFile(msg, TransportModeDirect, ""); err != nil {
+		if err := s.handleIncomingChatFile(msg, TransportModeDirect, "", false); err != nil {
 			return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 		}
 		expected = msg.Counter + 1

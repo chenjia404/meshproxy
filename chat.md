@@ -670,7 +670,8 @@ internal/chat/
 
 ### 14.3 会话与消息
 
-* `GET /api/v1/chat/conversations`
+* `GET /api/v1/chat/conversations` — 每個會話物件含 `unread_count`（本地未讀條數，即時入站遞增；歷史同步回放不遞增）
+* `POST /api/v1/chat/conversations/{id}/read` — 將該會話 `unread_count` 清零並回傳更新後的會話 JSON
 * `DELETE /api/v1/chat/conversations/{conversation_id}` — 僅刪除本地該會話與其中訊息（不刪 `peers` 聯絡人列；`conversation_id` 路徑需 URL 編碼）
 * `GET /api/v1/chat/conversations/{id}/messages`（無查詢參數時回傳訊息 JSON 陣列；帶 `limit` 和/或 `offset` 時回傳 `{ messages, total, limit, offset, has_more }`，`limit` 預設 100、範圍 1–500）
 * `POST /api/v1/chat/conversations/{id}/messages/text`
