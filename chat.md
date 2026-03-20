@@ -676,7 +676,12 @@ internal/chat/
 * `GET /api/v1/chat/conversations/{id}/messages`（無查詢參數時回傳訊息 JSON 陣列；帶 `limit` 和/或 `offset` 時回傳 `{ messages, total, limit, offset, has_more }`，`limit` 預設 100、範圍 1–500）
 * `POST /api/v1/chat/conversations/{id}/messages/text` — 私聊：先落庫並立即回傳訊息 JSON（`state` 初始為 `local_only`），再非同步發往對端；成功後變為 `sent_to_transport`（失敗則 `queued_for_retry` 並由 outbox 重試）
 * `POST /api/v1/chat/conversations/{id}/files`（multipart）— 與文字相同：先落庫即回傳，發送非阻塞
+* `POST /api/v1/chat/conversations/{id}/retention` — 自動刪除策略：先更新本地庫並立即回傳會話 JSON，再非同步向對端同步 `RetentionUpdate`（發送失敗僅記錄日誌，本地策略已生效）
 * `GET /api/v1/chat/ws`（WebSocket）— 即時推送聊天事件 JSON。除 `type: "message"` 外，當訊息狀態變更時會推送 **`type: "message_state"`**：私聊帶 `message_state`、`delivered_at_unix_millis`（對端送達回執後）；群聊帶 `message_state` 與 `delivery_summary`（成員送達彙總更新）。前端可依 `msg_id` 合併更新本地列表項。
+
+### 14.3.1 群組
+
+* `POST /api/v1/groups/{id}/retention` — 與私聊類似：先落庫並回傳 `Group`，再非同步向成員廣播群控事件（失敗走既有群事件重試）
 
 ### 14.4 网络与传输
 

@@ -584,17 +584,6 @@ func (s *Service) UpdateConversationRetention(conversationID string, minutes int
 	if err != nil {
 		return Conversation{}, err
 	}
-	update := RetentionUpdate{
-		Type:             MessageTypeRetentionUpdate,
-		ConversationID:   conversationID,
-		FromPeerID:       s.localPeer,
-		ToPeerID:         conv.PeerID,
-		RetentionMinutes: minutes,
-		UpdatedAtUnix:    time.Now().UnixMilli(),
-	}
-	if err := s.sendEnvelope(conv.PeerID, update); err != nil {
-		return Conversation{}, err
-	}
 	updated, err := s.store.UpdateConversationRetention(conversationID, minutes)
 	if err != nil {
 		return Conversation{}, err
@@ -604,6 +593,23 @@ func (s *Service) UpdateConversationRetention(conversationID string, minutes int
 	}
 	// Notify websocket clients so they can refresh message list (messages may be deleted).
 	s.publishChatEvent(newMessageEvent("direct", updated.ConversationID, "", MessageTypeRetentionUpdate))
+
+	peerID := conv.PeerID
+	cid := conversationID
+	mins := minutes
+	safe.Go("chat.retentionUpdateSend."+conversationID, func() {
+		update := RetentionUpdate{
+			Type:             MessageTypeRetentionUpdate,
+			ConversationID:   cid,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         peerID,
+			RetentionMinutes: mins,
+			UpdatedAtUnix:    time.Now().UnixMilli(),
+		}
+		if err := s.sendEnvelope(peerID, update); err != nil {
+			log.Printf("[chat] retention update send failed conversation=%s peer=%s: %v", cid, peerID, err)
+		}
+	})
 
 	return s.store.GetConversation(updated.ConversationID)
 }

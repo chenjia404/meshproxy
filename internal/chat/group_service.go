@@ -462,7 +462,12 @@ func (s *Service) UpdateGroupRetention(groupID string, minutes int) (Group, erro
 		return Group{}, err
 	}
 	members, _ := s.store.ListGroupMembers(groupID)
-	s.broadcastGroupEvent(groupID, event, peersFromMembers(members, s.localPeer)...)
+	peers := peersFromMembers(members, s.localPeer)
+	peerCopy := append([]string(nil), peers...)
+	eventCopy := event
+	safe.Go("chat.groupRetentionBroadcast."+groupID, func() {
+		s.broadcastGroupEvent(groupID, eventCopy, peerCopy...)
+	})
 	return updated, nil
 }
 
