@@ -458,7 +458,11 @@ func (s *Service) repairOrphanPendingSessionAccepts() error {
 			log.Printf("[chat] orphan accept repair: create conversation failed request=%s peer=%s err=%v", req.RequestID, peerID, err)
 			continue
 		}
-		_ = s.store.UpsertPeer(peerID, req.Nickname, req.Bio)
+		// requests.nickname/bio 對「我發出的」請求存的是本地 profile，不能寫入對方 peer 列。
+		// 僅在對方發起（收件人為本地）時，nickname/bio 才代表遠端。
+		if req.ToPeerID == s.localPeer {
+			_ = s.store.UpsertPeer(peerID, req.Nickname, req.Bio)
+		}
 		if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
 			log.Printf("[chat] orphan accept repair: update request state failed request=%s err=%v", req.RequestID, err)
 			continue

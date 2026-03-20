@@ -758,8 +758,21 @@ func (s *Store) ListContacts() ([]Contact, error) {
 				ORDER BY c2.updated_at DESC, c2.conversation_id DESC
 				LIMIT 1
 			)
+			AND (
+				EXISTS (
+					SELECT 1 FROM requests r
+					WHERE r.state = ?
+					  AND (
+						(r.from_peer_id = ? AND r.to_peer_id = p.peer_id)
+						OR (r.from_peer_id = p.peer_id AND r.to_peer_id = ?)
+					  )
+				)
+				OR EXISTS (
+					SELECT 1 FROM session_states ss WHERE ss.conversation_id = c.conversation_id
+				)
+			)
 		ORDER BY c.updated_at DESC, p.updated_at DESC
-	`, s.localPeerID, ConversationStateActive, ConversationStateActive)
+	`, s.localPeerID, ConversationStateActive, ConversationStateActive, RequestStateAccepted, s.localPeerID, s.localPeerID)
 	if err != nil {
 		return nil, err
 	}
