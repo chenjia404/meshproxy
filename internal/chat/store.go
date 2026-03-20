@@ -581,22 +581,24 @@ func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	if peerID == "" {
 		return nil
 	}
-	nickname = strings.TrimSpace(nickname)
-	if nickname == "" {
-		nickname = "peer-" + shortPeerID(peerID)
+	nicknameTrim := strings.TrimSpace(nickname)
+	bioTrim := strings.TrimSpace(bio)
+	// 新列：空暱稱用 peer-xxxx；已存在列：空暱稱表示「不覆寫」（避免 SendRequest / SessionAccept 等只更新時間卻把暱稱打回 peer-xxxx）。
+	insNick := nicknameTrim
+	if insNick == "" {
+		insNick = "peer-" + shortPeerID(peerID)
 	}
-	bio = strings.TrimSpace(bio)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
 		INSERT INTO peers(peer_id,nickname,bio,avatar,updated_at,last_seen_at)
 		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(peer_id) DO UPDATE SET
-			nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE peers.nickname END,
-			bio=CASE WHEN excluded.bio != '' THEN excluded.bio ELSE peers.bio END,
+			nickname=CASE WHEN ? != '' THEN excluded.nickname ELSE peers.nickname END,
+			bio=CASE WHEN ? != '' THEN excluded.bio ELSE peers.bio END,
 			avatar=CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE peers.avatar END,
 			last_seen_at=CASE WHEN excluded.last_seen_at != '' THEN excluded.last_seen_at ELSE peers.last_seen_at END,
 			updated_at=excluded.updated_at
-	`, peerID, nickname, bio, "", now, now)
+	`, peerID, insNick, bioTrim, "", now, now, nicknameTrim, bioTrim)
 	return err
 }
 

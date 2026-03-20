@@ -484,6 +484,10 @@ func (s *Service) handleProfileSync(sync ProfileSync) error {
 	if sync.FromPeerID == "" {
 		return nil
 	}
+	// 忽略偽造為本機 peer 的同步，避免寫入 peers 汙染本機顯示。
+	if sync.FromPeerID == s.localPeer {
+		return nil
+	}
 	if _, err := s.store.GetConversationByPeer(sync.FromPeerID); err != nil {
 		return nil
 	}
