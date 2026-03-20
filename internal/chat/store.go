@@ -479,7 +479,6 @@ func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 
 // HasAcceptedRequest reports whether there exists at least one accepted
 // friend request from `fromPeerID` to `toPeerID`.
-// This is used as a best-effort guard against conversation_id embedding an old request_id.
 func (s *Store) HasAcceptedRequest(fromPeerID, toPeerID string) (bool, error) {
 	var existsInt int
 	err := s.db.QueryRow(

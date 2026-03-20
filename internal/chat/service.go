@@ -194,15 +194,21 @@ func (s *Service) repairHistoricalDirectState() error {
 		scanned++
 
 		existingConv, hasConv := conversationsByPeer[peerID]
-		targetConvID := strings.TrimSpace(req.ConversationID)
-		if hasConv {
-			targetConvID = existingConv.ConversationID
-		}
-		if targetConvID == "" {
-			targetConvID = deriveStableConversationID(s.localPeer, peerID)
+		targetConvID := deriveStableConversationID(s.localPeer, peerID)
+		if hasConv && existingConv.ConversationID != targetConvID {
+			if err := s.store.MigrateConversationID(existingConv.ConversationID, targetConvID); err != nil {
+				return err
+			}
+			repairedConv, err := s.store.GetConversation(targetConvID)
+			if err != nil {
+				return err
+			}
+			existingConv = repairedConv
+			conversationsByPeer[peerID] = repairedConv
+			hasConv = true
 		}
 
-		if !hasConv && strings.TrimSpace(req.ConversationID) != targetConvID {
+		if strings.TrimSpace(req.ConversationID) != targetConvID {
 			if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
 				return err
 			}
@@ -455,7 +461,7 @@ func (s *Service) handleIncomingRetentionUpdate(update RetentionUpdate, transpor
 	conv, _, _, err := s.loadIncomingDirectState(update.ConversationID, update.FromPeerID, transportMode)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if s.maybeSendSessionRejectForConversation(update.ConversationID, update.FromPeerID) {
+			if s.maybeSendSessionRejectForConversation(update.FromPeerID) {
 				return nil
 			}
 		}
@@ -1165,17 +1171,25 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	avatarName := profile.Avatar
 	retentionMinutes := req.RetentionMinutes
 	if existingConv, err := s.store.GetConversationByPeer(req.FromPeerID); err == nil {
+		targetConvID := deriveStableConversationID(s.localPeer, req.FromPeerID)
 		if existingConv.RetentionMinutes > retentionMinutes {
 			retentionMinutes = existingConv.RetentionMinutes
 		}
-		// Keep the old conversation ID unchanged when a direct friendship already exists.
-		// This lets historical conversations remain stable while new pairs can opt in.
-		sess, err := deriveSessionState(existingConv.ConversationID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
+		if existingConv.ConversationID != targetConvID {
+			if err := s.store.MigrateConversationID(existingConv.ConversationID, targetConvID); err != nil {
+				return Conversation{}, err
+			}
+			existingConv, err = s.store.GetConversation(targetConvID)
+			if err != nil {
+				return Conversation{}, err
+			}
+		}
+		sess, err := deriveSessionState(targetConvID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
 		if err != nil {
 			return Conversation{}, err
 		}
 		updatedConv, err := s.store.CreateConversation(Conversation{
-			ConversationID:    existingConv.ConversationID,
+			ConversationID:    targetConvID,
 			PeerID:            req.FromPeerID,
 			State:             ConversationStateActive,
 			LastTransportMode: TransportModeDirect,
@@ -1196,7 +1210,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 			wire := SessionAccept{
 				Type:             MessageTypeSessionAccept,
 				RequestID:        req.RequestID,
-				ConversationID:   existingConv.ConversationID,
+				ConversationID:   targetConvID,
 				FromPeerID:       s.localPeer,
 				ToPeerID:         req.FromPeerID,
 				Bio:              profile.Bio,
@@ -1678,6 +1692,7 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
 	}
 	if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
+		targetConvID := deriveStableConversationID(s.localPeer, accept.FromPeerID)
 		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
@@ -1688,18 +1703,25 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		if existingConv.RetentionMinutes > targetRetention {
 			targetRetention = existingConv.RetentionMinutes
 		}
-		// 会话行已存在时也要恢复 active 状态并补建 session_states，
-		// 否则会出现“好友已接受但仍无法发消息”的半成功状态。
 		_, priv, err := s.store.GetProfile(s.localPeer)
 		if err != nil {
 			return err
 		}
-		sess, err := deriveSessionState(existingConv.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
+		if existingConv.ConversationID != targetConvID {
+			if err := s.store.MigrateConversationID(existingConv.ConversationID, targetConvID); err != nil {
+				return err
+			}
+			existingConv, err = s.store.GetConversation(targetConvID)
+			if err != nil {
+				return err
+			}
+		}
+		sess, err := deriveSessionState(targetConvID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
 		if err != nil {
 			return err
 		}
 		existingConv, err = s.store.CreateConversation(Conversation{
-			ConversationID:    existingConv.ConversationID,
+			ConversationID:    targetConvID,
 			PeerID:            accept.FromPeerID,
 			State:             ConversationStateActive,
 			LastTransportMode: TransportModeDirect,
@@ -1710,7 +1732,7 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		if err != nil {
 			return err
 		}
-		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, existingConv.ConversationID); err != nil {
+		if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, targetConvID); err != nil {
 			return err
 		}
 		_ = s.store.DeleteFriendRequestJob(accept.RequestID)
@@ -1720,14 +1742,14 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 				accept.RequestID,
 				accept.FromPeerID,
 				accept.ToPeerID,
-				existingConv.ConversationID,
+				targetConvID,
 			))
 		}
 		if sendAck {
 			_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
 				Type:           MessageTypeSessionAcceptAck,
 				RequestID:      accept.RequestID,
-				ConversationID: existingConv.ConversationID,
+				ConversationID: targetConvID,
 				FromPeerID:     s.localPeer,
 				ToPeerID:       accept.FromPeerID,
 				SentAtUnix:     time.Now().UTC().UnixMilli(),
@@ -1741,9 +1763,19 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 	if err != nil {
 		return err
 	}
-	convID := strings.TrimSpace(accept.ConversationID)
-	if convID == "" {
-		convID = deriveStableConversationID(s.localPeer, accept.FromPeerID)
+	existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	convID := deriveStableConversationID(s.localPeer, accept.FromPeerID)
+	if err == nil && existingConv.ConversationID != convID {
+		if err := s.store.MigrateConversationID(existingConv.ConversationID, convID); err != nil {
+			return err
+		}
+		existingConv, err = s.store.GetConversation(convID)
+		if err != nil {
+			return err
+		}
 	}
 	sess, err := deriveSessionState(convID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
 	if err != nil {
@@ -2363,7 +2395,7 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// 对方尚未建立好友关系，或者本地仍无法恢复会话状态：直接拒绝发送方。
-			if s.maybeSendSessionRejectForConversation(msg.ConversationID, msg.FromPeerID) {
+			if s.maybeSendSessionRejectForConversation(msg.FromPeerID) {
 				return nil
 			}
 		}
@@ -2419,31 +2451,23 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string) err
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
 
-// maybeSendSessionRejectForConversation tries to detect "no friend relationship".
-// If the conversation_id points to a friend request that is not accepted (or missing),
-// it sends a SessionReject back to the sender so the sender side can mark the conversation.
-func (s *Service) maybeSendSessionRejectForConversation(conversationID, fromPeerID string) bool {
-	if s == nil || s.store == nil || conversationID == "" || fromPeerID == "" {
+// maybeSendSessionRejectForConversation tries to detect "no friend relationship"
+// for a peer and sends a SessionReject back when there is no accepted request.
+func (s *Service) maybeSendSessionRejectForConversation(fromPeerID string) bool {
+	if s == nil || s.store == nil || fromPeerID == "" {
 		return false
 	}
 
+	req, err := s.store.LatestRequestBetweenPeers(fromPeerID, s.localPeer)
 	requestID := ""
-	if lastColon := strings.LastIndex(conversationID, ":"); lastColon > 0 && lastColon < len(conversationID)-1 {
-		candidate := conversationID[lastColon+1:]
-		if _, err := uuid.Parse(candidate); err == nil {
-			requestID = candidate
-		}
-	}
-	if requestID == "" {
-		if req, err := s.store.LatestRequestBetweenPeers(fromPeerID, s.localPeer); err == nil {
-			requestID = req.RequestID
-		}
+	if err == nil {
+		requestID = req.RequestID
 	}
 	if requestID == "" {
 		return false
 	}
 
-	req, err := s.store.GetRequest(requestID)
+	req, err = s.store.GetRequest(requestID)
 	if err == nil {
 		// If already accepted for this sender/receiver pair, don't reject.
 		if req.ToPeerID == s.localPeer && req.FromPeerID == fromPeerID && req.State == RequestStateAccepted {
@@ -2451,9 +2475,6 @@ func (s *Service) maybeSendSessionRejectForConversation(conversationID, fromPeer
 		}
 	}
 
-	// Best-effort: conversation_id may embed an old request_id (because we keep one
-	// conversation per peer_id). If there is any accepted request between the pair,
-	// don't reject (avoid endless rejections after re-adding friends).
 	if hasAccepted, _ := s.store.HasAcceptedRequest(fromPeerID, s.localPeer); hasAccepted {
 		return false
 	}
@@ -2503,7 +2524,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string) err
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// 对方尚未建立好友关系，或者本地仍无法恢复会话状态：直接拒绝发送方。
-			if s.maybeSendSessionRejectForConversation(msg.ConversationID, msg.FromPeerID) {
+			if s.maybeSendSessionRejectForConversation(msg.FromPeerID) {
 				return nil
 			}
 		}
