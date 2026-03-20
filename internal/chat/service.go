@@ -727,23 +727,9 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if err := s.store.UpsertOutboxJob(msg.MsgID, conv.PeerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
 		return Message{}, err
 	}
-	if err := s.sendStoredDirectMessage(msg, data, ciphertext); err != nil {
-		msg.State = MessageStateQueuedForRetry
-		if _, updateErr := s.store.AddMessage(msg, data); updateErr != nil {
-			return Message{}, updateErr
-		}
-		if retryErr := s.scheduleOutboxRetry(msg.MsgID, conv.PeerID, 1); retryErr != nil {
-			return Message{}, retryErr
-		}
-		return msg, nil
-	}
-	msg.State = MessageStateSentToTransport
-	if _, err := s.store.AddMessage(msg, data); err != nil {
-		return Message{}, err
-	}
-	if err := s.markOutboxSentToTransport(msg.MsgID, conv.PeerID, 0, time.Now().UTC()); err != nil {
-		return Message{}, err
-	}
+	safe.Go("chat.sendDirectFile."+msg.MsgID, func() {
+		s.completeOutboundDirectSend(msg, data, ciphertext)
+	})
 	return msg, nil
 }
 
@@ -1072,23 +1058,9 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 	if err := s.store.UpsertOutboxJob(msg.MsgID, conv.PeerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
 		return Message{}, err
 	}
-	if err := s.sendStoredDirectMessage(msg, ciphertext, nil); err != nil {
-		msg.State = MessageStateQueuedForRetry
-		if _, updateErr := s.store.AddMessage(msg, ciphertext); updateErr != nil {
-			return Message{}, updateErr
-		}
-		if retryErr := s.scheduleOutboxRetry(msg.MsgID, conv.PeerID, 1); retryErr != nil {
-			return Message{}, retryErr
-		}
-		return msg, nil
-	}
-	msg.State = MessageStateSentToTransport
-	if _, err := s.store.AddMessage(msg, ciphertext); err != nil {
-		return Message{}, err
-	}
-	if err := s.markOutboxSentToTransport(msg.MsgID, conv.PeerID, 0, time.Now().UTC()); err != nil {
-		return Message{}, err
-	}
+	safe.Go("chat.sendDirectText."+msg.MsgID, func() {
+		s.completeOutboundDirectSend(msg, ciphertext, nil)
+	})
 	return msg, nil
 }
 
@@ -2457,6 +2429,43 @@ func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string
 		return err
 	}
 	return s.store.DeleteOutboxJob(ack.MsgID)
+}
+
+// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端；失败则标记 queued 并调度重试。
+// 若用户在发送完成前撤回并删除本地消息，则放弃发送（避免对已删消息改状态）。
+func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cachedCiphertext []byte) {
+	cur, err := s.store.GetMessage(msg.MsgID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[chat] outbound send: get message %s: %v", msg.MsgID, err)
+		}
+		return
+	}
+	if cur.Direction != "outbound" || cur.SenderPeerID != s.localPeer {
+		return
+	}
+	if cur.State != MessageStateLocalOnly {
+		return
+	}
+	if err := s.sendStoredDirectMessage(msg, storedBlob, cachedCiphertext); err != nil {
+		msg.State = MessageStateQueuedForRetry
+		if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
+			log.Printf("[chat] persist queued state failed msg=%s: %v", msg.MsgID, updateErr)
+			return
+		}
+		if retryErr := s.scheduleOutboxRetry(msg.MsgID, msg.ReceiverPeerID, 1); retryErr != nil {
+			log.Printf("[chat] schedule outbox retry failed msg=%s: %v", msg.MsgID, retryErr)
+		}
+		return
+	}
+	msg.State = MessageStateSentToTransport
+	if _, err := s.store.AddMessage(msg, storedBlob); err != nil {
+		log.Printf("[chat] persist sent state failed msg=%s: %v", msg.MsgID, err)
+		return
+	}
+	if err := s.markOutboxSentToTransport(msg.MsgID, msg.ReceiverPeerID, 0, time.Now().UTC()); err != nil {
+		log.Printf("[chat] mark outbox sent failed msg=%s: %v", msg.MsgID, err)
+	}
 }
 
 func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cachedCiphertext []byte) error {
