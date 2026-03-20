@@ -553,7 +553,7 @@ func (s *Service) handleAvatarResponse(resp AvatarResponse) error {
 	if err != nil || avatarName == "" {
 		return err
 	}
-	if resp.FromPeerID == "" {
+	if resp.FromPeerID == "" || resp.FromPeerID == s.localPeer {
 		return nil
 	}
 	_ = s.store.UpsertPeer(resp.FromPeerID, "", "")
@@ -1339,7 +1339,39 @@ func (s *Service) serveRequestStream(str network.Stream) {
 	}
 }
 
+// errChatEnvelopeIgnored 表示控制面封包被丢弃（伪造、未知 request_id、或对端不匹配）。
+var errChatEnvelopeIgnored = errors.New("chat: envelope ignored")
+
+// validateFriendRequestEnvelope 校验 SessionAccept/SessionReject 是否对应本地 requests 表中的同一条好友请求，
+// 且 from_peer_id 必须是该请求中的「对端」peer（防止伪造 request_id 建会话或改状态）。
+func (s *Service) validateFriendRequestEnvelope(requestID, fromPeerID string) (Request, error) {
+	if requestID == "" || fromPeerID == "" {
+		return Request{}, errChatEnvelopeIgnored
+	}
+	if fromPeerID == s.localPeer {
+		return Request{}, errChatEnvelopeIgnored
+	}
+	reqRow, err := s.store.GetRequest(requestID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Request{}, errChatEnvelopeIgnored
+		}
+		return Request{}, err
+	}
+	if peer := s.peerIDForRequest(reqRow); peer == "" || peer != fromPeerID {
+		log.Printf("[chat] friend request envelope ignored: peer mismatch request=%s want=%s got=%s", requestID, peer, fromPeerID)
+		return Request{}, errChatEnvelopeIgnored
+	}
+	return reqRow, nil
+}
+
 func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, transportMode string, publishEvent bool) error {
+	if req.FromPeerID == "" || req.FromPeerID == s.localPeer {
+		return nil
+	}
+	if req.ToPeerID != "" && req.ToPeerID != s.localPeer {
+		return nil
+	}
 	if contact, err := s.store.GetPeer(req.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
@@ -1380,6 +1412,18 @@ func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, trans
 }
 
 func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publishEvent, sendAck bool) error {
+	if accept.ToPeerID != "" && accept.ToPeerID != s.localPeer {
+		return nil
+	}
+	if accept.FromPeerID == "" || accept.FromPeerID == s.localPeer {
+		return nil
+	}
+	if _, err := s.validateFriendRequestEnvelope(accept.RequestID, accept.FromPeerID); err != nil {
+		if errors.Is(err, errChatEnvelopeIgnored) {
+			return nil
+		}
+		return err
+	}
 	avatarName := NormalizeAvatarFileName(accept.AvatarName)
 	// Do not persist RemoteChatKexPub until session + conversation are created successfully.
 	// Early writes caused pending requests with no conversation if deriveSessionState failed.
@@ -1528,6 +1572,22 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 }
 
 func (s *Service) handleIncomingSessionRejectEnvelope(reject SessionReject, publishEvent bool) error {
+	if reject.ToPeerID != "" && reject.ToPeerID != s.localPeer {
+		return nil
+	}
+	if reject.FromPeerID == "" || reject.FromPeerID == s.localPeer {
+		return nil
+	}
+	reqRow, err := s.validateFriendRequestEnvelope(reject.RequestID, reject.FromPeerID)
+	if err != nil {
+		if errors.Is(err, errChatEnvelopeIgnored) {
+			return nil
+		}
+		return err
+	}
+	if reqRow.State != RequestStatePending {
+		return nil
+	}
 	if err := s.store.UpdateRequestState(reject.RequestID, RequestStateRejected, ""); err != nil {
 		return err
 	}
