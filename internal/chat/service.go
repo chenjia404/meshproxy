@@ -597,6 +597,10 @@ func (s *Service) ListMessages(conversationID string) ([]Message, error) {
 	return s.store.ListMessages(conversationID)
 }
 
+func (s *Service) ListMessagesPage(conversationID string, limit, offset int) ([]Message, int, error) {
+	return s.store.ListMessagesPage(conversationID, limit, offset)
+}
+
 func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byte) (Message, error) {
 	if len(data) == 0 {
 		return Message{}, errors.New("file is empty")

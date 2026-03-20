@@ -253,6 +253,7 @@ type ChatProvider interface {
 	ListConversations() ([]chat.Conversation, error)
 	UpdateConversationRetention(conversationID string, minutes int) (chat.Conversation, error)
 	ListMessages(conversationID string) ([]chat.Message, error)
+	ListMessagesPage(conversationID string, limit, offset int) ([]chat.Message, int, error)
 	SyncConversation(conversationID string) error
 	RevokeMessage(conversationID, msgID string) error
 	SendFile(conversationID, fileName, mimeType string, data []byte) (chat.Message, error)
@@ -1334,12 +1335,49 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 		}
 		switch r.Method {
 		case http.MethodGet:
-			msgs, err := a.opts.ChatService.ListMessages(conversationID)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
+			q := r.URL.Query()
+			_, hasLimit := q["limit"]
+			_, hasOffset := q["offset"]
+			if !hasLimit && !hasOffset {
+				msgs, err := a.opts.ChatService.ListMessages(conversationID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, msgs)
+			} else {
+				limit := 100
+				if hasLimit {
+					parsed, err := strconv.Atoi(strings.TrimSpace(q.Get("limit")))
+					if err != nil || parsed < 1 || parsed > 500 {
+						http.Error(w, "limit must be between 1 and 500", http.StatusBadRequest)
+						return
+					}
+					limit = parsed
+				}
+				offset := 0
+				if hasOffset {
+					parsed, err := strconv.Atoi(strings.TrimSpace(q.Get("offset")))
+					if err != nil || parsed < 0 {
+						http.Error(w, "offset must be a non-negative integer", http.StatusBadRequest)
+						return
+					}
+					offset = parsed
+				}
+				msgs, total, err := a.opts.ChatService.ListMessagesPage(conversationID, limit, offset)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				hasMore := offset+len(msgs) < total
+				writeJSON(w, map[string]any{
+					"messages": msgs,
+					"total":    total,
+					"limit":    limit,
+					"offset":   offset,
+					"has_more": hasMore,
+				})
 			}
-			writeJSON(w, msgs)
 		case http.MethodPost:
 			var body struct {
 				Text string `json:"text"`

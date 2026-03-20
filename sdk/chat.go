@@ -68,6 +68,10 @@ func (c *ChatService) ListMessages(conversationID string) ([]Message, error) {
 	return c.inner.ListMessages(conversationID)
 }
 
+func (c *ChatService) ListMessagesPage(conversationID string, limit, offset int) ([]Message, int, error) {
+	return c.inner.ListMessagesPage(conversationID, limit, offset)
+}
+
 func (c *ChatService) SyncConversation(conversationID string) error {
 	return c.inner.SyncConversation(conversationID)
 }

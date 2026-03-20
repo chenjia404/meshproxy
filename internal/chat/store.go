@@ -1272,6 +1272,41 @@ func (s *Store) ListMessages(conversationID string) ([]Message, error) {
 	return out, rows.Err()
 }
 
+// ListMessagesPage returns messages ordered by created_at ascending, and the total message count
+// for the conversation (for pagination metadata).
+func (s *Store) ListMessagesPage(conversationID string, limit, offset int) ([]Message, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id=?`, conversationID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`
+		SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at
+		FROM messages WHERE conversation_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+		conversationID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		var createdAt, deliveredAt string
+		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+			return nil, 0, err
+		}
+		m.CreatedAt = parseDBTime(createdAt)
+		m.DeliveredAt = parseDBTime(deliveredAt)
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *Store) MarkMessageDelivered(msgID string, deliveredAt time.Time) error {
 	ts := deliveredAt.UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`UPDATE messages SET state=?, delivered_at=? WHERE msg_id=?`, MessageStateDeliveredRemote, ts, msgID)
