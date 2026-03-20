@@ -657,7 +657,9 @@ internal/chat/
 * `GET /api/v1/chat/me`
 * `POST /api/v1/chat/profile`
 * `GET /api/v1/chat/contacts`
-* `POST /api/v1/chat/contacts/block`
+* `DELETE /api/v1/chat/contacts/{peer_id}` — 刪除本地聯絡人與雙方好友請求記錄，並刪除與該 peer 的會話與本地訊息（`peer_id` 路徑需 URL 編碼）
+* `POST /api/v1/chat/contacts/{peer_id}/nickname`
+* `POST /api/v1/chat/contacts/{peer_id}/block`
 
 ### 14.2 请求箱
 
@@ -669,7 +671,8 @@ internal/chat/
 ### 14.3 会话与消息
 
 * `GET /api/v1/chat/conversations`
-* `GET /api/v1/chat/conversations/{id}/messages`
+* `DELETE /api/v1/chat/conversations/{conversation_id}` — 僅刪除本地該會話與其中訊息（不刪 `peers` 聯絡人列；`conversation_id` 路徑需 URL 編碼）
+* `GET /api/v1/chat/conversations/{id}/messages`（無查詢參數時回傳訊息 JSON 陣列；帶 `limit` 和/或 `offset` 時回傳 `{ messages, total, limit, offset, has_more }`，`limit` 預設 100、範圍 1–500）
 * `POST /api/v1/chat/conversations/{id}/messages/text`
 
 ### 14.4 网络与传输
