@@ -2356,13 +2356,7 @@ func (s *Service) handleIncomingGroupText(msg GroupChatText) error {
 		}
 		return err
 	}
-	// Notify websocket clients that this group has a new inbound message.
-	s.publishChatEvent(newMessageEvent(
-		"group",
-		msg.GroupID,
-		msg.MsgID,
-		MessageTypeGroupChatText,
-	))
+	s.publishChatEvent(chatEventGroupMessage(incoming))
 	_ = s.sendGroupDeliveryAck(msg.GroupID, msg.MsgID, msg.SenderPeerID)
 	_ = group
 	return nil
@@ -2417,13 +2411,7 @@ func (s *Service) handleIncomingGroupFile(msg GroupChatFile) error {
 		}
 		return err
 	}
-	// Notify websocket clients that this group has a new inbound message.
-	s.publishChatEvent(newMessageEvent(
-		"group",
-		msg.GroupID,
-		msg.MsgID,
-		MessageTypeGroupChatFile,
-	))
+	s.publishChatEvent(chatEventGroupMessage(incoming))
 	_ = s.sendGroupDeliveryAck(msg.GroupID, msg.MsgID, msg.SenderPeerID)
 	_ = group
 	return nil

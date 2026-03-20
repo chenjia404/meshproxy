@@ -6,18 +6,35 @@ import (
 )
 
 // ChatEvent is the payload sent to the web/chat websocket clients.
-// It is intentionally minimal: the frontend will re-fetch message lists and update UI.
+// For type "message", optional fields mirror chat.Message / GroupMessage so the UI can render
+// without an extra HTTP fetch; other event kinds stay minimal.
 type ChatEvent struct {
-	Type           string    `json:"type"` // e.g. "message"
-	Kind           string    `json:"kind"` // "direct" | "group"
-	ConversationID string    `json:"conversation_id"`
-	MsgID          string    `json:"msg_id,omitempty"`
-	MsgType        string    `json:"msg_type,omitempty"`
-	RequestID     string    `json:"request_id,omitempty"`
-	FromPeerID    string    `json:"from_peer_id,omitempty"`
-	ToPeerID      string    `json:"to_peer_id,omitempty"`
-	State         string    `json:"state,omitempty"` // e.g. pending/accepted/rejected
-	AtUnixMillis   int64     `json:"at_unix_millis"`
+	Type           string `json:"type"` // e.g. "message"
+	Kind           string `json:"kind"` // "direct" | "group"
+	ConversationID string `json:"conversation_id"`
+	MsgID          string `json:"msg_id,omitempty"`
+	MsgType        string `json:"msg_type,omitempty"`
+	RequestID      string `json:"request_id,omitempty"`
+	FromPeerID     string `json:"from_peer_id,omitempty"`
+	ToPeerID       string `json:"to_peer_id,omitempty"`
+	State          string `json:"state,omitempty"` // friend_request: pending/accepted/rejected
+	AtUnixMillis   int64  `json:"at_unix_millis"`
+
+	// Direct / group message body (optional; populated for inbound message notifications).
+	Plaintext           string `json:"plaintext,omitempty"`
+	FileName            string `json:"file_name,omitempty"`
+	MIMEType            string `json:"mime_type,omitempty"`
+	FileSize            int64  `json:"file_size,omitempty"`
+	SenderPeerID        string `json:"sender_peer_id,omitempty"`
+	ReceiverPeerID      string `json:"receiver_peer_id,omitempty"`
+	Direction           string `json:"direction,omitempty"`
+	Counter             uint64 `json:"counter,omitempty"`
+	TransportMode       string `json:"transport_mode,omitempty"`
+	MessageState        string `json:"message_state,omitempty"` // message row state (not friend_request State)
+	CreatedAtUnixMillis int64  `json:"created_at_unix_millis,omitempty"`
+	// Group-only (kind=="group")
+	Epoch     uint64 `json:"epoch,omitempty"`
+	SenderSeq uint64 `json:"sender_seq,omitempty"`
 }
 
 type chatEventHub struct {
@@ -100,7 +117,51 @@ func newMessageEvent(kind, conversationID, msgID, msgType string) ChatEvent {
 		ConversationID: conversationID,
 		MsgID:           msgID,
 		MsgType:         msgType,
-		AtUnixMillis:   time.Now().UTC().UnixMilli(),
+		AtUnixMillis:    time.Now().UTC().UnixMilli(),
+	}
+}
+
+// chatEventDirectMessage builds a "message" event with the same core fields as chat.Message JSON.
+func chatEventDirectMessage(m Message) ChatEvent {
+	return ChatEvent{
+		Type:                 "message",
+		Kind:                 "direct",
+		ConversationID:       m.ConversationID,
+		MsgID:                m.MsgID,
+		MsgType:              m.MsgType,
+		Plaintext:            m.Plaintext,
+		FileName:             m.FileName,
+		MIMEType:             m.MIMEType,
+		FileSize:             m.FileSize,
+		SenderPeerID:         m.SenderPeerID,
+		ReceiverPeerID:       m.ReceiverPeerID,
+		Direction:            m.Direction,
+		Counter:              m.Counter,
+		TransportMode:        m.TransportMode,
+		MessageState:         m.State,
+		CreatedAtUnixMillis:  m.CreatedAt.UnixMilli(),
+		AtUnixMillis:         time.Now().UTC().UnixMilli(),
+	}
+}
+
+// chatEventGroupMessage builds a "message" event with text/file payload for group chats.
+func chatEventGroupMessage(m GroupMessage) ChatEvent {
+	return ChatEvent{
+		Type:                 "message",
+		Kind:                 "group",
+		ConversationID:       m.GroupID,
+		MsgID:                m.MsgID,
+		MsgType:              m.MsgType,
+		Plaintext:            m.Plaintext,
+		FileName:             m.FileName,
+		MIMEType:             m.MIMEType,
+		FileSize:             m.FileSize,
+		SenderPeerID:         m.SenderPeerID,
+		Epoch:                m.Epoch,
+		SenderSeq:            m.SenderSeq,
+		MessageState:         m.State,
+		CreatedAtUnixMillis:  m.CreatedAt.UnixMilli(),
+		AtUnixMillis:         time.Now().UTC().UnixMilli(),
 	}
 }
 

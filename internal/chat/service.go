@@ -2300,13 +2300,8 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, msg.Ciphertext, msg.Counter+1); err != nil {
 		return err
 	}
-	// Notify websocket clients that this conversation has a new inbound message.
-	s.publishChatEvent(newMessageEvent(
-		"direct",
-		msg.ConversationID,
-		msg.MsgID,
-		msgType,
-	))
+	// Notify websocket clients that this conversation has a new inbound message (include body for UI).
+	s.publishChatEvent(chatEventDirectMessage(incoming))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
@@ -2383,13 +2378,8 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, plain, msg.Counter+1); err != nil {
 		return err
 	}
-	// Notify websocket clients that this conversation has a new inbound message.
-	s.publishChatEvent(newMessageEvent(
-		"direct",
-		msg.ConversationID,
-		msg.MsgID,
-		MessageTypeChatFile,
-	))
+	// Notify websocket clients (metadata + empty plaintext; file bytes via GET if needed).
+	s.publishChatEvent(chatEventDirectMessage(incoming))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
 	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
 }
