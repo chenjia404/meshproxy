@@ -1365,6 +1365,33 @@ func (s *Service) validateFriendRequestEnvelope(requestID, fromPeerID string) (R
 	return reqRow, nil
 }
 
+// validateSessionAcceptAck 校验 SessionAcceptAck：必须存在对应 requests 行，且发送方 from_peer_id
+// 必须为该请求中的对端；可选校验 conversation_id 一致（双方均非空时）。
+func (s *Service) validateSessionAcceptAck(ack SessionAcceptAck) (Request, error) {
+	if ack.RequestID == "" {
+		return Request{}, errChatEnvelopeIgnored
+	}
+	if ack.FromPeerID == "" || ack.FromPeerID == s.localPeer {
+		return Request{}, errChatEnvelopeIgnored
+	}
+	reqRow, err := s.store.GetRequest(ack.RequestID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Request{}, errChatEnvelopeIgnored
+		}
+		return Request{}, err
+	}
+	if peer := s.peerIDForRequest(reqRow); peer == "" || peer != ack.FromPeerID {
+		log.Printf("[chat] session accept ack ignored: peer mismatch request=%s want=%s got=%s", ack.RequestID, peer, ack.FromPeerID)
+		return Request{}, errChatEnvelopeIgnored
+	}
+	if ack.ConversationID != "" && reqRow.ConversationID != "" && reqRow.ConversationID != ack.ConversationID {
+		log.Printf("[chat] session accept ack ignored: conversation mismatch request=%s want=%s got=%s", ack.RequestID, reqRow.ConversationID, ack.ConversationID)
+		return Request{}, errChatEnvelopeIgnored
+	}
+	return reqRow, nil
+}
+
 func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, transportMode string, publishEvent bool) error {
 	if req.FromPeerID == "" || req.FromPeerID == s.localPeer {
 		return nil
@@ -1611,6 +1638,12 @@ func (s *Service) handleIncomingSessionRejectEnvelope(reject SessionReject, publ
 func (s *Service) handleIncomingSessionAcceptAckEnvelope(ack SessionAcceptAck) error {
 	if ack.ToPeerID != s.localPeer {
 		return nil
+	}
+	if _, err := s.validateSessionAcceptAck(ack); err != nil {
+		if errors.Is(err, errChatEnvelopeIgnored) {
+			return nil
+		}
+		return err
 	}
 	if err := s.store.DeleteFriendRequestJob(ack.RequestID); err != nil {
 		log.Printf("[chat] delete friend request job on accept ack failed request=%s err=%v", ack.RequestID, err)
