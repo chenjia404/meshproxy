@@ -2348,6 +2348,34 @@ func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) err
 }
 
 func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck) error {
+	if strings.TrimSpace(ack.MsgID) == "" {
+		return nil
+	}
+	// 送达回执必须由「该条消息的接收方」发出；否则任意节点可伪造 ack，导致发送端显示已送达但对方从未入库。
+	if ack.ToPeerID != "" && ack.ToPeerID != s.localPeer {
+		return nil
+	}
+	m, err := s.store.GetMessage(ack.MsgID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if m.Direction != "outbound" {
+		return nil
+	}
+	if m.SenderPeerID != s.localPeer {
+		return nil
+	}
+	if strings.TrimSpace(ack.FromPeerID) != "" && m.ReceiverPeerID != ack.FromPeerID {
+		log.Printf("[chat] delivery ack ignored: receiver mismatch msg=%s want_receiver=%s ack_from=%s", ack.MsgID, m.ReceiverPeerID, ack.FromPeerID)
+		return nil
+	}
+	if strings.TrimSpace(ack.ConversationID) != "" && m.ConversationID != ack.ConversationID {
+		log.Printf("[chat] delivery ack ignored: conversation mismatch msg=%s want=%s got=%s", ack.MsgID, m.ConversationID, ack.ConversationID)
+		return nil
+	}
 	if err := s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix)); err != nil {
 		return err
 	}
