@@ -41,6 +41,7 @@ type Service struct {
 	profileSyncSeen      sync.Map
 	avatarFetchSeen      sync.Map
 	chatRequestProbeSeen sync.Map
+	chatSyncPending      sync.Map // key: conversation_id -> chan ChatSyncResponse
 }
 
 type chatRequestProbeState struct {
@@ -72,6 +73,11 @@ const (
 	friendRequestRetryBatchSize    = 32
 	friendRequestRetryBaseDelay    = 10 * time.Second
 	friendRequestRetryMaxDelay     = 30 * time.Minute
+
+	// Keep a few relay connections warm so that when direct sending fails,
+	// we can quickly switch to relay forwarding without long dial delays.
+	relayKeepConnectedInterval = 30 * time.Second
+	relayKeepConnectedMax      = 3
 )
 
 func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
@@ -105,7 +111,58 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	safe.Go("chat.recoverOutboxLoop", func() { s.recoverMissingOutboxJobs() })
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
 	safe.Go("chat.friendRequestRetryLoop", func() { s.runFriendRequestRetryLoop() })
+	safe.Go("chat.relayKeepConnectedLoop", func() { s.runRelayKeepConnectedLoop() })
 	return s, nil
+}
+
+func (s *Service) runRelayKeepConnectedLoop() {
+	ticker := time.NewTicker(relayKeepConnectedInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.keepRelaysConnected(relayKeepConnectedMax)
+		}
+	}
+}
+
+func (s *Service) keepRelaysConnected(max int) {
+	if s == nil || s.host == nil || s.discovery == nil || max <= 0 {
+		return
+	}
+
+	// Prefer relays that are already connected, then connect warm-up ones.
+	relays := s.discovery.ListRelays()
+	if len(relays) == 0 {
+		return
+	}
+
+	// Shuffle to avoid always dialing the same relays.
+	rand.Shuffle(len(relays), func(i, j int) { relays[i], relays[j] = relays[j], relays[i] })
+
+	connected := 0
+	for _, relayDesc := range relays {
+		if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer {
+			continue
+		}
+		if connected >= max {
+			return
+		}
+		pid, err := peer.Decode(relayDesc.PeerID)
+		if err != nil {
+			continue
+		}
+		if s.host.Network().Connectedness(pid) == network.Connected {
+			connected++
+			continue
+		}
+		// EnsurePeerConnected is bounded by internal timeouts.
+		if err := s.ensurePeerConnected(relayDesc.PeerID); err == nil {
+			connected++
+		}
+	}
 }
 
 func (s *Service) HandleRelayE2EStream(str network.Stream) {
@@ -1490,7 +1547,8 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 	// Shuffle relay list to randomize selection.
 	rand.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
 
-	out := make([]peer.ID, 0, min(limit, len(all)))
+	connected := make([]peer.ID, 0, min(limit, len(all)))
+	disconnected := make([]peer.ID, 0, min(limit, len(all)))
 	for _, relayDesc := range all {
 		if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer || relayDesc.PeerID == targetPeerID {
 			continue
@@ -1499,13 +1557,22 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 		if err != nil {
 			continue
 		}
-		out = append(out, pid)
-		if len(out) >= limit {
-			break
+		if s.host.Network().Connectedness(pid) == network.Connected {
+			connected = append(connected, pid)
+		} else {
+			disconnected = append(disconnected, pid)
 		}
+	}
+	out := make([]peer.ID, 0, limit)
+	out = append(out, connected...)
+	if len(out) < limit {
+		out = append(out, disconnected...)
 	}
 	if len(out) == 0 {
 		return nil, errors.New("no relay path available")
+	}
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
@@ -1607,6 +1674,23 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			s.requestAvatarFetch(req.FromPeerID, avatarName)
 		}
 		return s.store.UpsertIncomingRequest(stored)
+	case MessageTypeChatSyncRequest:
+		var req ChatSyncRequest
+		if err := remarshal(env, &req); err != nil {
+			return err
+		}
+		resp, err := s.handleChatSyncRequest(req, req.FromPeerID)
+		if err != nil {
+			return err
+		}
+		return s.sendEnvelope(req.FromPeerID, resp)
+	case MessageTypeChatSyncResponse:
+		var resp ChatSyncResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		s.resolvePendingChatSync(resp)
+		return nil
 	case MessageTypeSessionAccept:
 		var accept SessionAccept
 		if err := remarshal(env, &accept); err != nil {
@@ -1762,6 +1846,13 @@ func (s *Service) processDirectEnvelope(env map[string]any) error {
 	switch env["type"] {
 	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest, MessageTypeGroupChatText, MessageTypeGroupChatFile, MessageTypeGroupDeliveryAck:
 		return s.processGroupEnvelope(env)
+	case MessageTypeChatSyncResponse:
+		var resp ChatSyncResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		s.resolvePendingChatSync(resp)
+		return nil
 	case MessageTypeChatText, MessageTypeGroupInviteNote:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {
@@ -2200,7 +2291,8 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 
 func (s *Service) requestChatSync(peerID string, req ChatSyncRequest) (ChatSyncResponse, error) {
 	if err := s.ensurePeerConnected(peerID); err != nil {
-		return ChatSyncResponse{}, err
+		// Fallback to relay when direct connection is unavailable.
+		return s.requestChatSyncViaRelay(peerID, req)
 	}
 	pid, err := peer.Decode(peerID)
 	if err != nil {
@@ -2218,9 +2310,48 @@ func (s *Service) requestChatSync(peerID string, req ChatSyncRequest) (ChatSyncR
 	}
 	var resp ChatSyncResponse
 	if err := tunnel.ReadJSONFrame(str, &resp); err != nil {
-		return ChatSyncResponse{}, err
+		// Direct sync stream failed (e.g. EOF): fallback to relay.
+		return s.requestChatSyncViaRelay(peerID, req)
 	}
 	return resp, nil
+}
+
+func (s *Service) requestChatSyncViaRelay(peerID string, req ChatSyncRequest) (ChatSyncResponse, error) {
+	const relaySyncTimeout = 20 * time.Second
+	waitCh := make(chan ChatSyncResponse, 1)
+	s.chatSyncPending.Store(req.ConversationID, waitCh)
+	defer s.chatSyncPending.Delete(req.ConversationID)
+
+	if err := s.sendViaRelay(peerID, req); err != nil {
+		return ChatSyncResponse{}, err
+	}
+
+	select {
+	case <-s.ctx.Done():
+		return ChatSyncResponse{}, s.ctx.Err()
+	case resp := <-waitCh:
+		return resp, nil
+	case <-time.After(relaySyncTimeout):
+		return ChatSyncResponse{}, errors.New("chat sync relay timeout")
+	}
+}
+
+func (s *Service) resolvePendingChatSync(resp ChatSyncResponse) {
+	if s == nil || resp.ConversationID == "" {
+		return
+	}
+	chAny, ok := s.chatSyncPending.Load(resp.ConversationID)
+	if !ok {
+		return
+	}
+	ch, ok := chAny.(chan ChatSyncResponse)
+	if !ok {
+		return
+	}
+	select {
+	case ch <- resp:
+	default:
+	}
 }
 
 func (s *Service) recoverMissingOutboxJobs() error {
