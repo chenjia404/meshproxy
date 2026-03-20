@@ -1,8 +1,10 @@
 package chat
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -1122,6 +1124,62 @@ func (s *Store) UpdateRequestAvatar(requestID, avatar string) error {
 	return err
 }
 
+func (s *Store) LatestRequestBetweenPeers(peerA, peerB string) (Request, error) {
+	var r Request
+	var createdAt, updatedAt string
+	var nextRetryAt string
+	err := s.db.QueryRow(`
+		SELECT
+			r.request_id,
+			r.from_peer_id,
+			r.to_peer_id,
+			r.state,
+			r.intro_text,
+			r.nickname,
+			r.bio,
+			r.avatar,
+			r.retention_minutes,
+			r.remote_chat_kex_pub,
+			r.conversation_id,
+			r.last_transport_mode,
+			COALESCE(fj.retry_count, 0) AS retry_count,
+			COALESCE(fj.next_retry_at, '') AS next_retry_at,
+			COALESCE(fj.status, '') AS retry_job_status,
+			r.created_at,
+			r.updated_at
+		FROM requests r
+		LEFT JOIN friend_request_jobs fj ON fj.job_id = r.request_id
+		WHERE (r.from_peer_id=? AND r.to_peer_id=?) OR (r.from_peer_id=? AND r.to_peer_id=?)
+		ORDER BY r.updated_at DESC, r.created_at DESC
+		LIMIT 1
+	`, peerA, peerB, peerB, peerA).Scan(
+		&r.RequestID,
+		&r.FromPeerID,
+		&r.ToPeerID,
+		&r.State,
+		&r.IntroText,
+		&r.Nickname,
+		&r.Bio,
+		&r.Avatar,
+		&r.RetentionMinutes,
+		&r.RemoteChatKexPub,
+		&r.ConversationID,
+		&r.LastTransportMode,
+		&r.RetryCount,
+		&nextRetryAt,
+		&r.RetryJobStatus,
+		&createdAt,
+		&updatedAt,
+	)
+	if err != nil {
+		return Request{}, err
+	}
+	r.CreatedAt = parseDBTime(createdAt)
+	r.UpdatedAt = parseDBTime(updatedAt)
+	r.NextRetryAt = parseDBTime(nextRetryAt)
+	return r, nil
+}
+
 func (s *Store) UpdateRequestRemoteChatKexPub(requestID, remoteChatKexPub string) error {
 	_, err := s.db.Exec(`UPDATE requests SET remote_chat_kex_pub=?, updated_at=? WHERE request_id=?`,
 		strings.TrimSpace(remoteChatKexPub), time.Now().UTC().Format(time.RFC3339Nano), requestID)
@@ -1991,10 +2049,11 @@ func shortPeerID(v string) string {
 	return v[len(v)-8:]
 }
 
-func deriveConversationID(a, b, requestID string) string {
+func deriveStableConversationID(a, b string) string {
 	parts := []string{a, b}
 	sort.Strings(parts)
-	return strings.Join(parts, ":") + ":" + requestID
+	sum := sha256.Sum256([]byte("stable_v1:" + parts[0] + "\x00" + parts[1]))
+	return "stable_v1:" + hex.EncodeToString(sum[:])
 }
 
 func deriveSessionState(conversationID, localPeerID, remotePeerID string, localPriv []byte, remotePubB64 string) (sessionState, error) {

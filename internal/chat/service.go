@@ -199,10 +199,10 @@ func (s *Service) repairHistoricalDirectState() error {
 			targetConvID = existingConv.ConversationID
 		}
 		if targetConvID == "" {
-			targetConvID = deriveConversationID(s.localPeer, peerID, req.RequestID)
+			targetConvID = deriveStableConversationID(s.localPeer, peerID)
 		}
 
-		if strings.TrimSpace(req.ConversationID) != targetConvID {
+		if !hasConv && strings.TrimSpace(req.ConversationID) != targetConvID {
 			if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
 				return err
 			}
@@ -365,22 +365,12 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 		return Conversation{}, sessionState{}, false, err
 	}
 
-	migrated := false
-	if hasConv && existingConv.ConversationID != conversationID {
-		oldConversationID := existingConv.ConversationID
-		if err := s.store.MigrateConversationID(oldConversationID, conversationID); err != nil {
-			return Conversation{}, sessionState{}, false, err
-		}
-		existingConv, err = s.store.GetConversation(conversationID)
-		if err != nil {
-			return Conversation{}, sessionState{}, false, err
-		}
-		hasConv = true
-		migrated = true
-		log.Printf("[chat] repaired incoming direct conversation id peer=%s from=%s to=%s", fromPeerID, oldConversationID, conversationID)
+	targetConvID := conversationID
+	if hasConv {
+		targetConvID = existingConv.ConversationID
 	}
 
-	sess, err := s.store.GetSessionState(conversationID)
+	sess, err := s.store.GetSessionState(targetConvID)
 	hadSession := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, sessionState{}, false, err
@@ -393,7 +383,7 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 		if err != nil {
 			return Conversation{}, sessionState{}, false, err
 		}
-		sess, err = deriveSessionState(conversationID, s.localPeer, fromPeerID, priv, remotePub)
+		sess, err = deriveSessionState(targetConvID, s.localPeer, fromPeerID, priv, remotePub)
 		if err != nil {
 			return Conversation{}, sessionState{}, false, err
 		}
@@ -416,10 +406,10 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 		createdAt = now
 	}
 
-	sess.ConversationID = conversationID
+	sess.ConversationID = targetConvID
 	sess.PeerID = fromPeerID
 	conv, err := s.store.CreateConversation(Conversation{
-		ConversationID:    conversationID,
+		ConversationID:    targetConvID,
 		PeerID:            fromPeerID,
 		State:             ConversationStateActive,
 		LastTransportMode: lastTransportMode,
@@ -431,15 +421,15 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 		return Conversation{}, sessionState{}, false, err
 	}
 
-	if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, conversationID); err != nil {
+	if err := s.store.UpdateRequestState(req.RequestID, RequestStateAccepted, targetConvID); err != nil {
 		return Conversation{}, sessionState{}, false, err
 	}
 	if remotePub != "" {
 		_ = s.store.UpdateRequestRemoteChatKexPub(req.RequestID, remotePub)
 	}
 
-	if migrated || !hasConv || existingConv.State != ConversationStateActive || !hadSession {
-		log.Printf("[chat] repaired incoming direct state peer=%s conversation=%s migrated=%t session_rebuilt=%t", fromPeerID, conversationID, migrated, !hadSession)
+	if !hasConv || existingConv.State != ConversationStateActive || !hadSession {
+		log.Printf("[chat] repaired incoming direct state peer=%s conversation=%s session_rebuilt=%t", fromPeerID, targetConvID, !hadSession)
 	}
 	return conv, sess, true, nil
 }
@@ -1178,7 +1168,8 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		if existingConv.RetentionMinutes > retentionMinutes {
 			retentionMinutes = existingConv.RetentionMinutes
 		}
-		// Ensure conversation is active and session_states exist after re-adding friends.
+		// Keep the old conversation ID unchanged when a direct friendship already exists.
+		// This lets historical conversations remain stable while new pairs can opt in.
 		sess, err := deriveSessionState(existingConv.ConversationID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
 		if err != nil {
 			return Conversation{}, err
@@ -1234,7 +1225,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 	} else if err != sql.ErrNoRows {
 		return Conversation{}, err
 	}
-	convID := deriveConversationID(s.localPeer, req.FromPeerID, req.RequestID)
+	convID := deriveStableConversationID(s.localPeer, req.FromPeerID)
 	sess, err := deriveSessionState(convID, s.localPeer, req.FromPeerID, priv, req.RemoteChatKexPub)
 	if err != nil {
 		return Conversation{}, err
@@ -1687,18 +1678,6 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		_ = s.store.UpdateRequestRemoteChatKexPub(accept.RequestID, accept.ChatKexPub)
 	}
 	if existingConv, err := s.store.GetConversationByPeer(accept.FromPeerID); err == nil {
-		if accept.ConversationID != "" && existingConv.ConversationID != accept.ConversationID {
-			oldConversationID := existingConv.ConversationID
-			if err := s.store.MigrateConversationID(oldConversationID, accept.ConversationID); err != nil {
-				return err
-			}
-			migratedConv, err := s.store.GetConversation(accept.ConversationID)
-			if err != nil {
-				return err
-			}
-			existingConv = migratedConv
-			log.Printf("[chat] aligned accepted direct conversation id peer=%s from=%s to=%s", accept.FromPeerID, oldConversationID, accept.ConversationID)
-		}
 		_ = s.store.UpsertPeer(accept.FromPeerID, "", accept.Bio)
 		if avatarName != "" {
 			_ = s.store.UpdatePeerAvatar(accept.FromPeerID, avatarName)
@@ -1762,12 +1741,16 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 	if err != nil {
 		return err
 	}
-	sess, err := deriveSessionState(accept.ConversationID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
+	convID := strings.TrimSpace(accept.ConversationID)
+	if convID == "" {
+		convID = deriveStableConversationID(s.localPeer, accept.FromPeerID)
+	}
+	sess, err := deriveSessionState(convID, s.localPeer, accept.FromPeerID, priv, accept.ChatKexPub)
 	if err != nil {
 		return err
 	}
 	conv := Conversation{
-		ConversationID:    accept.ConversationID,
+		ConversationID:    convID,
 		PeerID:            accept.FromPeerID,
 		State:             ConversationStateActive,
 		LastTransportMode: TransportModeDirect,
@@ -1784,11 +1767,11 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		s.requestAvatarFetch(accept.FromPeerID, avatarName)
 	}
 	if accept.RetentionMinutes > 0 {
-		if _, err := s.store.UpdateConversationRetention(accept.ConversationID, accept.RetentionMinutes); err != nil {
+		if _, err := s.store.UpdateConversationRetention(convID, accept.RetentionMinutes); err != nil {
 			return err
 		}
 	}
-	if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, accept.ConversationID); err != nil {
+	if err := s.store.UpdateRequestState(accept.RequestID, RequestStateAccepted, convID); err != nil {
 		return err
 	}
 	_ = s.store.DeleteFriendRequestJob(accept.RequestID)
@@ -1798,14 +1781,14 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 			accept.RequestID,
 			accept.FromPeerID,
 			accept.ToPeerID,
-			accept.ConversationID,
+			convID,
 		))
 	}
 	if sendAck {
 		_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
 			Type:           MessageTypeSessionAcceptAck,
 			RequestID:      accept.RequestID,
-			ConversationID: accept.ConversationID,
+			ConversationID: convID,
 			FromPeerID:     s.localPeer,
 			ToPeerID:       accept.FromPeerID,
 			SentAtUnix:     time.Now().UTC().UnixMilli(),
@@ -1819,7 +1802,7 @@ func (s *Service) handleIncomingSessionRejectEnvelope(reject SessionReject, publ
 		return err
 	}
 	_ = s.store.DeleteFriendRequestJob(reject.RequestID)
-	convID := deriveConversationID(s.localPeer, reject.FromPeerID, reject.RequestID)
+	convID := deriveStableConversationID(s.localPeer, reject.FromPeerID)
 	if err := s.store.UpdateConversationState(convID, ConversationStateNoFriend); err != nil {
 		log.Printf("[chat] update conversation state failed request=%s conversation=%s err=%v", reject.RequestID, convID, err)
 	}
@@ -2444,13 +2427,19 @@ func (s *Service) maybeSendSessionRejectForConversation(conversationID, fromPeer
 		return false
 	}
 
-	// conversationID = sort(a,b) + ":" + requestID (requestID is UUID, no extra ':')
-	lastColon := strings.LastIndex(conversationID, ":")
-	if lastColon <= 0 || lastColon >= len(conversationID)-1 {
-		return false
+	requestID := ""
+	if lastColon := strings.LastIndex(conversationID, ":"); lastColon > 0 && lastColon < len(conversationID)-1 {
+		candidate := conversationID[lastColon+1:]
+		if _, err := uuid.Parse(candidate); err == nil {
+			requestID = candidate
+		}
 	}
-	requestID := conversationID[lastColon+1:]
-	if _, err := uuid.Parse(requestID); err != nil {
+	if requestID == "" {
+		if req, err := s.store.LatestRequestBetweenPeers(fromPeerID, s.localPeer); err == nil {
+			requestID = req.RequestID
+		}
+	}
+	if requestID == "" {
 		return false
 	}
 
