@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -78,6 +79,35 @@ func BuildAEADNonce(direction string, counter uint64) []byte {
 	}
 	// nonce[9:12] 可留空或備用，counter 已保證唯一
 	return nonce
+}
+
+const groupChatNonceLabel = "mesh-proxy/chat/group_aead_nonce/v1\x00"
+
+// BuildGroupChatNonce 產生群組訊息 AEAD 專用 12 字節 nonce：SHA256(label || group_id || 0 || sender_peer_id || 0 || be64(sender_seq))[:12]。
+// 多名成員共用同一群金鑰時，必須把發送者綁進 nonce，避免不同發送者同一 sender_seq 造成 nonce 重用。
+func BuildGroupChatNonce(groupID, senderPeerID string, senderSeq uint64) []byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte(groupChatNonceLabel))
+	_, _ = h.Write([]byte(groupID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(senderPeerID))
+	_, _ = h.Write([]byte{0})
+	var seq [8]byte
+	binary.BigEndian.PutUint64(seq[:], senderSeq)
+	_, _ = h.Write(seq[:])
+	sum := h.Sum(nil)
+	return sum[:AEADNonceSize]
+}
+
+// AEADOpenGroupMessage 解密群組訊息：先嘗試 v1（發送者綁定 nonce），失敗則嘗試舊版僅 sender_seq 的 nonce（向後兼容）。
+func AEADOpenGroupMessage(key []byte, groupID, senderPeerID string, senderSeq uint64, aad, ciphertext []byte) ([]byte, error) {
+	n := BuildGroupChatNonce(groupID, senderPeerID, senderSeq)
+	plain, err := AEADOpen(key, n, ciphertext, aad)
+	if err == nil {
+		return plain, nil
+	}
+	legacy := BuildAEADNonce("fwd", senderSeq)
+	return AEADOpen(key, legacy, ciphertext, aad)
 }
 
 // AEADSeal 使用 ChaCha20-Poly1305 加密 plaintext，AAD 綁定 circuit_id, stream_id, direction。

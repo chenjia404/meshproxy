@@ -645,7 +645,7 @@ func (s *Service) SendGroupText(groupID, text string) (GroupMessage, error) {
 	if err != nil {
 		return GroupMessage{}, err
 	}
-	nonce := protocol.BuildAEADNonce("fwd", senderSeq)
+	nonce := protocol.BuildGroupChatNonce(groupID, s.localPeer, senderSeq)
 	aad := []byte(groupID + "\x00group_chat_text")
 	ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, []byte(text), aad)
 	if err != nil {
@@ -751,7 +751,7 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 	if err != nil {
 		return GroupMessage{}, err
 	}
-	nonce := protocol.BuildAEADNonce("fwd", senderSeq)
+	nonce := protocol.BuildGroupChatNonce(groupID, s.localPeer, senderSeq)
 	aad := []byte(groupID + "\x00group_chat_file")
 	ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, data, aad)
 	if err != nil {
@@ -1019,7 +1019,7 @@ func (s *Service) buildGroupRetryEnvelope(item groupRetryDelivery) (any, error) 
 		if err != nil {
 			return nil, err
 		}
-		nonce := protocol.BuildAEADNonce("fwd", item.SenderSeq)
+		nonce := protocol.BuildGroupChatNonce(item.GroupID, item.SenderPeerID, item.SenderSeq)
 		aad := []byte(item.GroupID + "\x00group_chat_file")
 		ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, item.CiphertextBlob, aad)
 		if err != nil {
@@ -2337,9 +2337,8 @@ func (s *Service) handleIncomingGroupText(msg GroupChatText) error {
 	if err != nil {
 		return err
 	}
-	nonce := protocol.BuildAEADNonce("fwd", msg.SenderSeq)
 	aad := []byte(msg.GroupID + "\x00group_chat_text")
-	plain, err := protocol.AEADOpen(groupEpoch.WrappedKeyForLocal, nonce, msg.Ciphertext, aad)
+	plain, err := protocol.AEADOpenGroupMessage(groupEpoch.WrappedKeyForLocal, msg.GroupID, msg.SenderPeerID, msg.SenderSeq, aad, msg.Ciphertext)
 	if err != nil {
 		return err
 	}
@@ -2390,9 +2389,8 @@ func (s *Service) handleIncomingGroupFile(msg GroupChatFile) error {
 	if err != nil {
 		return err
 	}
-	nonce := protocol.BuildAEADNonce("fwd", msg.SenderSeq)
 	aad := []byte(msg.GroupID + "\x00group_chat_file")
-	plain, err := protocol.AEADOpen(groupEpoch.WrappedKeyForLocal, nonce, msg.Ciphertext, aad)
+	plain, err := protocol.AEADOpenGroupMessage(groupEpoch.WrappedKeyForLocal, msg.GroupID, msg.SenderPeerID, msg.SenderSeq, aad, msg.Ciphertext)
 	if err != nil {
 		return err
 	}
@@ -2516,7 +2514,7 @@ func (s *Service) handleGroupSyncRequest(req GroupSyncRequest, fromPeerID string
 		if err != nil {
 			return GroupSyncResponse{}, err
 		}
-		nonce := protocol.BuildAEADNonce("fwd", item.SenderSeq)
+		nonce := protocol.BuildGroupChatNonce(item.GroupID, item.SenderPeerID, item.SenderSeq)
 		aad := []byte(item.GroupID + "\x00group_chat_file")
 		ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, item.PlainBlob, aad)
 		if err != nil {
