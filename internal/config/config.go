@@ -55,6 +55,46 @@ type Config struct {
 
 	// Exit 僅在 mode=relay+exit 時生效，用於出口節點運營策略（允許/拒絕端口、域名、peer 等）。
 	Exit *ExitConfig `yaml:"exit"`
+
+	// IPFS 嵌入式閘道與最小寫入 API（復用同一 libp2p host，見 ipfs.md）。
+	IPFS IPFSConfig `yaml:"ipfs"`
+}
+
+// IPFSConfig 嵌入式 IPFS 子系統（boxo + 共享 host）。
+type IPFSConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// DataDir 相對於根 DataDir 的子目錄，存放 ipfs 資料；空則為 "ipfs"。
+	DataDir string `yaml:"data_dir"`
+
+	GatewayEnabled bool   `yaml:"gateway_enabled"`
+	GatewayWritable bool  `yaml:"gateway_writable"` // 原型固定為唯讀，此欄位保留
+
+	APIEnabled bool `yaml:"api_enabled"`
+
+	// Storage
+	DatastoreType   string `yaml:"datastore_type"` // "leveldb"
+	BlockstoreNoSync bool  `yaml:"blockstore_no_sync"`
+
+	// Import（預設與 ipfs.md 一致）
+	Chunker    string `yaml:"chunker"`
+	RawLeaves  bool   `yaml:"raw_leaves"`
+	CIDVersion int    `yaml:"cid_version"`
+	HashFunction string `yaml:"hash_function"`
+
+	// Provide / routing
+	AutoProvide               bool `yaml:"auto_provide"`
+	ReprovideIntervalSeconds  int  `yaml:"reprovide_interval_seconds"`
+	RoutingMode               string `yaml:"routing_mode"`
+
+	// Fetch
+	FetchTimeoutSeconds int `yaml:"fetch_timeout_seconds"`
+
+	// Pin
+	AutoPinOnAdd bool `yaml:"auto_pin_on_add"`
+
+	// Add 單次上傳上限（位元組），預設 64MiB。
+	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
 }
 
 // ExitConfig 出口節點策略與運行時配置（運營者控制允許代理的目標範圍）。
@@ -286,6 +326,23 @@ func Default() Config {
 			ClientAgent: "meshproxy-client",
 			ProtocolID:  "/meshserver/session/1.0.0",
 		},
+		IPFS: IPFSConfig{
+			Enabled:          false,
+			DataDir:          "ipfs",
+			GatewayEnabled:   true,
+			GatewayWritable:  false,
+			APIEnabled:       true,
+			DatastoreType:    "leveldb",
+			Chunker:          "size-262144",
+			RawLeaves:        true,
+			CIDVersion:       1,
+			HashFunction:     "sha2-256",
+			AutoProvide:      true,
+			RoutingMode:      "dht-client",
+			FetchTimeoutSeconds: 60,
+			AutoPinOnAdd:     true,
+			MaxUploadBytes:   64 << 20,
+		},
 	}
 }
 
@@ -431,6 +488,9 @@ func (c *Config) postProcess() error {
 			return err
 		}
 	}
+	if err := c.IPFS.normalize(); err != nil {
+		return err
+	}
 	for _, srv := range c.MeshServer.Servers {
 		if srv.PeerID == "" {
 			return errors.New("meshserver.servers.peer_id must not be empty")
@@ -461,6 +521,34 @@ func defaultExitConfig() ExitConfig {
 			AcceptNewStreams: true,
 		},
 	}
+}
+
+func (c *IPFSConfig) normalize() error {
+	if c.DataDir == "" {
+		c.DataDir = "ipfs"
+	}
+	if c.DatastoreType == "" {
+		c.DatastoreType = "leveldb"
+	}
+	if c.Chunker == "" {
+		c.Chunker = "size-262144"
+	}
+	if c.CIDVersion == 0 {
+		c.CIDVersion = 1
+	}
+	if c.HashFunction == "" {
+		c.HashFunction = "sha2-256"
+	}
+	if c.RoutingMode == "" {
+		c.RoutingMode = "dht-client"
+	}
+	if c.FetchTimeoutSeconds <= 0 {
+		c.FetchTimeoutSeconds = 60
+	}
+	if c.MaxUploadBytes <= 0 {
+		c.MaxUploadBytes = 64 << 20
+	}
+	return nil
 }
 
 // Validate 校驗出口策略配置。

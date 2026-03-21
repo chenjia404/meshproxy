@@ -27,6 +27,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/geoip"
+	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/identity"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
@@ -58,6 +59,7 @@ type App struct {
 	socks5     *client.Socks5Server
 	exitSocks5 *exit.Socks5Server
 	localAPI   *api.LocalAPI
+	ipfsEmb    *ipfsnode.EmbeddedIPFS
 	chat       *chat.Service
 	meshServer *meshserver.Manager
 
@@ -191,6 +193,16 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		a.ownsHost = true
 	}
 	a.host = h
+
+	// Embedded IPFS（可選）：復用同一 libp2p host + DHT routing。
+	if cfg.IPFS.Enabled {
+		ipfsRoot := filepath.Join(cfg.DataDir, cfg.IPFS.DataDir)
+		n, err := ipfsnode.NewEmbeddedIPFS(ctx, h.Host, h.Routing, ipfsRoot, cfg.IPFS)
+		if err != nil {
+			return nil, fmt.Errorf("init embedded ipfs: %w", err)
+		}
+		a.ipfsEmb = n
+	}
 
 	// DHT-based rendezvous discovery can be disabled for fixed-topology deployments.
 	if !cfg.P2P.NoDiscovery {
@@ -423,6 +435,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			MeshServer:          &meshServerAPIAdapter{app: a},
 			UpdateService:       a,
 			UpdateSettings:      a,
+			IPFS:                a.ipfsEmb,
 		}
 		localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, apiOpts)
 		localAPI.Start()
@@ -451,6 +464,11 @@ func (a *App) Close() error {
 			// firstErr is guaranteed to be nil at this point (no earlier assignments in this closure),
 			// so the additional `firstErr == nil` check is redundant.
 			if err := a.localAPI.Shutdown(); err != nil {
+				firstErr = err
+			}
+		}
+		if a.ipfsEmb != nil {
+			if err := a.ipfsEmb.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}

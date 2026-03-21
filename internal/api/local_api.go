@@ -19,6 +19,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
+	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
@@ -179,6 +180,8 @@ type LocalAPIOpts struct {
 	MeshServer     MeshServerProvider
 	UpdateService  UpdateProvider
 	UpdateSettings UpdateSettingsProvider
+	// IPFS 嵌入式閘道與 API（可選）；非空且設定啟用時註冊 /ipfs/ 與 /api/ipfs/*。
+	IPFS *ipfsnode.EmbeddedIPFS
 }
 
 type UpdateProvider interface {
@@ -382,6 +385,18 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 		mux.HandleFunc("/api/v1/exit/status", api.handleExitStatus)
 		mux.HandleFunc("/api/v1/exit/drain", api.handleExitDrain)
 		mux.HandleFunc("/api/v1/exit/resume", api.handleExitResume)
+	}
+
+	if opts != nil && opts.IPFS != nil {
+		if opts.IPFS.GatewayEnabled() {
+			mux.Handle("/ipfs/", opts.IPFS.GatewayHandler())
+		}
+		if opts.IPFS.APIEnabled() {
+			mux.HandleFunc("/api/ipfs/add", api.handleIPFSAdd)
+			mux.HandleFunc("/api/ipfs/add-dir", api.handleIPFSAddDir)
+			mux.HandleFunc("/api/ipfs/stat/", api.handleIPFSStat)
+			mux.HandleFunc("/api/ipfs/pin/", api.handleIPFSPin)
+		}
 	}
 
 	// Console: serve index.html directly from embed (no FileServer, no redirect)

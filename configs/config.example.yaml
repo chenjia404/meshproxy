@@ -22,6 +22,26 @@ socks5:
 api:
   listen: "127.0.0.1:19080"
 
+# 嵌入式 IPFS（复用同一 libp2p host，见 ipfs.md）。需 DHT；从其他节点（如 Kubo）拉取内容时，请把对方 multiaddr 配到 p2p.bootstrap_peers 或确保公网 DHT 可发现。
+ipfs:
+  enabled: false
+  data_dir: ipfs                    # 相对 data_dir，块与元数据目录为 data/ipfs/
+  gateway_enabled: true             # GET /ipfs/...
+  api_enabled: true                 # POST /api/ipfs/add、/api/ipfs/pin/、GET /api/ipfs/stat/...
+  gateway_writable: false           # 原型固定只读，勿改
+  datastore_type: leveldb
+  # blockstore_no_sync: false
+  chunker: size-262144
+  raw_leaves: true
+  cid_version: 1
+  hash_function: sha2-256
+  auto_provide: true
+  reprovide_interval_seconds: 0     # 预留，当前实现未用
+  routing_mode: dht-client          # 说明用，与进程内 DHT 一致
+  fetch_timeout_seconds: 60         # 网关取回超时（秒）
+  auto_pin_on_add: true
+  max_upload_bytes: 67108864        # 单次上传上限，默认 64MiB
+
 # 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
 circuit_pool:
   min_per_pool: 1
