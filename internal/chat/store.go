@@ -1076,7 +1076,8 @@ func deriveSessionState(conversationID, localPeerID, remotePeerID string, localP
 	if err != nil {
 		return sessionState{}, err
 	}
-	k1, k2, err := protocol.DeriveHopKeys(shared)
+	// 與電路 hop 的 DeriveHopKeys 分離，使用 mesh-proxy/chat/e2ee/v1/* HKDF info。
+	k1, k2, err := protocol.DeriveChatSessionKeys(shared)
 	if err != nil {
 		return sessionState{}, err
 	}

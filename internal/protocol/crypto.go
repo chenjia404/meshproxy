@@ -25,8 +25,14 @@ const (
 
 // HKDF labels for per-hop key derivation (document requirement).
 const (
-	HKDFLabelForward = "meshproxy-hop-fwd"
+	HKDFLabelForward  = "meshproxy-hop-fwd"
 	HKDFLabelBackward = "meshproxy-hop-bwd"
+)
+
+// HKDF info for direct chat E2EE session keys — domain-separated from hop/tunnel keys (DeriveHopKeys).
+const (
+	HKDFLabelChatSession0 = "mesh-proxy/chat/e2ee/v1/hkdf-0"
+	HKDFLabelChatSession1 = "mesh-proxy/chat/e2ee/v1/hkdf-1"
 )
 
 // GenerateEphemeralKeyPair 生成一對 X25519 臨時密鑰。返回 (priv, pub, error)。
@@ -67,6 +73,23 @@ func DeriveHopKeys(sharedSecret []byte) (forwardKey, backwardKey []byte, err err
 		return nil, nil, err
 	}
 	return forwardKey, backwardKey, nil
+}
+
+// DeriveChatSessionKeys 從 X25519 共享密鑰經 HKDF-SHA3-256 派生兩把 AEAD 金鑰，供私聊雙向使用；
+// 與 DeriveHopKeys（電路 hop）使用不同 info，避免跨協議金鑰混淆。
+// 兩把金鑰依本地/遠端 peer_id 字典序映射到 SendKey/RecvKey 由呼叫端決定。
+func DeriveChatSessionKeys(sharedSecret []byte) (key0, key1 []byte, err error) {
+	key0 = make([]byte, AEADKeySize)
+	key1 = make([]byte, AEADKeySize)
+	rd := hkdf.New(sha3.New256, sharedSecret, nil, []byte(HKDFLabelChatSession0))
+	if _, err := io.ReadFull(rd, key0); err != nil {
+		return nil, nil, err
+	}
+	rd = hkdf.New(sha3.New256, sharedSecret, nil, []byte(HKDFLabelChatSession1))
+	if _, err := io.ReadFull(rd, key1); err != nil {
+		return nil, nil, err
+	}
+	return key0, key1, nil
 }
 
 // BuildAEADNonce 根據 direction 和 counter 構建 12 字節 nonce，保證不重複。
