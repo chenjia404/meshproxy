@@ -37,9 +37,10 @@ type EmbeddedIPFS struct {
 	bswap          *bitswap.Bitswap
 	gw             http.Handler
 	maxUploadBytes int64
-	gatewayEnabled bool
-	apiEnabled     bool
-	autoPinOnAdd   bool
+	gatewayEnabled  bool
+	gatewayWritable bool
+	apiEnabled      bool
+	autoPinOnAdd    bool
 }
 
 // Service 實作 IPFSService。
@@ -68,6 +69,11 @@ func (e *EmbeddedIPFS) GatewayEnabled() bool {
 // APIEnabled 是否註冊 /api/ipfs/* 寫入與 stat、pin。
 func (e *EmbeddedIPFS) APIEnabled() bool {
 	return e != nil && e.apiEnabled
+}
+
+// GatewayWritable 是否允許 POST/PUT 到 /ipfs/ 上傳（與 /api/ipfs/add 相同）。
+func (e *EmbeddedIPFS) GatewayWritable() bool {
+	return e != nil && e.gatewayWritable
 }
 
 // AutoPinOnAdd 對應設定檔 ipfs.auto_pin_on_add。
@@ -139,14 +145,15 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 		pins:  pinStore,
 	}
 	return &EmbeddedIPFS{
-		svc:            svc,
-		closeDS:        closeDS,
-		bswap:          bswapEx,
-		gw:             gw,
-		maxUploadBytes: cfg.MaxUploadBytes,
-		gatewayEnabled: cfg.GatewayEnabled,
-		apiEnabled:     cfg.APIEnabled,
-		autoPinOnAdd:   cfg.AutoPinOnAdd,
+		svc:             svc,
+		closeDS:         closeDS,
+		bswap:           bswapEx,
+		gw:              gw,
+		maxUploadBytes:  cfg.MaxUploadBytes,
+		gatewayEnabled:  cfg.GatewayEnabled,
+		gatewayWritable: cfg.GatewayWritable,
+		apiEnabled:      cfg.APIEnabled,
+		autoPinOnAdd:    cfg.AutoPinOnAdd,
 	}, nil
 }
 

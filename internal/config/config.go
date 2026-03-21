@@ -68,7 +68,7 @@ type IPFSConfig struct {
 	DataDir string `yaml:"data_dir"`
 
 	GatewayEnabled  bool `yaml:"gateway_enabled"`
-	GatewayWritable bool `yaml:"gateway_writable"` // 原型固定為唯讀，此欄位保留
+	GatewayWritable bool `yaml:"gateway_writable"` // true 時允許 POST/PUT /ipfs/ 上傳（multipart，欄位 file，行為同 /api/ipfs/add）
 
 	APIEnabled bool `yaml:"api_enabled"`
 
@@ -330,7 +330,7 @@ func Default() Config {
 			Enabled:             true,
 			DataDir:             "ipfs",
 			GatewayEnabled:      true,
-			GatewayWritable:     false,
+			GatewayWritable:     true,
 			APIEnabled:          true,
 			DatastoreType:       "leveldb",
 			Chunker:             "size-262144",

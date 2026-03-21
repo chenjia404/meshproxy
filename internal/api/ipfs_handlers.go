@@ -40,6 +40,24 @@ func (a *LocalAPI) handleIPFSAdd(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.execIPFSAdd(w, r)
+}
+
+// handleIPFSGatewayUpload 處理 POST/PUT /ipfs 與 /ipfs/（需 gateway_writable）。
+func (a *LocalAPI) handleIPFSGatewayUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		writeIPFSError(w, "BAD_REQUEST", "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.IPFS == nil || !a.opts.IPFS.GatewayWritable() {
+		http.NotFound(w, r)
+		return
+	}
+	a.execIPFSAdd(w, r)
+}
+
+// execIPFSAdd multipart 欄位 file，行為同 /api/ipfs/add。
+func (a *LocalAPI) execIPFSAdd(w http.ResponseWriter, r *http.Request) {
 	maxB := a.opts.IPFS.MaxUploadBytes()
 	r.Body = http.MaxBytesReader(w, r.Body, maxB+1)
 	if err := r.ParseMultipartForm(maxB + 1); err != nil {
@@ -107,6 +125,29 @@ func (a *LocalAPI) handleIPFSAdd(w http.ResponseWriter, r *http.Request) {
 		"size":   size,
 		"pinned": pinned,
 	})
+}
+
+// serveIPFSGateway 閘道讀取 + 可選 POST/PUT /ipfs/ 寫入。
+func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.IPFS == nil {
+		http.NotFound(w, r)
+		return
+	}
+	gw := a.opts.IPFS.GatewayHandler()
+	p := r.URL.Path
+	if a.opts.IPFS.GatewayWritable() && (p == "/ipfs" || p == "/ipfs/") {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			a.handleIPFSGatewayUpload(w, r)
+			return
+		}
+	}
+	if strings.HasPrefix(p, "/ipfs/") && p != "/ipfs/" {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeIPFSError(w, "BAD_REQUEST", "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	}
+	gw.ServeHTTP(w, r)
 }
 
 func (a *LocalAPI) handleIPFSAddDir(w http.ResponseWriter, r *http.Request) {

@@ -28,7 +28,7 @@ ipfs:
   data_dir: ipfs                    # 相对 data_dir，块与元数据目录为 data/ipfs/
   gateway_enabled: true             # GET /ipfs/...
   api_enabled: true                 # POST /api/ipfs/add、/api/ipfs/pin/、GET /api/ipfs/stat/...
-  gateway_writable: false           # 原型固定只读，勿改
+  gateway_writable: true            # POST/PUT /ipfs/ 上传（multipart file，同 /api/ipfs/add）；公网监听时请改为 false
   datastore_type: leveldb
   # blockstore_no_sync: false
   chunker: size-262144

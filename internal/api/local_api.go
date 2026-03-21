@@ -389,7 +389,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 
 	if opts != nil && opts.IPFS != nil {
 		if opts.IPFS.GatewayEnabled() {
-			mux.Handle("/ipfs/", opts.IPFS.GatewayHandler())
+			mux.HandleFunc("/ipfs", api.serveIPFSGateway)
+			mux.HandleFunc("/ipfs/", api.serveIPFSGateway)
 		}
 		if opts.IPFS.APIEnabled() {
 			mux.HandleFunc("/api/ipfs/add", api.handleIPFSAdd)
