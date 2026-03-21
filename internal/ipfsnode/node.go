@@ -32,15 +32,19 @@ var ErrNotImplemented = errors.New("not implemented")
 
 // EmbeddedIPFS 綁定共享 libp2p host 的 IPFS 子系統。
 type EmbeddedIPFS struct {
-	svc            *service
-	closeDS        func() error
-	bswap          *bitswap.Bitswap
-	gw             http.Handler
-	maxUploadBytes int64
+	svc             *service
+	closeDS         func() error
+	bswap           *bitswap.Bitswap
+	gw              http.Handler
+	maxUploadBytes  int64
 	gatewayEnabled  bool
 	gatewayWritable bool
 	apiEnabled      bool
 	autoPinOnAdd    bool
+	cidVersion      int
+	hashFunction    string
+	chunker         string
+	rawLeaves       bool
 }
 
 // Service 實作 IPFSService。
@@ -79,6 +83,38 @@ func (e *EmbeddedIPFS) GatewayWritable() bool {
 // AutoPinOnAdd 對應設定檔 ipfs.auto_pin_on_add。
 func (e *EmbeddedIPFS) AutoPinOnAdd() bool {
 	return e != nil && e.autoPinOnAdd
+}
+
+// CIDVersion returns the default CID version used for file imports.
+func (e *EmbeddedIPFS) CIDVersion() int {
+	if e == nil || e.cidVersion <= 0 {
+		return 1
+	}
+	return e.cidVersion
+}
+
+// HashFunction returns the default multihash function used for file imports.
+func (e *EmbeddedIPFS) HashFunction() string {
+	if e == nil || e.hashFunction == "" {
+		return "sha2-256"
+	}
+	return e.hashFunction
+}
+
+// Chunker returns the default chunker spec used for file imports.
+func (e *EmbeddedIPFS) Chunker() string {
+	if e == nil || e.chunker == "" {
+		return "size-1048576"
+	}
+	return e.chunker
+}
+
+// RawLeaves returns the default raw-leaves setting used for file imports.
+func (e *EmbeddedIPFS) RawLeaves() bool {
+	if e == nil {
+		return true
+	}
+	return e.rawLeaves
 }
 
 // Close 釋放 bitswap 與本地 datastore。
@@ -154,15 +190,27 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 		gatewayWritable: cfg.GatewayWritable,
 		apiEnabled:      cfg.APIEnabled,
 		autoPinOnAdd:    cfg.AutoPinOnAdd,
+		cidVersion:      cfg.CIDVersion,
+		hashFunction:    cfg.HashFunction,
+		chunker:         cfg.Chunker,
+		rawLeaves:       cfg.RawLeaves,
 	}, nil
 }
 
 func (s *service) AddFile(ctx context.Context, r io.Reader, opt AddFileOptions) (cid.Cid, error) {
 	chunkSize := ipfsunixfs.ChunkSizeFromSpec(opt.Chunker)
 	if chunkSize <= 0 {
-		chunkSize = 262144
+		chunkSize = 1048576
 	}
-	nd, err := ipfsunixfs.AddFileFromReader(ctx, s.dag, r, chunkSize, opt.RawLeaves)
+	nd, err := ipfsunixfs.AddFileFromReader(
+		ctx,
+		s.dag,
+		r,
+		chunkSize,
+		opt.RawLeaves,
+		opt.CIDVersion,
+		opt.HashFunction,
+	)
 	if err != nil {
 		return cid.Cid{}, err
 	}

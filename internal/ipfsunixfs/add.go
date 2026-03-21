@@ -3,6 +3,7 @@ package ipfsunixfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -17,9 +18,9 @@ import (
 	mh "github.com/multiformats/go-multihash"
 )
 
-// ChunkSizeFromSpec 解析 "size-262144" 或回傳預設 262144。
+// ChunkSizeFromSpec 解析 "size-1048576" 或回傳預設 1048576。
 func ChunkSizeFromSpec(spec string) int {
-	const def = 262144
+	const def = 1048576
 	if spec == "" {
 		return def
 	}
@@ -31,19 +32,41 @@ func ChunkSizeFromSpec(spec string) int {
 	return def
 }
 
-// CidBuilderV1UnixFS 預設 CIDv1 + dag-pb + sha2-256（與 kubo 預設一致）。
-func CidBuilderV1UnixFS() cid.Builder {
-	return cid.V1Builder{Codec: cid.DagProtobuf, MhType: mh.SHA2_256}
+// CidBuilderV1UnixFS 依 hashFunction 建立 CIDv1 builder；預設 sha2-256。
+func CidBuilderV1UnixFS(hashFunction string) (cid.Builder, error) {
+	switch normalizeHashFunction(hashFunction) {
+	case "", "sha2-256":
+		return cid.V1Builder{Codec: cid.DagProtobuf, MhType: mh.SHA2_256}, nil
+	case "sha2-512":
+		return cid.V1Builder{Codec: cid.DagProtobuf, MhType: mh.SHA2_512}, nil
+	default:
+		return nil, fmt.Errorf("unsupported ipfs hash function: %s", hashFunction)
+	}
 }
 
 // AddFileFromReader 以 balanced UnixFS 匯入單檔並寫入 DAGService。
-func AddFileFromReader(ctx context.Context, ds ipld.DAGService, r io.Reader, chunkSize int, rawLeaves bool) (ipld.Node, error) {
+func AddFileFromReader(
+	ctx context.Context,
+	ds ipld.DAGService,
+	r io.Reader,
+	chunkSize int,
+	rawLeaves bool,
+	cidVersion int,
+	hashFunction string,
+) (ipld.Node, error) {
 	_ = ctx
+	if cidVersion != 1 {
+		return nil, fmt.Errorf("only cidVersion=1 supported")
+	}
+	builder, err := CidBuilderV1UnixFS(hashFunction)
+	if err != nil {
+		return nil, err
+	}
 	dbp := h.DagBuilderParams{
 		Dagserv:    ds,
 		Maxlinks:   h.DefaultLinksPerBlock,
 		RawLeaves:  rawLeaves,
-		CidBuilder: CidBuilderV1UnixFS(),
+		CidBuilder: builder,
 	}
 	spl := chunker.NewSizeSplitter(r, int64(chunkSize))
 	db, err := dbp.New(spl)
@@ -51,6 +74,10 @@ func AddFileFromReader(ctx context.Context, ds ipld.DAGService, r io.Reader, chu
 		return nil, err
 	}
 	return bal.Layout(db)
+}
+
+func normalizeHashFunction(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 // UnixFSFileSize 回傳 UnixFS 檔案根節點的邏輯大小（位元組）。

@@ -31,7 +31,7 @@ ipfs:
   gateway_writable: true            # POST/PUT /ipfs/ 上传（multipart file，同 /api/ipfs/add）；公网监听时请改为 false
   datastore_type: leveldb
   # blockstore_no_sync: false
-  chunker: size-262144
+  chunker: size-1048576
   raw_leaves: true
   cid_version: 1
   hash_function: sha2-256

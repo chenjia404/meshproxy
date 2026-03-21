@@ -80,11 +80,19 @@ func (a *LocalAPI) execIPFSAdd(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("pin"); v != "" {
 		pin, _ = strconv.ParseBool(v)
 	}
-	rawLeaves := true
+	rawLeaves := a.opts.IPFS.RawLeaves()
 	if v := r.FormValue("rawLeaves"); v != "" {
 		rawLeaves, _ = strconv.ParseBool(v)
 	}
-	cidVer := 1
+	hashFunction := a.opts.IPFS.HashFunction()
+	if v := r.FormValue("hashFunction"); v != "" {
+		hashFunction = v
+	}
+	chunker := a.opts.IPFS.Chunker()
+	if v := r.FormValue("chunker"); v != "" {
+		chunker = v
+	}
+	cidVer := a.opts.IPFS.CIDVersion()
 	if v := r.FormValue("cidVersion"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cidVer = n
@@ -96,11 +104,12 @@ func (a *LocalAPI) execIPFSAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	opt := ipfsnode.AddFileOptions{
-		Filename:   r.FormValue("filename"),
-		RawLeaves:  rawLeaves,
-		CIDVersion: cidVer,
-		Chunker:    "size-262144",
-		Pin:        pin,
+		Filename:     r.FormValue("filename"),
+		RawLeaves:    rawLeaves,
+		CIDVersion:   cidVer,
+		HashFunction: hashFunction,
+		Chunker:      chunker,
+		Pin:          pin,
 	}
 	svc := a.opts.IPFS.Service()
 	c, err := svc.AddFile(r.Context(), file, opt)

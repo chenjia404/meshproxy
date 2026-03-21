@@ -333,7 +333,7 @@ func Default() Config {
 			GatewayWritable:     true,
 			APIEnabled:          true,
 			DatastoreType:       "leveldb",
-			Chunker:             "size-262144",
+			Chunker:             "size-1048576",
 			RawLeaves:           true,
 			CIDVersion:          1,
 			HashFunction:        "sha2-256",
@@ -531,7 +531,7 @@ func (c *IPFSConfig) normalize() error {
 		c.DatastoreType = "leveldb"
 	}
 	if c.Chunker == "" {
-		c.Chunker = "size-262144"
+		c.Chunker = "size-1048576"
 	}
 	if c.CIDVersion == 0 {
 		c.CIDVersion = 1

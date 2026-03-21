@@ -26,11 +26,12 @@ type IPFSService interface {
 
 // AddFileOptions 控制 UnixFS 匯入參數。
 type AddFileOptions struct {
-	Filename   string
-	RawLeaves  bool
-	CIDVersion int
-	Chunker    string
-	Pin        bool
+	Filename     string
+	RawLeaves    bool
+	CIDVersion   int
+	HashFunction string
+	Chunker      string
+	Pin          bool
 }
 
 // AddDirOptions 目錄匯入（首版可未實作）。
