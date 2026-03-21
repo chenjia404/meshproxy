@@ -24,7 +24,7 @@ api:
 
 # 嵌入式 IPFS（复用同一 libp2p host，见 ipfs.md）。需 DHT；从其他节点（如 Kubo）拉取内容时，请把对方 multiaddr 配到 p2p.bootstrap_peers 或确保公网 DHT 可发现。
 ipfs:
-  enabled: false
+  enabled: true
   data_dir: ipfs                    # 相对 data_dir，块与元数据目录为 data/ipfs/
   gateway_enabled: true             # GET /ipfs/...
   api_enabled: true                 # POST /api/ipfs/add、/api/ipfs/pin/、GET /api/ipfs/stat/...

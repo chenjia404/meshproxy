@@ -67,25 +67,25 @@ type IPFSConfig struct {
 	// DataDir 相對於根 DataDir 的子目錄，存放 ipfs 資料；空則為 "ipfs"。
 	DataDir string `yaml:"data_dir"`
 
-	GatewayEnabled bool   `yaml:"gateway_enabled"`
-	GatewayWritable bool  `yaml:"gateway_writable"` // 原型固定為唯讀，此欄位保留
+	GatewayEnabled  bool `yaml:"gateway_enabled"`
+	GatewayWritable bool `yaml:"gateway_writable"` // 原型固定為唯讀，此欄位保留
 
 	APIEnabled bool `yaml:"api_enabled"`
 
 	// Storage
-	DatastoreType   string `yaml:"datastore_type"` // "leveldb"
-	BlockstoreNoSync bool  `yaml:"blockstore_no_sync"`
+	DatastoreType    string `yaml:"datastore_type"` // "leveldb"
+	BlockstoreNoSync bool   `yaml:"blockstore_no_sync"`
 
 	// Import（預設與 ipfs.md 一致）
-	Chunker    string `yaml:"chunker"`
-	RawLeaves  bool   `yaml:"raw_leaves"`
-	CIDVersion int    `yaml:"cid_version"`
+	Chunker      string `yaml:"chunker"`
+	RawLeaves    bool   `yaml:"raw_leaves"`
+	CIDVersion   int    `yaml:"cid_version"`
 	HashFunction string `yaml:"hash_function"`
 
 	// Provide / routing
-	AutoProvide               bool `yaml:"auto_provide"`
-	ReprovideIntervalSeconds  int  `yaml:"reprovide_interval_seconds"`
-	RoutingMode               string `yaml:"routing_mode"`
+	AutoProvide              bool   `yaml:"auto_provide"`
+	ReprovideIntervalSeconds int    `yaml:"reprovide_interval_seconds"`
+	RoutingMode              string `yaml:"routing_mode"`
 
 	// Fetch
 	FetchTimeoutSeconds int `yaml:"fetch_timeout_seconds"`
@@ -322,26 +322,26 @@ func Default() Config {
 			},
 		},
 		MeshServer: MeshServerConfig{
-			Enabled:     false,
+			Enabled:     true,
 			ClientAgent: "meshproxy-client",
 			ProtocolID:  "/meshserver/session/1.0.0",
 		},
 		IPFS: IPFSConfig{
-			Enabled:          false,
-			DataDir:          "ipfs",
-			GatewayEnabled:   true,
-			GatewayWritable:  false,
-			APIEnabled:       true,
-			DatastoreType:    "leveldb",
-			Chunker:          "size-262144",
-			RawLeaves:        true,
-			CIDVersion:       1,
-			HashFunction:     "sha2-256",
-			AutoProvide:      true,
-			RoutingMode:      "dht-client",
+			Enabled:             true,
+			DataDir:             "ipfs",
+			GatewayEnabled:      true,
+			GatewayWritable:     false,
+			APIEnabled:          true,
+			DatastoreType:       "leveldb",
+			Chunker:             "size-262144",
+			RawLeaves:           true,
+			CIDVersion:          1,
+			HashFunction:        "sha2-256",
+			AutoProvide:         true,
+			RoutingMode:         "dht-client",
 			FetchTimeoutSeconds: 60,
-			AutoPinOnAdd:     true,
-			MaxUploadBytes:   64 << 20,
+			AutoPinOnAdd:        true,
+			MaxUploadBytes:      64 << 20,
 		},
 	}
 }
