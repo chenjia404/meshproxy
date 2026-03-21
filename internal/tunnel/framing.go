@@ -7,14 +7,17 @@ import (
 	"io"
 )
 
-const maxFrameSize = 1 << 20
+// MaxJSONFrameSize limits a single JSON frame payload. Chat/file payloads are
+// base64-encoded inside JSON, so keep enough headroom for common multi-MB
+// attachments while still bounding per-frame memory usage.
+const MaxJSONFrameSize = 16 << 20
 
 func WriteJSONFrame(w io.Writer, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	if len(data) > maxFrameSize {
+	if len(data) > MaxJSONFrameSize {
 		return fmt.Errorf("frame too large: %d", len(data))
 	}
 	var size [4]byte
@@ -32,7 +35,7 @@ func ReadJSONFrame(r io.Reader, v any) error {
 		return err
 	}
 	n := binary.BigEndian.Uint32(size[:])
-	if n == 0 || n > maxFrameSize {
+	if n == 0 || n > MaxJSONFrameSize {
 		return fmt.Errorf("invalid frame size %d", n)
 	}
 	data := make([]byte, n)

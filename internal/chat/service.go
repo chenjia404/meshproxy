@@ -63,6 +63,7 @@ const (
 	directRetryBatchSize        = 64
 	directAckWait               = 20 * time.Second
 	directSyncBatchSize         = 256
+	directSyncMaxRounds         = 64
 	directAutoConnectTTL        = 30 * time.Second
 	directChatRequestProbeTTL   = 1 * time.Minute
 	directProfileSyncTTL        = 1 * time.Minute
@@ -1079,19 +1080,39 @@ func (s *Service) SyncConversation(conversationID string) error {
 	if err != nil {
 		return err
 	}
-	req := ChatSyncRequest{
-		Type:           MessageTypeChatSyncRequest,
-		ConversationID: conversationID,
-		FromPeerID:     s.localPeer,
-		ToPeerID:       conv.PeerID,
-		NextCounter:    sess.RecvCounter,
-		SentAtUnix:     time.Now().UTC().UnixMilli(),
+	return s.syncConversationFromCounter(conversationID, conv.PeerID, sess.RecvCounter)
+}
+
+func (s *Service) syncConversationFromCounter(conversationID, peerID string, nextCounter uint64) error {
+	for round := 0; round < directSyncMaxRounds; round++ {
+		req := ChatSyncRequest{
+			Type:           MessageTypeChatSyncRequest,
+			ConversationID: conversationID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       peerID,
+			NextCounter:    nextCounter,
+			SentAtUnix:     time.Now().UTC().UnixMilli(),
+		}
+		resp, err := s.requestChatSync(peerID, req)
+		if err != nil {
+			return err
+		}
+		if err := s.applyChatSyncResponse(conversationID, resp); err != nil {
+			return err
+		}
+		sess, err := s.store.GetSessionState(conversationID)
+		if err != nil {
+			return err
+		}
+		if sess.RecvCounter >= resp.RemoteSendCounter {
+			return nil
+		}
+		if sess.RecvCounter <= nextCounter {
+			return fmt.Errorf("chat sync made no progress conversation=%s next_counter=%d remote_send_counter=%d", conversationID, nextCounter, resp.RemoteSendCounter)
+		}
+		nextCounter = sess.RecvCounter
 	}
-	resp, err := s.requestChatSync(conv.PeerID, req)
-	if err != nil {
-		return err
-	}
-	return s.applyChatSyncResponse(conversationID, resp)
+	return fmt.Errorf("chat sync exceeded max rounds conversation=%s rounds=%d", conversationID, directSyncMaxRounds)
 }
 
 func (s *Service) NetworkStatus() map[string]any {
@@ -2577,22 +2598,8 @@ func (s *Service) markOutboxSentToTransport(msgID, peerID string, retryCount int
 
 func (s *Service) triggerConversationSync(conversationID, peerID string, nextCounter uint64) {
 	safe.Go("chat.syncOnGap", func() {
-		req := ChatSyncRequest{
-			Type:           MessageTypeChatSyncRequest,
-			ConversationID: conversationID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       peerID,
-			NextCounter:    nextCounter,
-			SentAtUnix:     time.Now().UTC().UnixMilli(),
-		}
-		resp, err := s.requestChatSync(peerID, req)
-		if err != nil {
+		if err := s.syncConversationFromCounter(conversationID, peerID, nextCounter); err != nil {
 			log.Printf("[chat] sync on gap failed conversation=%s peer=%s: %v", conversationID, peerID, err)
-			return
-		}
-		if err := s.applyChatSyncResponse(conversationID, resp); err != nil {
-			log.Printf("[chat] apply synced response failed conversation=%s: %v", conversationID, err)
-			return
 		}
 	})
 }
@@ -2668,6 +2675,7 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 	resp := ChatSyncResponse{
 		Type:           MessageTypeChatSyncResponse,
 		ConversationID: req.ConversationID,
+		FromPeerID:     s.localPeer,
 	}
 	if sess, err := s.store.GetSessionState(req.ConversationID); err == nil {
 		resp.RemoteSendCounter = sess.SendCounter
@@ -2697,8 +2705,24 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 		default:
 			return ChatSyncResponse{}, fmt.Errorf("unsupported chat sync wire %T", wire)
 		}
+		encoded, err := json.Marshal(resp)
+		if err != nil {
+			return ChatSyncResponse{}, err
+		}
+		if len(encoded) <= tunnel.MaxJSONFrameSize {
+			continue
+		}
+		switch wire.(type) {
+		case ChatText:
+			resp.Messages = resp.Messages[:len(resp.Messages)-1]
+		case ChatFile:
+			resp.Files = resp.Files[:len(resp.Files)-1]
+		}
+		if len(resp.Messages) == 0 && len(resp.Files) == 0 {
+			return ChatSyncResponse{}, fmt.Errorf("chat sync item too large msg=%s size=%d", item.MsgID, len(encoded))
+		}
+		break
 	}
-	resp.FromPeerID = s.localPeer
 	return resp, nil
 }
 
