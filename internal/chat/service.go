@@ -2400,6 +2400,12 @@ func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string
 	if strings.TrimSpace(ack.MsgID) == "" {
 		return nil
 	}
+	// 中繼路徑無 libp2p RemotePeer 綁定，必須驗證 FromPeerID 的 relay 簽名（與 sendViaRelay/attachRelaySignature 對應）。
+	if strings.TrimSpace(streamPeerID) == "" {
+		if err := s.verifyRelayDeliveryAckSignature(ack); err != nil {
+			return err
+		}
+	}
 	// 直连流上回执必须由声明的 from_peer_id 与发流者一致（即接收方本人）。
 	if streamPeerID != "" && strings.TrimSpace(ack.FromPeerID) != "" &&
 		strings.TrimSpace(ack.FromPeerID) != strings.TrimSpace(streamPeerID) {

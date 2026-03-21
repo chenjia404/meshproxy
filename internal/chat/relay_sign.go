@@ -135,6 +135,16 @@ func marshalDeliveryAckForRelaySigning(m DeliveryAck) ([]byte, error) {
 	})
 }
 
+// verifyRelayDeliveryAckSignature 驗證中繼路徑上的 delivery_ack：聲稱發送方 FromPeerID 須以 libp2p 身份密鑰簽名（與 signRelayDeliveryAck 對應）。
+// 直連流不依賴此函數，而以 RemotePeer 綁定 FromPeerID。
+func (s *Service) verifyRelayDeliveryAckSignature(ack DeliveryAck) error {
+	canon, err := marshalDeliveryAckForRelaySigning(ack)
+	if err != nil {
+		return err
+	}
+	return s.verifyRelayEnvelopeCanonical(ack.FromPeerID, MessageTypeDeliveryAck, canon, ack.Signature)
+}
+
 func marshalMessageRevokeForRelaySigning(m MessageRevoke) ([]byte, error) {
 	return json.Marshal(struct {
 		Type           string `json:"type"`
@@ -754,6 +764,7 @@ func (s *Service) signRelayAvatarResponse(m AvatarResponse) (AvatarResponse, err
 }
 
 // verifyRelayInboundEnvelope 僅用於中繼解包後的 JSON；直連流不依賴此路徑。
+// delivery_ack 的簽名改在 handleIncomingDeliveryAck（relay）內驗證，見 verifyRelayDeliveryAckSignature。
 func (s *Service) verifyRelayInboundEnvelope(env map[string]any) error {
 	typ, ok := env["type"].(string)
 	if !ok || typ == "" {
@@ -782,16 +793,7 @@ func (s *Service) verifyRelayInboundEnvelope(env map[string]any) error {
 		}
 		return s.verifyRelayEnvelopeCanonical(msg.FromPeerID, MessageTypeChatFile, canon, msg.Signature)
 
-	case MessageTypeDeliveryAck:
-		var ack DeliveryAck
-		if err := remarshal(env, &ack); err != nil {
-			return err
-		}
-		canon, err := marshalDeliveryAckForRelaySigning(ack)
-		if err != nil {
-			return err
-		}
-		return s.verifyRelayEnvelopeCanonical(ack.FromPeerID, MessageTypeDeliveryAck, canon, ack.Signature)
+	// delivery_ack：簽名在 handleIncomingDeliveryAck（relay / streamPeerID 為空）內強制驗證，避免與業務邏輯脫節。
 
 	case MessageTypeMessageRevoke:
 		var msg MessageRevoke
