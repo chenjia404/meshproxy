@@ -43,3 +43,8 @@
 - 經中繼隧道轉發的私聊控制/訊息封包（`sendViaRelay`）在發送前會用 **本地 libp2p 身份私鑰**對「不含 signature 的規範 JSON」簽名，並寫入 `signature`；類型前綴為 `mesh-proxy/chat/relay/v1:<type>\n` 以防跨類型重放。
 - 中繼入口 `processEnvelopeBytes` 在處理非群組封包前會用 **聲稱發件人（通常為 `from_peer_id`）**的公鑰驗簽；群組封包仍沿用既有群組簽名，不重複加 relay 簽。
 - 直連流不經此驗簽（仍以 RemotePeer 綁定身份）；**升級後舊節點若只發無簽名中繼封包，會被對端拒收**。
+
+## 私聊 E2EE HKDF 與 hop 分離
+
+- 私聊會話金鑰改由 **`protocol.DeriveChatSessionKeys`** 派生，HKDF info 為 `mesh-proxy/chat/e2ee/v1/hkdf-0` / `hkdf-1`，**不再**使用 `meshproxy-hop-fwd` / `meshproxy-hop-bwd`。
+- **相容性**：已用舊 HKDF 寫入 `session_states` 的節點，升級後與對端金鑰不一致，無法解密舊訊息；需刪除該會話並重新走好友/接受流程以重建 session，或清空相關本地 DB。
