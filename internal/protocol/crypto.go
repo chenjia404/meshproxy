@@ -106,6 +106,8 @@ func BuildAEADNonce(direction string, counter uint64) []byte {
 
 const groupChatNonceLabel = "mesh-proxy/chat/group_aead_nonce/v1\x00"
 
+const chatFileChunkNonceLabel = "mesh-proxy/chat/file_chunk_aead_nonce/v1\x00"
+
 // BuildGroupChatNonce 產生群組訊息 AEAD 專用 12 字節 nonce：SHA256(label || group_id || 0 || sender_peer_id || 0 || be64(sender_seq))[:12]。
 // 多名成員共用同一群金鑰時，必須把發送者綁進 nonce，避免不同發送者同一 sender_seq 造成 nonce 重用。
 func BuildGroupChatNonce(groupID, senderPeerID string, senderSeq uint64) []byte {
@@ -118,6 +120,20 @@ func BuildGroupChatNonce(groupID, senderPeerID string, senderSeq uint64) []byte 
 	var seq [8]byte
 	binary.BigEndian.PutUint64(seq[:], senderSeq)
 	_, _ = h.Write(seq[:])
+	sum := h.Sum(nil)
+	return sum[:AEADNonceSize]
+}
+
+// BuildChatFileChunkNonce 產生私聊文件分塊 AEAD 專用 12 字節 nonce：
+// SHA256(label || msg_id || 0 || be64(offset))[:12]。
+func BuildChatFileChunkNonce(msgID string, offset uint64) []byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte(chatFileChunkNonceLabel))
+	_, _ = h.Write([]byte(msgID))
+	_, _ = h.Write([]byte{0})
+	var off [8]byte
+	binary.BigEndian.PutUint64(off[:], offset)
+	_, _ = h.Write(off[:])
 	sum := h.Sum(nil)
 	return sum[:AEADNonceSize]
 }
@@ -176,8 +192,8 @@ func NewHopSessionFromKeyExchange(peerID string, role HopRole, localPriv, remote
 		return nil, err
 	}
 	return &HopSession{
-		PeerID:      peerID,
-		Role:        role,
+		PeerID:       peerID,
+		Role:         role,
 		SharedSecret: shared,
 		ForwardKey:   fwd,
 		BackwardKey:  bwd,

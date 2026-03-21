@@ -9,6 +9,9 @@ import (
 // 推进 session_states.recv_counter。若 incrementUnread 为 true，同时将 conversations.unread_count 加 1（实时入站；
 // 历史同步回放应传 false）。提交成功后，上层再发 delivery_ack，避免「已回执但游标/库不一致」。
 func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext []byte, newRecvCounter uint64, incrementUnread bool) error {
+	if ciphertext == nil {
+		ciphertext = []byte{}
+	}
 	deliveredAt := ""
 	if !msg.DeliveredAt.IsZero() {
 		deliveredAt = msg.DeliveredAt.UTC().Format(time.RFC3339Nano)
@@ -60,6 +63,9 @@ func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext [
 }
 
 func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
+	if ciphertext == nil {
+		ciphertext = []byte{}
+	}
 	deliveredAt := ""
 	if !msg.DeliveredAt.IsZero() {
 		deliveredAt = msg.DeliveredAt.UTC().Format(time.RFC3339Nano)

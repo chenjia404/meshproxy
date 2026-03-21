@@ -110,6 +110,56 @@ func marshalChatFileForRelaySigning(m ChatFile) ([]byte, error) {
 	})
 }
 
+func marshalChatFileFetchRequestForRelaySigning(m ChatFileFetchRequest) ([]byte, error) {
+	return json.Marshal(struct {
+		Type           string `json:"type"`
+		ConversationID string `json:"conversation_id"`
+		MsgID          string `json:"msg_id"`
+		FromPeerID     string `json:"from_peer_id"`
+		ToPeerID       string `json:"to_peer_id"`
+		Offset         uint64 `json:"offset"`
+		ChunkSize      int    `json:"chunk_size"`
+		SentAtUnix     int64  `json:"sent_at_unix"`
+	}{
+		Type:           m.Type,
+		ConversationID: m.ConversationID,
+		MsgID:          m.MsgID,
+		FromPeerID:     m.FromPeerID,
+		ToPeerID:       m.ToPeerID,
+		Offset:         m.Offset,
+		ChunkSize:      m.ChunkSize,
+		SentAtUnix:     m.SentAtUnix,
+	})
+}
+
+func marshalChatFileFetchResponseForRelaySigning(m ChatFileFetchResponse) ([]byte, error) {
+	return json.Marshal(struct {
+		Type           string `json:"type"`
+		ConversationID string `json:"conversation_id"`
+		MsgID          string `json:"msg_id"`
+		FromPeerID     string `json:"from_peer_id"`
+		ToPeerID       string `json:"to_peer_id"`
+		Offset         uint64 `json:"offset"`
+		Eof            bool   `json:"eof"`
+		FileSize       int64  `json:"file_size"`
+		Ciphertext     []byte `json:"ciphertext,omitempty"`
+		Error          string `json:"error,omitempty"`
+		SentAtUnix     int64  `json:"sent_at_unix"`
+	}{
+		Type:           m.Type,
+		ConversationID: m.ConversationID,
+		MsgID:          m.MsgID,
+		FromPeerID:     m.FromPeerID,
+		ToPeerID:       m.ToPeerID,
+		Offset:         m.Offset,
+		Eof:            m.Eof,
+		FileSize:       m.FileSize,
+		Ciphertext:     m.Ciphertext,
+		Error:          m.Error,
+		SentAtUnix:     m.SentAtUnix,
+	})
+}
+
 func relayKindForChatText(m ChatText) string {
 	if m.Type != "" {
 		return m.Type
@@ -450,6 +500,16 @@ func (s *Service) attachRelaySignature(v any) (any, error) {
 	case *ChatFile:
 		return s.signRelayChatFile(*m)
 
+	case ChatFileFetchRequest:
+		return s.signRelayChatFileFetchRequest(m)
+	case *ChatFileFetchRequest:
+		return s.signRelayChatFileFetchRequest(*m)
+
+	case ChatFileFetchResponse:
+		return s.signRelayChatFileFetchResponse(m)
+	case *ChatFileFetchResponse:
+		return s.signRelayChatFileFetchResponse(*m)
+
 	case DeliveryAck:
 		return s.signRelayDeliveryAck(m)
 	case *DeliveryAck:
@@ -548,6 +608,40 @@ func (s *Service) signRelayChatFile(m ChatFile) (ChatFile, error) {
 	sig, err := s.signRelayEnvelopeCanonical(MessageTypeChatFile, canon)
 	if err != nil {
 		return ChatFile{}, err
+	}
+	m.Signature = sig
+	return m, nil
+}
+
+func (s *Service) signRelayChatFileFetchRequest(m ChatFileFetchRequest) (ChatFileFetchRequest, error) {
+	if err := s.relaySignerMustBeLocal(m.FromPeerID); err != nil {
+		return ChatFileFetchRequest{}, err
+	}
+	canon, err := marshalChatFileFetchRequestForRelaySigning(m)
+	if err != nil {
+		return ChatFileFetchRequest{}, err
+	}
+	sig, err := s.signRelayEnvelopeCanonical(MessageTypeChatFileFetchRequest, canon)
+	if err != nil {
+		return ChatFileFetchRequest{}, err
+	}
+	m.Signature = sig
+	return m, nil
+}
+
+func (s *Service) signRelayChatFileFetchResponse(m ChatFileFetchResponse) (ChatFileFetchResponse, error) {
+	if strings.TrimSpace(m.FromPeerID) == "" {
+		m.FromPeerID = s.localPeer
+	} else if err := s.relaySignerMustBeLocal(m.FromPeerID); err != nil {
+		return ChatFileFetchResponse{}, err
+	}
+	canon, err := marshalChatFileFetchResponseForRelaySigning(m)
+	if err != nil {
+		return ChatFileFetchResponse{}, err
+	}
+	sig, err := s.signRelayEnvelopeCanonical(MessageTypeChatFileFetchResponse, canon)
+	if err != nil {
+		return ChatFileFetchResponse{}, err
 	}
 	m.Signature = sig
 	return m, nil
@@ -792,6 +886,31 @@ func (s *Service) verifyRelayInboundEnvelope(env map[string]any) error {
 			return err
 		}
 		return s.verifyRelayEnvelopeCanonical(msg.FromPeerID, MessageTypeChatFile, canon, msg.Signature)
+
+	case MessageTypeChatFileFetchRequest:
+		var msg ChatFileFetchRequest
+		if err := remarshal(env, &msg); err != nil {
+			return err
+		}
+		canon, err := marshalChatFileFetchRequestForRelaySigning(msg)
+		if err != nil {
+			return err
+		}
+		return s.verifyRelayEnvelopeCanonical(msg.FromPeerID, MessageTypeChatFileFetchRequest, canon, msg.Signature)
+
+	case MessageTypeChatFileFetchResponse:
+		var msg ChatFileFetchResponse
+		if err := remarshal(env, &msg); err != nil {
+			return err
+		}
+		if strings.TrimSpace(msg.FromPeerID) == "" {
+			return errors.New("relay chat file fetch response missing from_peer_id")
+		}
+		canon, err := marshalChatFileFetchResponseForRelaySigning(msg)
+		if err != nil {
+			return err
+		}
+		return s.verifyRelayEnvelopeCanonical(msg.FromPeerID, MessageTypeChatFileFetchResponse, canon, msg.Signature)
 
 	// delivery_ack：簽名在 handleIncomingDeliveryAck（relay / streamPeerID 為空）內強制驗證，避免與業務邏輯脫節。
 

@@ -3,23 +3,25 @@ package chat
 import "time"
 
 const (
-	MessageTypeSessionRequest    = "session_request"
-	MessageTypeSessionAccept     = "session_accept"
-	MessageTypeSessionReject     = "session_reject"
-	MessageTypeSessionAcceptAck  = "session_accept_ack"
-	MessageTypeProfileSync       = "profile_sync"
-	MessageTypeAvatarRequest     = "avatar_request"
-	MessageTypeAvatarResponse    = "avatar_response"
-	MessageTypeChatText          = "chat_text"
-	MessageTypeChatFile          = "chat_file"
-	MessageTypeGroupInviteNote   = "group_invite_notice"
-	MessageTypeGroupInviteNotice = MessageTypeGroupInviteNote
-	MessageTypeChatSyncRequest   = "chat_sync_request"
-	MessageTypeChatSyncResponse  = "chat_sync_response"
-	MessageTypeDeliveryAck       = "delivery_ack"
-	MessageTypeMessageRevoke     = "message_revoke"
-	MessageTypeRetentionUpdate   = "retention_update"
-	MessageTypeRetentionAck      = "retention_ack"
+	MessageTypeSessionRequest        = "session_request"
+	MessageTypeSessionAccept         = "session_accept"
+	MessageTypeSessionReject         = "session_reject"
+	MessageTypeSessionAcceptAck      = "session_accept_ack"
+	MessageTypeProfileSync           = "profile_sync"
+	MessageTypeAvatarRequest         = "avatar_request"
+	MessageTypeAvatarResponse        = "avatar_response"
+	MessageTypeChatText              = "chat_text"
+	MessageTypeChatFile              = "chat_file"
+	MessageTypeChatFileFetchRequest  = "chat_file_fetch_request"
+	MessageTypeChatFileFetchResponse = "chat_file_fetch_response"
+	MessageTypeGroupInviteNote       = "group_invite_notice"
+	MessageTypeGroupInviteNotice     = MessageTypeGroupInviteNote
+	MessageTypeChatSyncRequest       = "chat_sync_request"
+	MessageTypeChatSyncResponse      = "chat_sync_response"
+	MessageTypeDeliveryAck           = "delivery_ack"
+	MessageTypeMessageRevoke         = "message_revoke"
+	MessageTypeRetentionUpdate       = "retention_update"
+	MessageTypeRetentionAck          = "retention_ack"
 )
 
 const (
@@ -230,6 +232,33 @@ type ChatFile struct {
 	FileSize       int64  `json:"file_size"`
 	Ciphertext     []byte `json:"ciphertext"`
 	Counter        uint64 `json:"counter"`
+	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
+}
+
+type ChatFileFetchRequest struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	MsgID          string `json:"msg_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	Offset         uint64 `json:"offset"`
+	ChunkSize      int    `json:"chunk_size"`
+	SentAtUnix     int64  `json:"sent_at_unix"`
+	Signature      []byte `json:"signature,omitempty"`
+}
+
+type ChatFileFetchResponse struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	MsgID          string `json:"msg_id"`
+	FromPeerID     string `json:"from_peer_id"`
+	ToPeerID       string `json:"to_peer_id"`
+	Offset         uint64 `json:"offset"`
+	Eof            bool   `json:"eof"`
+	FileSize       int64  `json:"file_size"`
+	Ciphertext     []byte `json:"ciphertext,omitempty"`
+	Error          string `json:"error,omitempty"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
 	Signature      []byte `json:"signature,omitempty"`
 }

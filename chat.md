@@ -1214,3 +1214,496 @@ V1 为了兼容当前系统，必须做这些取舍：
 
 这是唯一现实的落地路径。
 
+---
+
+## 24. 私聊图片 / 文件独立传输方案（建议）
+
+这一节给出一个面向“私聊图片和文件后续扩展”的设计方案。
+
+目标不是修补当前某一个报错，而是回答一个更核心的问题：
+
+* 私聊图片 / 文件是否应该继续作为普通聊天消息的一部分直接同步和转发？
+
+结论先写在前面：
+
+* 如果只是想让当前 2MB~10MB 左右的图片先稳定可用，继续提高帧上限、同步分批、限制最大文件大小，是成本最低的方案。
+* 如果目标是长期支持更大的图片 / 文件，并让同步、重试、relay、中断恢复都更稳，那么应该把“文件内容传输”从聊天消息协议里拆出来，变成独立的数据面协议。
+
+也就是说：
+
+* 不建议只新增一个“文件同步方法”
+* 更建议新增一条“文件内容按需拉取协议”
+
+### 24.1 当前实现存在的问题
+
+当前私聊文件路径本质上仍然是“把完整文件塞进聊天消息”：
+
+1. 发送时：
+   * `SendFile()` 直接接收完整 `[]byte`
+   * 本地 API 也是一次性 `multipart` 读入内存
+2. 存储时：
+   * 文件内容保存在 `messages.ciphertext_blob`
+3. 重试时：
+   * 重发逻辑会重新构造包含完整文件密文的 `ChatFile`
+4. 同步时：
+   * `ChatSyncResponse.Files` 直接携带文件消息密文
+
+这会带来四类问题：
+
+* 同步放大：离线补历史时，一张图就可能把同步响应撑大
+* 重试放大：失败重发仍然要走大消息
+* relay 放大：通过中继时，大消息会占用更多 relay 带宽和内存
+* 内存与存储耦合：上传、落库、发送、同步都以“完整文件 byte slice”为中心
+
+因此，真正的问题不是“同步接口不够大”，而是：
+
+* 当前聊天控制面和文件数据面没有分离
+
+### 24.2 设计目标
+
+私聊文件后续演进建议满足以下目标：
+
+* 聊天同步只补消息元数据，不直接补大文件内容
+* 文件内容支持按需下载，而不是消息一到就强制完整接收
+* 支持更大的图片 / 文件
+* 支持中断恢复、分块传输、进度显示
+* 兼容 direct 与 relay-e2e 两种链路
+* 对控制台 / SDK / 本地 API 的改动可分阶段落地
+
+### 24.3 总体思路：消息元数据与文件内容分层
+
+建议把“文件消息”拆成两层：
+
+#### 第一层：聊天消息层
+
+只负责传输文件元数据，不负责传输完整文件内容。
+
+建议元数据至少包括：
+
+* `msg_id`
+* `conversation_id`
+* `from_peer_id`
+* `to_peer_id`
+* `file_name`
+* `mime_type`
+* `file_size`
+* `file_sha256`
+* `preview_kind`（可选，例如 `image` / `file`）
+* `preview_bytes`（可选，小尺寸缩略图或封面）
+* `sent_at`
+* `counter`
+
+#### 第二层：文件内容传输层
+
+新增独立协议，按 `msg_id` 或 `file_sha256` 拉取文件内容。
+
+建议文件内容不要再混入：
+
+* `chat_text`
+* `chat_sync_response`
+* 普通 `delivery_ack`
+
+而是走专用 stream。
+
+### 24.4 为什么不建议只新增“文件同步方法”
+
+只新增文件同步方法，最多解决以下一个场景：
+
+* 历史同步时，不把大文件放进 `ChatSyncResponse`
+
+但它解决不了：
+
+* 在线发送大文件
+* 大文件发送失败后的重试
+* relay 路径上的大文件传输
+* 图片预览和原图按需拉取
+
+所以更合适的拆法是：
+
+* 同步：只同步文件消息记录
+* 文件：单独拉取内容
+
+### 24.5 协议设计建议
+
+建议新增一组文件协议，不与文本消息协议混在一起：
+
+* `/meshproxy/chat/file/get/1.0.0`
+* `/meshproxy/chat/file/push/1.0.0`（可选，后续再做）
+
+V1.1 最小建议只做“拉取”，不做“主动推送”。
+
+#### 24.5.1 文件元数据消息
+
+建议新增或演进为：
+
+* `chat_file_meta`
+
+示例：
+
+```json
+{
+  "type": "chat_file_meta",
+  "conversation_id": "conv_xxx",
+  "msg_id": "msg_xxx",
+  "from_peer_id": "12D3KooW...",
+  "to_peer_id": "12D3KooW...",
+  "file_name": "photo.jpg",
+  "mime_type": "image/jpeg",
+  "file_size": 2262745,
+  "file_sha256": "hex...",
+  "preview_kind": "image",
+  "preview_bytes": "base64...",
+  "counter": 42,
+  "sent_at": 1770000020
+}
+```
+
+说明：
+
+* `preview_bytes` 不应太大，只适合非常小的缩略图
+* 原图 / 原文件一律不放在该消息中
+
+#### 24.5.2 文件拉取请求
+
+建议：
+
+```json
+{
+  "type": "chat_file_get",
+  "conversation_id": "conv_xxx",
+  "msg_id": "msg_xxx",
+  "from_peer_id": "12D3KooW...",
+  "to_peer_id": "12D3KooW...",
+  "offset": 0,
+  "chunk_size": 262144
+}
+```
+
+#### 24.5.3 文件分块响应
+
+建议：
+
+```json
+{
+  "type": "chat_file_chunk",
+  "conversation_id": "conv_xxx",
+  "msg_id": "msg_xxx",
+  "offset": 0,
+  "eof": false,
+  "ciphertext": "base64..."
+}
+```
+
+这里建议：
+
+* 每个 chunk 独立 AEAD 加密
+* AAD 中包含 `conversation_id + msg_id + offset`
+* 这样支持断点续传，也便于校验块边界
+
+#### 24.5.4 文件完成确认
+
+建议：
+
+```json
+{
+  "type": "chat_file_complete",
+  "conversation_id": "conv_xxx",
+  "msg_id": "msg_xxx",
+  "file_sha256": "hex..."
+}
+```
+
+### 24.6 文件传输走 direct 还是 relay
+
+建议原则与文本一致：
+
+* direct 可用时优先 direct
+* direct 不可用时走 relay-e2e
+
+但注意这里的 relay-e2e 不应该是“把整个文件一次塞进去”，而是：
+
+* 仍然按 chunk 透过 relay-e2e 转发
+
+这样做的意义是：
+
+* 中间 relay 不理解文件内容
+* 单帧大小可控
+* 大文件不会再因单条 JSON 帧过大失败
+
+### 24.7 存储模型建议
+
+不建议长期把大文件继续保存在 `messages.ciphertext_blob`。
+
+建议拆成：
+
+#### 24.7.1 `messages` 表只保留元数据
+
+新增或调整字段：
+
+* `file_name`
+* `mime_type`
+* `file_size`
+* `file_sha256`
+* `file_preview_blob`（可选）
+* `file_transfer_state`
+* `file_local_ready`
+
+#### 24.7.2 新增 `file_blobs` 或本地文件仓库
+
+两种实现方向：
+
+1. SQLite 元数据 + 本地文件仓库
+   * 推荐目录：`data/chatfile/<sha256>`
+2. SQLite 独立文件表
+   * 不推荐继续存特别大的 BLOB
+
+更推荐第一种：
+
+* 数据库只存索引
+* 文件内容落盘
+
+建议文件索引至少包括：
+
+* `blob_hash`
+* `local_path`
+* `size`
+* `mime_type`
+* `ref_count`
+* `created_at`
+* `last_access_at`
+
+#### 24.7.3 新增 `file_transfers`
+
+用于记录下载进度：
+
+* `msg_id`
+* `conversation_id`
+* `direction`（upload / download）
+* `state`
+* `downloaded_bytes`
+* `total_bytes`
+* `next_offset`
+* `retry_count`
+* `updated_at`
+
+### 24.8 状态机建议
+
+当前消息状态里的 `delivered_remote` 不足以表达文件下载过程。
+
+建议把“文件消息状态”拆成两层：
+
+#### 第一层：消息元数据状态
+
+* `local_only`
+* `sent_to_transport`
+* `delivered_remote`
+
+这表示：
+
+* 文件消息这条记录已经到对方会话里了
+
+#### 第二层：文件内容状态
+
+* `not_requested`
+* `queued_for_download`
+* `downloading`
+* `downloaded`
+* `download_failed`
+* `expired`
+
+这样前端就能明确区分：
+
+* 消息已到
+* 文件未下
+* 文件下载中
+* 文件可打开
+
+### 24.9 API 设计建议
+
+为兼容当前本地 API 风格，建议保留现有“本地读取文件”接口，再增加“远端拉取”接口。
+
+#### 24.9.1 保留本地读取接口
+
+继续保留：
+
+* `GET /api/v1/chat/conversations/{id}/messages/{msg_id}/file`
+
+语义改为：
+
+* 如果本地已存在文件内容，则直接返回
+* 如果本地还没有文件内容，则返回明确错误，例如 `409 file not downloaded`
+
+#### 24.9.2 新增远端拉取接口
+
+建议新增：
+
+* `POST /api/v1/chat/conversations/{id}/messages/{msg_id}/fetch`
+
+作用：
+
+* 触发一次后台文件下载任务
+
+可选查询：
+
+* `sync=1` 表示同步等待小文件完成
+* 默认后台执行
+
+#### 24.9.3 新增文件状态查询
+
+建议新增：
+
+* `GET /api/v1/chat/conversations/{id}/messages/{msg_id}/file/status`
+
+返回：
+
+* `state`
+* `downloaded_bytes`
+* `total_bytes`
+* `local_ready`
+
+#### 24.9.4 WebSocket 事件
+
+建议新增聊天事件：
+
+* `file_state`
+* `file_progress`
+
+这样控制台可以更新：
+
+* 图片加载中
+* 下载进度
+* 下载失败重试
+
+### 24.10 控制台与 SDK 的表现建议
+
+控制台与 SDK 最好都接受“消息先到，文件后到”：
+
+#### 图片消息
+
+* 有缩略图：先显示缩略图
+* 无缩略图：显示占位卡片
+* 点击时触发 fetch
+* 下载完成后替换为原图
+
+#### 普通文件消息
+
+* 显示文件名、大小、MIME
+* 提供“下载”按钮
+* 下载完成后可打开 / 保存
+
+SDK 建议新增：
+
+* `FetchMessageFile(conversationID, msgID string) error`
+* `GetMessageFileStatus(conversationID, msgID string) (...)`
+
+而不是继续把“发送”和“获取”都做成一次性整文件 `[]byte` 接口。
+
+### 24.11 与现有实现的兼容升级路径
+
+建议分三步走：
+
+#### 第一步：先拆同步，不拆发送
+
+目标：
+
+* 不再把大文件放进 `ChatSyncResponse`
+
+做法：
+
+* 同步先只传 `chat_file_meta`
+* 现有在线发送逻辑暂时保留
+
+好处：
+
+* 能最快解决“历史同步撑爆”问题
+
+缺点：
+
+* 在线发送和重试仍然是大消息
+
+#### 第二步：拆发送与重试
+
+目标：
+
+* 文件消息只发元数据
+* 文件内容改为按需拉取
+
+做法：
+
+* `SendFile()` 先落库元数据
+* 文件内容写本地仓库
+* 对端收到 `chat_file_meta` 后，视策略决定是否自动下载
+
+#### 第三步：补 relay、断点续传、缩略图
+
+目标：
+
+* 完整产品可用性
+
+做法：
+
+* relay-e2e chunk forwarding
+* resume
+* preview / thumbnail
+* 文件缓存清理
+
+### 24.12 最小可落地版本建议
+
+如果要在当前仓库里尽量小步落地，推荐做一个 V1.1：
+
+1. 新增 `chat_file_meta`
+2. `SyncConversation` 不再回传大文件密文
+3. 新增 `chat/file/get` 直连拉取协议
+4. 本地 API 增加 `fetch`
+5. 现有 `GET .../file` 改为“只读本地已缓存文件”
+
+这个版本先不做：
+
+* 多源下载
+* relay 分块透传
+* 自动缩略图
+* 去重 GC
+
+但已经能把当前“消息同步”和“文件下载”分开。
+
+### 24.13 不建议的方案
+
+以下方案不建议作为长期方向：
+
+#### 方案 A：继续无限增大聊天 JSON 帧上限
+
+问题：
+
+* 只能延后问题，不会消除问题
+* 同步、relay、内存占用都会持续恶化
+
+#### 方案 B：只增加“文件同步方法”
+
+问题：
+
+* 只优化同步，不优化发送与重试
+* 架构仍然是“文件嵌在聊天消息里”
+
+#### 方案 C：所有文件一到就自动完整下载
+
+问题：
+
+* 手机端 / 弱网 / relay 场景体验会很差
+* 无法控制带宽与磁盘占用
+
+### 24.14 最终建议
+
+私聊图片 / 文件的长期方案建议明确为：
+
+1. 聊天消息只负责传文件元数据
+2. 文件内容通过独立协议按需拉取
+3. 历史同步只同步消息记录，不同步大文件内容
+4. 本地存储从 `messages.ciphertext_blob` 逐步迁移到独立文件仓库
+5. 后续 direct / relay / 重试 / UI 都围绕“文件独立数据面”扩展
+
+这样做的收益是：
+
+* 更大的文件支持能力
+* 更稳的同步与 relay
+* 更清晰的状态机
+* 更适合以后做缩略图、断点续传、缓存清理与去重

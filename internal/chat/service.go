@@ -44,6 +44,7 @@ type Service struct {
 	avatarFetchSeen      sync.Map
 	chatRequestProbeSeen sync.Map
 	chatSyncPending      sync.Map // key: conversation_id -> chan ChatSyncResponse
+	chatFileFetchPending sync.Map // key: conversation_id\x00msg_id\x00offset -> chan ChatFileFetchResponse
 }
 
 type chatRequestProbeState struct {
@@ -60,16 +61,17 @@ type profileSyncState struct {
 }
 
 const (
-	directRetryBatchSize        = 64
-	directAckWait               = 20 * time.Second
-	directSyncBatchSize         = 256
-	directSyncMaxRounds         = 64
-	directAutoConnectTTL        = 30 * time.Second
-	directChatRequestProbeTTL   = 1 * time.Minute
-	directProfileSyncTTL        = 1 * time.Minute
-	directProfileSyncBackoff    = 1 * time.Minute
-	directProfileSyncMaxBackoff = 1 * time.Hour
-	directAvatarFetchTTL        = 1 * time.Minute
+	directRetryBatchSize         = 64
+	directAckWait                = 20 * time.Second
+	directSyncBatchSize          = 256
+	directSyncMaxRounds          = 64
+	directChatFileFetchChunkSize = 1 << 20
+	directAutoConnectTTL         = 30 * time.Second
+	directChatRequestProbeTTL    = 1 * time.Minute
+	directProfileSyncTTL         = 1 * time.Minute
+	directProfileSyncBackoff     = 1 * time.Minute
+	directProfileSyncMaxBackoff  = 1 * time.Hour
+	directAvatarFetchTTL         = 1 * time.Minute
 
 	friendRequestRetryDeadline     = 7 * 24 * time.Hour
 	friendRequestRetryTickInterval = 20 * time.Second
@@ -702,13 +704,6 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if err != nil {
 		return Message{}, err
 	}
-	counter := sess.SendCounter
-	nonce := protocol.BuildAEADNonce("fwd", counter)
-	aad := []byte(conversationID + "\x00chat_file")
-	ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, data, aad)
-	if err != nil {
-		return Message{}, err
-	}
 	msg := Message{
 		MsgID:          uuid.NewString(),
 		ConversationID: conversationID,
@@ -721,21 +716,21 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 		FileSize:       int64(len(data)),
 		TransportMode:  TransportModeDirect,
 		State:          MessageStateLocalOnly,
-		Counter:        counter,
+		Counter:        sess.SendCounter,
 		CreatedAt:      time.Now().UTC(),
 	}
 	msg, err = s.store.AddMessage(msg, data)
 	if err != nil {
 		return Message{}, err
 	}
-	if err := s.store.UpdateSendCounter(conversationID, counter+1); err != nil {
+	if err := s.store.UpdateSendCounter(conversationID, sess.SendCounter+1); err != nil {
 		return Message{}, err
 	}
 	if err := s.store.UpsertOutboxJob(msg.MsgID, conv.PeerID, MessageStateQueuedForRetry, 0, time.Now().UTC(), time.Time{}); err != nil {
 		return Message{}, err
 	}
 	safe.Go("chat.sendDirectFile."+msg.MsgID, func() {
-		s.completeOutboundDirectSend(msg, data, ciphertext)
+		s.completeOutboundDirectSend(msg, data, nil)
 	})
 	return msg, nil
 }
@@ -788,7 +783,159 @@ func (s *Service) GetMessageFile(conversationID, msgID string) (Message, []byte,
 	if err != nil {
 		return Message{}, nil, err
 	}
+	if len(blob) == 0 && msg.SenderPeerID != "" && msg.SenderPeerID != s.localPeer {
+		blob, err = s.fetchChatFile(msg)
+		if err != nil {
+			return Message{}, nil, err
+		}
+		msg, err = s.store.GetMessage(msgID)
+		if err != nil {
+			return Message{}, nil, err
+		}
+	}
 	return msg, blob, nil
+}
+
+func (s *Service) fetchChatFile(msg Message) ([]byte, error) {
+	if msg.MsgType != MessageTypeChatFile {
+		return nil, errors.New("message is not a file")
+	}
+	if msg.SenderPeerID == "" || msg.SenderPeerID == s.localPeer {
+		return nil, errors.New("file blob is not available locally")
+	}
+	conv, err := s.store.GetConversation(msg.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := s.store.GetSessionState(msg.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	remotePeerID := msg.SenderPeerID
+	if remotePeerID == "" {
+		remotePeerID = conv.PeerID
+	}
+	if remotePeerID == "" {
+		return nil, errors.New("file source peer is empty")
+	}
+
+	chunkSize := directChatFileFetchChunkSize
+	var out []byte
+	var expectedSize int64
+	offset := uint64(0)
+	for {
+		req := ChatFileFetchRequest{
+			Type:           MessageTypeChatFileFetchRequest,
+			ConversationID: msg.ConversationID,
+			MsgID:          msg.MsgID,
+			FromPeerID:     s.localPeer,
+			ToPeerID:       remotePeerID,
+			Offset:         offset,
+			ChunkSize:      chunkSize,
+			SentAtUnix:     time.Now().UnixMilli(),
+		}
+		resp, err := s.requestChatFileFetch(remotePeerID, req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Error != "" {
+			return nil, errors.New(resp.Error)
+		}
+		if resp.ConversationID != msg.ConversationID || resp.MsgID != msg.MsgID {
+			return nil, errors.New("chat file fetch response mismatch")
+		}
+		if resp.Offset != offset {
+			return nil, fmt.Errorf("chat file fetch response offset mismatch: want=%d got=%d", offset, resp.Offset)
+		}
+		if expectedSize == 0 && resp.FileSize > 0 {
+			expectedSize = resp.FileSize
+		} else if resp.FileSize > 0 && expectedSize > 0 && resp.FileSize != expectedSize {
+			return nil, fmt.Errorf("chat file fetch response file size mismatch: want=%d got=%d", expectedSize, resp.FileSize)
+		}
+		if len(resp.Ciphertext) == 0 {
+			if resp.Eof && resp.FileSize == 0 && offset == 0 {
+				break
+			}
+			return nil, errors.New("chat file fetch response is empty")
+		}
+		nonce := protocol.BuildChatFileChunkNonce(msg.MsgID, resp.Offset)
+		aad := []byte(msg.ConversationID + "\x00chat_file_fetch")
+		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, resp.Ciphertext, aad)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, plain...)
+		offset += uint64(len(plain))
+		if resp.Eof {
+			break
+		}
+		if len(plain) == 0 {
+			return nil, errors.New("chat file fetch made no progress")
+		}
+	}
+	if expectedSize > 0 && int64(len(out)) != expectedSize {
+		return nil, fmt.Errorf("chat file size mismatch: want=%d got=%d", expectedSize, len(out))
+	}
+	cur, err := s.store.GetMessage(msg.MsgID)
+	if err != nil {
+		return nil, err
+	}
+	if expectedSize > 0 {
+		cur.FileSize = expectedSize
+	} else {
+		cur.FileSize = int64(len(out))
+	}
+	if cur.FileName == "" {
+		cur.FileName = msg.FileName
+	}
+	if cur.MIMEType == "" {
+		cur.MIMEType = msg.MIMEType
+	}
+	if _, err := s.store.AddMessage(cur, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Service) requestChatFileFetch(peerID string, req ChatFileFetchRequest) (ChatFileFetchResponse, error) {
+	key := chatFileFetchPendingKey(req.ConversationID, req.MsgID, req.Offset)
+	waitCh := make(chan ChatFileFetchResponse, 1)
+	s.chatFileFetchPending.Store(key, waitCh)
+	defer s.chatFileFetchPending.Delete(key)
+	if err := s.sendEnvelope(peerID, req); err != nil {
+		return ChatFileFetchResponse{}, err
+	}
+	select {
+	case <-s.ctx.Done():
+		return ChatFileFetchResponse{}, s.ctx.Err()
+	case resp := <-waitCh:
+		return resp, nil
+	case <-time.After(20 * time.Second):
+		return ChatFileFetchResponse{}, errors.New("chat file fetch timeout")
+	}
+}
+
+func chatFileFetchPendingKey(conversationID, msgID string, offset uint64) string {
+	return conversationID + "\x00" + msgID + "\x00" + fmt.Sprintf("%d", offset)
+}
+
+func (s *Service) resolvePendingChatFileFetch(resp ChatFileFetchResponse) {
+	if s == nil || resp.ConversationID == "" || resp.MsgID == "" {
+		return
+	}
+	key := chatFileFetchPendingKey(resp.ConversationID, resp.MsgID, resp.Offset)
+	chAny, ok := s.chatFileFetchPending.Load(key)
+	if !ok {
+		return
+	}
+	ch, ok := chAny.(chan ChatFileFetchResponse)
+	if !ok {
+		return
+	}
+	select {
+	case ch <- resp:
+	default:
+	}
 }
 
 func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
@@ -2136,6 +2283,19 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.handleIncomingChatFile(msg, "relay", "", true)
+	case MessageTypeChatFileFetchRequest:
+		var req ChatFileFetchRequest
+		if err := remarshal(env, &req); err != nil {
+			return err
+		}
+		respErr := s.handleChatFileFetchRequest(req, "relay", "")
+		return respErr
+	case MessageTypeChatFileFetchResponse:
+		var resp ChatFileFetchResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		return s.handleChatFileFetchResponse(resp, "")
 	case MessageTypeDeliveryAck:
 		var ack DeliveryAck
 		if err := remarshal(env, &ack); err != nil {
@@ -2188,6 +2348,18 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 			return err
 		}
 		return s.handleIncomingChatFile(msg, TransportModeDirect, streamPeerID, true)
+	case MessageTypeChatFileFetchRequest:
+		var req ChatFileFetchRequest
+		if err := remarshal(env, &req); err != nil {
+			return err
+		}
+		return s.handleChatFileFetchRequest(req, TransportModeDirect, streamPeerID)
+	case MessageTypeChatFileFetchResponse:
+		var resp ChatFileFetchResponse
+		if err := remarshal(env, &resp); err != nil {
+			return err
+		}
+		return s.handleChatFileFetchResponse(resp, streamPeerID)
 	case MessageTypeMessageRevoke:
 		var revoke MessageRevoke
 		if err := remarshal(env, &revoke); err != nil {
@@ -2362,11 +2534,20 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 	if err != nil || duplicate {
 		return err
 	}
-	nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-	aad := []byte(msg.ConversationID + "\x00chat_file")
-	plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
-	if err != nil {
-		return err
+	storedBlob := msg.Ciphertext
+	fileSize := msg.FileSize
+	if len(msg.Ciphertext) > 0 {
+		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
+		aad := []byte(msg.ConversationID + "\x00chat_file")
+		plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+		if err != nil {
+			return err
+		}
+		storedBlob = plain
+		fileSize = int64(len(plain))
+	}
+	if storedBlob == nil {
+		storedBlob = []byte{}
 	}
 	incoming := Message{
 		MsgID:          msg.MsgID,
@@ -2377,19 +2558,121 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 		MsgType:        MessageTypeChatFile,
 		FileName:       NormalizeChatFileName(msg.FileName),
 		MIMEType:       msg.MIMEType,
-		FileSize:       int64(len(plain)),
+		FileSize:       fileSize,
 		TransportMode:  transportMode,
 		State:          MessageStateReceived,
 		Counter:        msg.Counter,
 		CreatedAt:      time.UnixMilli(msg.SentAtUnix),
 	}
-	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, plain, msg.Counter+1, incrementUnread); err != nil {
+	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, storedBlob, msg.Counter+1, incrementUnread); err != nil {
 		return err
 	}
 	// Notify websocket clients (metadata + empty plaintext; file bytes via GET if needed).
 	s.publishChatEvent(chatEventDirectMessage(incoming))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
-	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
+	if err := s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID); err != nil {
+		return err
+	}
+	if incrementUnread && len(msg.Ciphertext) == 0 && msg.FromPeerID != s.localPeer && fileSize > 0 {
+		safe.Go("chat.autoFetchFile."+msg.MsgID, func() {
+			if _, err := s.fetchChatFile(incoming); err != nil {
+				log.Printf("[chat] auto fetch chat file failed msg=%s peer=%s err=%v", msg.MsgID, msg.FromPeerID, err)
+			}
+		})
+	}
+	return nil
+}
+
+func (s *Service) handleChatFileFetchRequest(req ChatFileFetchRequest, _ string, streamPeerID string) error {
+	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, req.FromPeerID) {
+		log.Printf("[chat] chat file fetch request ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, req.FromPeerID)
+		return nil
+	}
+	if req.FromPeerID == "" || req.FromPeerID == s.localPeer {
+		return nil
+	}
+	if req.ToPeerID != "" && req.ToPeerID != s.localPeer {
+		return nil
+	}
+	conv, err := s.store.GetConversation(req.ConversationID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if conv.PeerID != req.FromPeerID {
+		return nil
+	}
+	msg, err := s.store.GetMessage(req.MsgID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if msg.ConversationID != req.ConversationID || msg.MsgType != MessageTypeChatFile {
+		return nil
+	}
+	if msg.SenderPeerID != s.localPeer || msg.ReceiverPeerID != req.FromPeerID {
+		return nil
+	}
+	blob, err := s.store.GetMessageBlob(req.MsgID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSessionState(req.ConversationID)
+	if err != nil {
+		return err
+	}
+	chunkSize := req.ChunkSize
+	if chunkSize <= 0 || chunkSize > directChatFileFetchChunkSize {
+		chunkSize = directChatFileFetchChunkSize
+	}
+	resp := ChatFileFetchResponse{
+		Type:           MessageTypeChatFileFetchResponse,
+		ConversationID: req.ConversationID,
+		MsgID:          req.MsgID,
+		FromPeerID:     s.localPeer,
+		ToPeerID:       req.FromPeerID,
+		Offset:         req.Offset,
+		FileSize:       int64(len(blob)),
+		SentAtUnix:     time.Now().UTC().UnixMilli(),
+	}
+	if req.Offset > uint64(len(blob)) {
+		resp.Error = "file offset out of range"
+		return s.sendEnvelope(req.FromPeerID, resp)
+	}
+	start := int(req.Offset)
+	if start == len(blob) {
+		resp.Eof = true
+		return s.sendEnvelope(req.FromPeerID, resp)
+	}
+	end := start + chunkSize
+	if end > len(blob) {
+		end = len(blob)
+	}
+	nonce := protocol.BuildChatFileChunkNonce(req.MsgID, req.Offset)
+	aad := []byte(req.ConversationID + "\x00chat_file_fetch")
+	ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, blob[start:end], aad)
+	if err != nil {
+		return err
+	}
+	resp.Ciphertext = ciphertext
+	resp.Eof = end >= len(blob)
+	return s.sendEnvelope(req.FromPeerID, resp)
+}
+
+func (s *Service) handleChatFileFetchResponse(resp ChatFileFetchResponse, streamPeerID string) error {
+	if resp.ToPeerID != "" && resp.ToPeerID != s.localPeer {
+		return nil
+	}
+	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, resp.FromPeerID) {
+		log.Printf("[chat] chat file fetch response ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, resp.FromPeerID)
+		return nil
+	}
+	s.resolvePendingChatFileFetch(resp)
+	return nil
 }
 
 func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64) (bool, error) {
@@ -2539,16 +2822,6 @@ func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiph
 			SentAtUnix:     msg.CreatedAt.UnixMilli(),
 		}, nil
 	case MessageTypeChatFile:
-		sess, err := s.store.GetSessionState(msg.ConversationID)
-		if err != nil {
-			return nil, err
-		}
-		nonce := protocol.BuildAEADNonce("fwd", msg.Counter)
-		aad := []byte(msg.ConversationID + "\x00chat_file")
-		ciphertext, err := protocol.AEADSeal(sess.SendKey, nonce, storedBlob, aad)
-		if err != nil {
-			return nil, err
-		}
 		return ChatFile{
 			Type:           MessageTypeChatFile,
 			ConversationID: msg.ConversationID,
@@ -2558,7 +2831,6 @@ func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiph
 			FileName:       msg.FileName,
 			MIMEType:       msg.MIMEType,
 			FileSize:       msg.FileSize,
-			Ciphertext:     ciphertext,
 			Counter:        msg.Counter,
 			SentAtUnix:     msg.CreatedAt.UnixMilli(),
 		}, nil
