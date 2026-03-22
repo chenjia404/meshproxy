@@ -704,6 +704,10 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if err != nil {
 		return Message{}, err
 	}
+	fileCID, err := ComputeChatFileCID(data)
+	if err != nil {
+		return Message{}, err
+	}
 	msg := Message{
 		MsgID:          uuid.NewString(),
 		ConversationID: conversationID,
@@ -714,6 +718,7 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 		FileName:       fileName,
 		MIMEType:       mimeType,
 		FileSize:       int64(len(data)),
+		FileCID:        fileCID,
 		TransportMode:  TransportModeDirect,
 		State:          MessageStateLocalOnly,
 		Counter:        sess.SendCounter,
@@ -884,6 +889,11 @@ func (s *Service) fetchChatFile(msg Message) ([]byte, error) {
 		cur.FileSize = expectedSize
 	} else {
 		cur.FileSize = int64(len(out))
+	}
+	if cur.FileCID == "" {
+		if cidValue, cidErr := ComputeChatFileCID(out); cidErr == nil {
+			cur.FileCID = cidValue
+		}
 	}
 	if cur.FileName == "" {
 		cur.FileName = msg.FileName
@@ -2549,6 +2559,13 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 	if storedBlob == nil {
 		storedBlob = []byte{}
 	}
+	fileCID := strings.TrimSpace(msg.FileCID)
+	if fileCID == "" && len(storedBlob) > 0 {
+		fileCID, err = ComputeChatFileCID(storedBlob)
+		if err != nil {
+			return err
+		}
+	}
 	incoming := Message{
 		MsgID:          msg.MsgID,
 		ConversationID: msg.ConversationID,
@@ -2559,6 +2576,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 		FileName:       NormalizeChatFileName(msg.FileName),
 		MIMEType:       msg.MIMEType,
 		FileSize:       fileSize,
+		FileCID:        fileCID,
 		TransportMode:  transportMode,
 		State:          MessageStateReceived,
 		Counter:        msg.Counter,
@@ -2638,6 +2656,12 @@ func (s *Service) handleChatFileFetchRequest(req ChatFileFetchRequest, _ string,
 		Offset:         req.Offset,
 		FileSize:       int64(len(blob)),
 		SentAtUnix:     time.Now().UTC().UnixMilli(),
+	}
+	resp.FileCID = strings.TrimSpace(msg.FileCID)
+	if resp.FileCID == "" && len(blob) > 0 {
+		if cidValue, cidErr := ComputeChatFileCID(blob); cidErr == nil {
+			resp.FileCID = cidValue
+		}
 	}
 	if req.Offset > uint64(len(blob)) {
 		resp.Error = "file offset out of range"
@@ -2822,6 +2846,12 @@ func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiph
 			SentAtUnix:     msg.CreatedAt.UnixMilli(),
 		}, nil
 	case MessageTypeChatFile:
+		fileCID := strings.TrimSpace(msg.FileCID)
+		if fileCID == "" && len(storedBlob) > 0 {
+			if cidValue, cidErr := ComputeChatFileCID(storedBlob); cidErr == nil {
+				fileCID = cidValue
+			}
+		}
 		return ChatFile{
 			Type:           MessageTypeChatFile,
 			ConversationID: msg.ConversationID,
@@ -2831,6 +2861,7 @@ func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiph
 			FileName:       msg.FileName,
 			MIMEType:       msg.MIMEType,
 			FileSize:       msg.FileSize,
+			FileCID:        fileCID,
 			Counter:        msg.Counter,
 			SentAtUnix:     msg.CreatedAt.UnixMilli(),
 		}, nil
@@ -2962,6 +2993,7 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 			FileName:       item.FileName,
 			MIMEType:       item.MIMEType,
 			FileSize:       item.FileSize,
+			FileCID:        item.FileCID,
 			Counter:        item.Counter,
 			CreatedAt:      time.UnixMilli(item.SentAtUnix).UTC(),
 		}

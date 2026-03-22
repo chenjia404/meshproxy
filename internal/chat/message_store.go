@@ -28,9 +28,9 @@ func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext [
 		}
 	}()
 	if _, err := tx.Exec(`
-		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
 		return err
 	}
 	if incrementUnread {
@@ -72,9 +72,9 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 	}
 	createdAt := msg.CreatedAt.UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt)
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt)
 	if err != nil {
 		return Message{}, err
 	}
@@ -86,7 +86,7 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 }
 
 func (s *Store) ListMessages(conversationID string) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
+	rows, err := s.db.Query(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (s *Store) ListMessages(conversationID string) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var createdAt, deliveredAt string
-		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseDBTime(createdAt)
@@ -119,7 +119,7 @@ func (s *Store) ListMessagesPage(conversationID string, limit, offset int) ([]Me
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(`
-		SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at
+		SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at
 		FROM messages WHERE conversation_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
 		conversationID, limit, offset)
 	if err != nil {
@@ -130,7 +130,7 @@ func (s *Store) ListMessagesPage(conversationID string, limit, offset int) ([]Me
 	for rows.Next() {
 		var m Message
 		var createdAt, deliveredAt string
-		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
 			return nil, 0, err
 		}
 		m.CreatedAt = parseDBTime(createdAt)
@@ -267,6 +267,7 @@ func (s *Store) ListOutboxJobsForRetry(now time.Time, limit int) ([]outboxRetryI
 			m.file_name,
 			m.mime_type,
 			m.file_size,
+			m.file_cid,
 			m.counter,
 			m.ciphertext_blob,
 			m.created_at,
@@ -296,6 +297,7 @@ func (s *Store) ListOutboxJobsForRetry(now time.Time, limit int) ([]outboxRetryI
 			&item.FileName,
 			&item.MIMEType,
 			&item.FileSize,
+			&item.FileCID,
 			&item.Counter,
 			&item.CiphertextBlob,
 			&createdAt,
@@ -325,6 +327,7 @@ func (s *Store) ListOutboxJobsForPeer(peerID string, limit int) ([]outboxRetryIt
 			m.file_name,
 			m.mime_type,
 			m.file_size,
+			m.file_cid,
 			m.counter,
 			m.ciphertext_blob,
 			m.created_at,
@@ -354,6 +357,7 @@ func (s *Store) ListOutboxJobsForPeer(peerID string, limit int) ([]outboxRetryIt
 			&item.FileName,
 			&item.MIMEType,
 			&item.FileSize,
+			&item.FileCID,
 			&item.Counter,
 			&item.CiphertextBlob,
 			&createdAt,
@@ -370,8 +374,8 @@ func (s *Store) ListOutboxJobsForPeer(peerID string, limit int) ([]outboxRetryIt
 func (s *Store) GetMessage(msgID string) (Message, error) {
 	var m Message
 	var createdAt, deliveredAt string
-	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
-		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
+	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
+		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
 	if err != nil {
 		return Message{}, err
 	}
@@ -402,6 +406,7 @@ func (s *Store) ListOutgoingMessagesForSync(conversationID, senderPeerID string,
 			file_name,
 			mime_type,
 			file_size,
+			file_cid,
 			counter,
 			ciphertext_blob,
 			created_at
@@ -427,6 +432,7 @@ func (s *Store) ListOutgoingMessagesForSync(conversationID, senderPeerID string,
 			&item.FileName,
 			&item.MIMEType,
 			&item.FileSize,
+			&item.FileCID,
 			&item.Counter,
 			&item.CiphertextBlob,
 			&createdAt,

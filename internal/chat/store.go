@@ -38,6 +38,7 @@ type outboxRetryItem struct {
 	FileName       string
 	MIMEType       string
 	FileSize       int64
+	FileCID        string
 	Counter        uint64
 	CiphertextBlob []byte
 	SentAtUnix     int64
@@ -53,6 +54,7 @@ type chatSyncItem struct {
 	FileName       string
 	MIMEType       string
 	FileSize       int64
+	FileCID        string
 	Counter        uint64
 	CiphertextBlob []byte
 	SentAtUnix     int64
@@ -239,6 +241,7 @@ func (s *Store) migrate() error {
 			file_name TEXT NOT NULL DEFAULT '',
 			mime_type TEXT NOT NULL DEFAULT '',
 			file_size INTEGER NOT NULL DEFAULT 0,
+			file_cid TEXT NOT NULL DEFAULT '',
 			ciphertext_blob BLOB NOT NULL,
 			transport_mode TEXT NOT NULL,
 			state TEXT NOT NULL,
@@ -405,6 +408,7 @@ func (s *Store) ensureMessageFileColumns() error {
 	hasFileName := false
 	hasMime := false
 	hasFileSize := false
+	hasFileCID := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -421,6 +425,8 @@ func (s *Store) ensureMessageFileColumns() error {
 			hasMime = true
 		case "file_size":
 			hasFileSize = true
+		case "file_cid":
+			hasFileCID = true
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -441,6 +447,11 @@ func (s *Store) ensureMessageFileColumns() error {
 	}
 	if !hasFileSize {
 		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if !hasFileCID {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN file_cid TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -644,9 +655,9 @@ func (s *Store) DedupePeersByPeerID() error {
 			return err
 		}
 		type peerRow struct {
-			rowid                                  int64
+			rowid                                      int64
 			nickname, bio, avatar, lastSeen, updatedAt string
-			blocked                                int
+			blocked                                    int
 		}
 		var list []peerRow
 		for rrows.Next() {

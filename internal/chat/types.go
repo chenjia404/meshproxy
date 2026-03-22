@@ -122,6 +122,7 @@ type Message struct {
 	FileName       string    `json:"file_name,omitempty"`
 	MIMEType       string    `json:"mime_type,omitempty"`
 	FileSize       int64     `json:"file_size,omitempty"`
+	FileCID        string    `json:"file_cid,omitempty"`
 	TransportMode  string    `json:"transport_mode"`
 	State          string    `json:"state"`
 	Counter        uint64    `json:"counter"`
@@ -230,6 +231,7 @@ type ChatFile struct {
 	FileName       string `json:"file_name"`
 	MIMEType       string `json:"mime_type"`
 	FileSize       int64  `json:"file_size"`
+	FileCID        string `json:"file_cid,omitempty"`
 	Ciphertext     []byte `json:"ciphertext"`
 	Counter        uint64 `json:"counter"`
 	SentAtUnix     int64  `json:"sent_at_unix"`
@@ -257,6 +259,7 @@ type ChatFileFetchResponse struct {
 	Offset         uint64 `json:"offset"`
 	Eof            bool   `json:"eof"`
 	FileSize       int64  `json:"file_size"`
+	FileCID        string `json:"file_cid,omitempty"`
 	Ciphertext     []byte `json:"ciphertext,omitempty"`
 	Error          string `json:"error,omitempty"`
 	SentAtUnix     int64  `json:"sent_at_unix"`

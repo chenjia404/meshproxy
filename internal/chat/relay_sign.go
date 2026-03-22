@@ -92,6 +92,7 @@ func marshalChatFileForRelaySigning(m ChatFile) ([]byte, error) {
 		FileName       string `json:"file_name"`
 		MIMEType       string `json:"mime_type"`
 		FileSize       int64  `json:"file_size"`
+		FileCID        string `json:"file_cid,omitempty"`
 		Ciphertext     []byte `json:"ciphertext"`
 		Counter        uint64 `json:"counter"`
 		SentAtUnix     int64  `json:"sent_at_unix"`
@@ -104,6 +105,7 @@ func marshalChatFileForRelaySigning(m ChatFile) ([]byte, error) {
 		FileName:       m.FileName,
 		MIMEType:       m.MIMEType,
 		FileSize:       m.FileSize,
+		FileCID:        m.FileCID,
 		Ciphertext:     m.Ciphertext,
 		Counter:        m.Counter,
 		SentAtUnix:     m.SentAtUnix,
@@ -142,6 +144,7 @@ func marshalChatFileFetchResponseForRelaySigning(m ChatFileFetchResponse) ([]byt
 		Offset         uint64 `json:"offset"`
 		Eof            bool   `json:"eof"`
 		FileSize       int64  `json:"file_size"`
+		FileCID        string `json:"file_cid,omitempty"`
 		Ciphertext     []byte `json:"ciphertext,omitempty"`
 		Error          string `json:"error,omitempty"`
 		SentAtUnix     int64  `json:"sent_at_unix"`
@@ -154,6 +157,7 @@ func marshalChatFileFetchResponseForRelaySigning(m ChatFileFetchResponse) ([]byt
 		Offset:         m.Offset,
 		Eof:            m.Eof,
 		FileSize:       m.FileSize,
+		FileCID:        m.FileCID,
 		Ciphertext:     m.Ciphertext,
 		Error:          m.Error,
 		SentAtUnix:     m.SentAtUnix,
@@ -287,6 +291,7 @@ func marshalChatSyncResponseForRelaySigning(m ChatSyncResponse) ([]byte, error) 
 		FileName       string `json:"file_name"`
 		MIMEType       string `json:"mime_type"`
 		FileSize       int64  `json:"file_size"`
+		FileCID        string `json:"file_cid,omitempty"`
 		Ciphertext     []byte `json:"ciphertext"`
 		Counter        uint64 `json:"counter"`
 		SentAtUnix     int64  `json:"sent_at_unix"`
@@ -315,6 +320,7 @@ func marshalChatSyncResponseForRelaySigning(m ChatSyncResponse) ([]byte, error) 
 			FileName:       x.FileName,
 			MIMEType:       x.MIMEType,
 			FileSize:       x.FileSize,
+			FileCID:        x.FileCID,
 			Ciphertext:     x.Ciphertext,
 			Counter:        x.Counter,
 			SentAtUnix:     x.SentAtUnix,
