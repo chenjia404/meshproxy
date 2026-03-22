@@ -30,7 +30,6 @@ import (
 )
 
 //go:generate go run ../tools/syncconsole
-//go:generate go run ../tools/syncchatui
 //go:embed console/*
 var consoleFS embed.FS
 
