@@ -61,6 +61,7 @@ type Profile struct {
 	Nickname   string    `json:"nickname"`
 	Bio        string    `json:"bio"`
 	Avatar     string    `json:"avatar"`
+	AvatarCID  string    `json:"avatar_cid,omitempty"`
 	ChatKexPub string    `json:"chat_kex_pub"`
 	CreatedAt  time.Time `json:"created_at"`
 }
@@ -70,6 +71,7 @@ type Contact struct {
 	Nickname         string    `json:"nickname"`
 	Bio              string    `json:"bio"`
 	Avatar           string    `json:"avatar"`
+	CID              string    `json:"cid,omitempty"`
 	RemoteNickname   string    `json:"remote_nickname,omitempty"`
 	RetentionMinutes int       `json:"retention_minutes"`
 	Blocked          bool      `json:"blocked"`

@@ -28,6 +28,11 @@ import (
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
+// ipfsAvatarPinner 可選：將頭像寫入嵌入式 IPFS 並取得 CID（由 app 注入）。
+type ipfsAvatarPinner interface {
+	PinAvatar(ctx context.Context, fileName string, data []byte) (cid string, err error)
+}
+
 type Service struct {
 	ctx       context.Context
 	host      host.Host
@@ -36,6 +41,7 @@ type Service struct {
 	store     *Store
 	localPeer string
 	avatarDir string
+	ipfs      ipfsAvatarPinner
 
 	eventsHub *chatEventHub
 
@@ -211,7 +217,21 @@ func (s *Service) UpdateProfileAvatar(fileName string, data []byte) (Profile, er
 	if err != nil {
 		return Profile{}, err
 	}
-	return s.store.UpdateProfileAvatar(s.localPeer, stored)
+	cid := ""
+	if s.ipfs != nil {
+		c, err := s.ipfs.PinAvatar(s.ctx, stored, data)
+		if err != nil {
+			log.Printf("[chat] ipfs pin profile avatar: %v", err)
+		} else {
+			cid = c
+		}
+	}
+	return s.store.UpdateProfileAvatar(s.localPeer, stored, cid)
+}
+
+// SetIPFSAvatarPinner 由 app 在嵌入式 IPFS 就緒後注入；可為 nil。
+func (s *Service) SetIPFSAvatarPinner(p ipfsAvatarPinner) {
+	s.ipfs = p
 }
 
 func (s *Service) AvatarPath(fileName string) (string, error) {
@@ -560,7 +580,16 @@ func (s *Service) handleAvatarResponse(resp AvatarResponse) error {
 		return nil
 	}
 	_ = s.store.UpsertPeer(resp.FromPeerID, "", "")
-	_ = s.store.UpdatePeerAvatar(resp.FromPeerID, avatarName)
+	var pinned *string
+	if s.ipfs != nil && len(resp.AvatarData) > 0 {
+		c, err := s.ipfs.PinAvatar(s.ctx, avatarName, resp.AvatarData)
+		if err != nil {
+			log.Printf("[chat] ipfs pin peer avatar peer=%s: %v", resp.FromPeerID, err)
+		} else {
+			pinned = &c
+		}
+	}
+	_ = s.store.updatePeerAvatar(resp.FromPeerID, avatarName, pinned)
 	_ = s.store.UpdateRequestsAvatar(resp.FromPeerID, avatarName)
 	return nil
 }

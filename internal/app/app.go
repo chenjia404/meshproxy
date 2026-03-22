@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -269,6 +270,9 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	if a.ipfsEmb != nil {
+		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
+	}
 	connections := make([]meshserver.ConnectionConfig, 0, len(cfg.MeshServerConnections()))
 	for _, conn := range cfg.MeshServerConnections() {
 		connections = append(connections, meshserver.ConnectionConfig{
@@ -2184,4 +2188,32 @@ func hasRealIP(m multiaddr.Multiaddr) bool {
 		}
 	}
 	return false
+}
+
+// chatIPFSAvatarPinner 將聊天頭像寫入嵌入式 IPFS（與 /api/ipfs/add 相同匯入參數）。
+type chatIPFSAvatarPinner struct {
+	emb *ipfsnode.EmbeddedIPFS
+}
+
+func newChatIPFSAvatarPinner(emb *ipfsnode.EmbeddedIPFS) *chatIPFSAvatarPinner {
+	return &chatIPFSAvatarPinner{emb: emb}
+}
+
+func (p *chatIPFSAvatarPinner) PinAvatar(ctx context.Context, fileName string, data []byte) (string, error) {
+	if p == nil || p.emb == nil || len(data) == 0 {
+		return "", nil
+	}
+	opt := ipfsnode.AddFileOptions{
+		Filename:     fileName,
+		RawLeaves:    p.emb.RawLeaves(),
+		CIDVersion:   p.emb.CIDVersion(),
+		HashFunction: p.emb.HashFunction(),
+		Chunker:      p.emb.Chunker(),
+		Pin:          p.emb.AutoPinOnAdd(),
+	}
+	c, err := p.emb.Service().AddFile(ctx, bytes.NewReader(data), opt)
+	if err != nil {
+		return "", err
+	}
+	return c.String(), nil
 }

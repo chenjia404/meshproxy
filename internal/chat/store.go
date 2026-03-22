@@ -129,6 +129,14 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureProfileAvatarCIDColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.ensurePeerAvatarCIDColumn(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureRequestBioColumn(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -480,8 +488,8 @@ func (s *Store) ensureProfile(localPeerID string) error {
 func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	var p Profile
 	var privB64, createdAt string
-	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,avatar,chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
-		Scan(&p.PeerID, &p.Nickname, &p.Bio, &p.Avatar, &privB64, &p.ChatKexPub, &createdAt)
+	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,avatar,IFNULL(avatar_cid,''),chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
+		Scan(&p.PeerID, &p.Nickname, &p.Bio, &p.Avatar, &p.AvatarCID, &privB64, &p.ChatKexPub, &createdAt)
 	if err != nil {
 		return Profile{}, nil, err
 	}
@@ -512,10 +520,11 @@ func (s *Store) UpdateProfile(localPeerID, nickname, bio string) (Profile, error
 	return p, err
 }
 
-func (s *Store) UpdateProfileAvatar(localPeerID, avatar string) (Profile, error) {
+func (s *Store) UpdateProfileAvatar(localPeerID, avatar, avatarCID string) (Profile, error) {
 	avatar = strings.TrimSpace(avatar)
+	avatarCID = strings.TrimSpace(avatarCID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(`UPDATE profile SET avatar=?, updated_at=? WHERE peer_id=?`, avatar, now, localPeerID); err != nil {
+	if _, err := s.db.Exec(`UPDATE profile SET avatar=?, avatar_cid=?, updated_at=? WHERE peer_id=?`, avatar, avatarCID, now, localPeerID); err != nil {
 		return Profile{}, err
 	}
 	p, _, err := s.GetProfile(localPeerID)
@@ -588,6 +597,72 @@ func (s *Store) ensureProfileAvatarColumn() error {
 	return err
 }
 
+func (s *Store) ensureProfileAvatarCIDColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(profile)`)
+	if err != nil {
+		return err
+	}
+	hasCol := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "avatar_cid" {
+			hasCol = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasCol {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE profile ADD COLUMN avatar_cid TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensurePeerAvatarCIDColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(peers)`)
+	if err != nil {
+		return err
+	}
+	hasCol := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "avatar_cid" {
+			hasCol = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasCol {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE peers ADD COLUMN avatar_cid TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
 func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	if peerID == "" {
 		return nil
@@ -614,11 +689,34 @@ func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 }
 
 func (s *Store) UpdatePeerAvatar(peerID, avatar string) error {
+	return s.updatePeerAvatar(peerID, avatar, nil)
+}
+
+// updatePeerAvatar sets the peer's local avatar filename. If pinnedCID is non-nil, avatar_cid is set to *pinnedCID
+// (typically after IPFS pin). If pinnedCID is nil, avatar_cid is cleared when the filename changes; otherwise it is kept.
+func (s *Store) updatePeerAvatar(peerID, avatar string, pinnedCID *string) error {
 	if peerID == "" {
 		return sql.ErrNoRows
 	}
+	avatar = strings.TrimSpace(avatar)
+	var oldAvatar sql.NullString
+	var oldCID sql.NullString
+	err := s.db.QueryRow(`SELECT avatar, avatar_cid FROM peers WHERE peer_id=?`, peerID).Scan(&oldAvatar, &oldCID)
+	if err != nil {
+		return err
+	}
+	var finalCID string
+	if pinnedCID != nil {
+		finalCID = strings.TrimSpace(*pinnedCID)
+	} else {
+		if oldAvatar.String != avatar {
+			finalCID = ""
+		} else if oldCID.Valid {
+			finalCID = oldCID.String
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.Exec(`UPDATE peers SET avatar=?, updated_at=? WHERE peer_id=?`, strings.TrimSpace(avatar), now, peerID)
+	_, err = s.db.Exec(`UPDATE peers SET avatar=?, avatar_cid=?, updated_at=? WHERE peer_id=?`, avatar, finalCID, now, peerID)
 	return err
 }
 
@@ -649,20 +747,20 @@ func (s *Store) DedupePeersByPeerID() error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, peerID := range dupPeers {
 		rrows, err := s.db.Query(`
-			SELECT rowid, nickname, bio, avatar, blocked, last_seen_at, updated_at
+			SELECT rowid, nickname, bio, avatar, IFNULL(avatar_cid,''), blocked, last_seen_at, updated_at
 			FROM peers WHERE peer_id=? ORDER BY updated_at DESC, rowid DESC`, peerID)
 		if err != nil {
 			return err
 		}
 		type peerRow struct {
 			rowid                                      int64
-			nickname, bio, avatar, lastSeen, updatedAt string
+			nickname, bio, avatar, avatarCID, lastSeen, updatedAt string
 			blocked                                    int
 		}
 		var list []peerRow
 		for rrows.Next() {
 			var r peerRow
-			if err := rrows.Scan(&r.rowid, &r.nickname, &r.bio, &r.avatar, &r.blocked, &r.lastSeen, &r.updatedAt); err != nil {
+			if err := rrows.Scan(&r.rowid, &r.nickname, &r.bio, &r.avatar, &r.avatarCID, &r.blocked, &r.lastSeen, &r.updatedAt); err != nil {
 				_ = rrows.Close()
 				return err
 			}
@@ -683,6 +781,9 @@ func (s *Store) DedupePeersByPeerID() error {
 			if strings.TrimSpace(keeper.avatar) == "" && strings.TrimSpace(r.avatar) != "" {
 				keeper.avatar = r.avatar
 			}
+			if strings.TrimSpace(keeper.avatarCID) == "" && strings.TrimSpace(r.avatarCID) != "" {
+				keeper.avatarCID = r.avatarCID
+			}
 			if r.blocked != 0 {
 				keeper.blocked = 1
 			}
@@ -694,8 +795,8 @@ func (s *Store) DedupePeersByPeerID() error {
 			}
 			deleted++
 		}
-		if _, err := s.db.Exec(`UPDATE peers SET nickname=?, bio=?, avatar=?, blocked=?, last_seen_at=?, updated_at=? WHERE rowid=?`,
-			keeper.nickname, keeper.bio, keeper.avatar, keeper.blocked, keeper.lastSeen, now, keeper.rowid); err != nil {
+		if _, err := s.db.Exec(`UPDATE peers SET nickname=?, bio=?, avatar=?, avatar_cid=?, blocked=?, last_seen_at=?, updated_at=? WHERE rowid=?`,
+			keeper.nickname, keeper.bio, keeper.avatar, keeper.avatarCID, keeper.blocked, keeper.lastSeen, now, keeper.rowid); err != nil {
 			return fmt.Errorf("merge deduped peer row peer_id=%s: %w", peerID, err)
 		}
 	}
@@ -750,6 +851,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 			p.nickname,
 			p.bio,
 			p.avatar,
+			IFNULL(p.avatar_cid,''),
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -795,7 +897,7 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
@@ -816,6 +918,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 			p.nickname,
 			p.bio,
 			p.avatar,
+			IFNULL(p.avatar_cid,''),
 			p.blocked,
 			p.last_seen_at,
 			p.updated_at,
@@ -837,7 +940,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 		)
 		WHERE p.peer_id=?
 	`, s.localPeerID, peerID).
-		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
+		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
 	if err != nil {
 		return Contact{}, err
 	}
