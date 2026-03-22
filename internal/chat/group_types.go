@@ -165,6 +165,7 @@ type GroupMessage struct {
 	FileName        string               `json:"file_name,omitempty"`
 	MIMEType        string               `json:"mime_type,omitempty"`
 	FileSize        int64                `json:"file_size,omitempty"`
+	FileCID         string               `json:"file_cid,omitempty"`
 	Signature       []byte               `json:"signature,omitempty"`
 	State           string               `json:"state"`
 	DeliverySummary GroupDeliverySummary `json:"delivery_summary,omitempty"`
@@ -312,6 +313,7 @@ type GroupChatFile struct {
 	FileName     string `json:"file_name"`
 	MIMEType     string `json:"mime_type"`
 	FileSize     int64  `json:"file_size"`
+	FileCID      string `json:"file_cid,omitempty"`
 	Ciphertext   []byte `json:"ciphertext"`
 	SentAtUnix   int64  `json:"sent_at_unix"`
 	Signature    []byte `json:"signature,omitempty"`

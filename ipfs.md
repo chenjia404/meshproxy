@@ -319,7 +319,7 @@ type IPFSConfig struct {
     BlockstoreNoSync bool
 
     // Import
-    Chunker string           // default: "size-262144"
+    Chunker string           // default: "size-1048576"
     RawLeaves bool           // default: true
     CIDVersion int           // default: 1
     HashFunction string      // default: "sha2-256"
@@ -339,7 +339,7 @@ type IPFSConfig struct {
 
 默认值建议：
 
-* `Chunker=size-262144`
+* `Chunker=size-1048576`
 * `RawLeaves=true`
 * `CIDVersion=1`
 * `HashFunction=sha2-256`
@@ -740,7 +740,7 @@ IPFS 当前支持多种 routing 系统，但首版没必要全上。([docs.ipfs.
 
 v1 固定：
 
-* `chunker=size-262144`
+* `chunker=size-1048576`
 * `rawLeaves=true`
 * `cidVersion=1`
 
@@ -870,7 +870,7 @@ Requirements:
    - DELETE /api/ipfs/pin/{cid}
    - GET /ipfs/{cid}
 6. Gateway must be read-only.
-7. Use CIDv1, raw leaves, sha2-256, chunker=size-262144 by default.
+7. Use CIDv1, raw leaves, sha2-256, chunker=size-1048576 by default.
 8. Implement the code in a modular structure:
 
    cmd/chatnode/main.go

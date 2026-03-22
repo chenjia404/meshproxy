@@ -757,6 +757,10 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 	if err != nil {
 		return GroupMessage{}, err
 	}
+	fileCID, err := ComputeChatFileCID(data)
+	if err != nil {
+		return GroupMessage{}, err
+	}
 	now := time.Now().UTC()
 	msg := GroupMessage{
 		MsgID:        uuid.NewString(),
@@ -768,6 +772,7 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 		FileName:     fileName,
 		MIMEType:     mimeType,
 		FileSize:     int64(len(data)),
+		FileCID:      fileCID,
 		State:        GroupMessageStateLocalOnly,
 		CreatedAt:    now,
 	}
@@ -796,6 +801,7 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 		FileName:     fileName,
 		MIMEType:     mimeType,
 		FileSize:     int64(len(data)),
+		FileCID:      fileCID,
 		Ciphertext:   ciphertext,
 		SentAtUnix:   now.UnixMilli(),
 	}
@@ -1019,6 +1025,13 @@ func (s *Service) buildGroupRetryEnvelope(item groupRetryDelivery) (any, error) 
 		if err != nil {
 			return nil, err
 		}
+		fileCID := item.FileCID
+		if fileCID == "" && len(item.CiphertextBlob) > 0 {
+			fileCID, err = ComputeChatFileCID(item.CiphertextBlob)
+			if err != nil {
+				return nil, err
+			}
+		}
 		nonce := protocol.BuildGroupChatNonce(item.GroupID, item.SenderPeerID, item.SenderSeq)
 		aad := []byte(item.GroupID + "\x00group_chat_file")
 		ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, item.CiphertextBlob, aad)
@@ -1035,6 +1048,7 @@ func (s *Service) buildGroupRetryEnvelope(item groupRetryDelivery) (any, error) 
 			FileName:     item.FileName,
 			MIMEType:     item.MIMEType,
 			FileSize:     item.FileSize,
+			FileCID:      fileCID,
 			Ciphertext:   ciphertext,
 			SentAtUnix:   item.SentAtUnix,
 			Signature:    item.Signature,
@@ -1531,6 +1545,7 @@ func marshalGroupChatFileForSigning(msg GroupChatFile) ([]byte, error) {
 		FileName     string `json:"file_name"`
 		MIMEType     string `json:"mime_type"`
 		FileSize     int64  `json:"file_size"`
+		FileCID      string `json:"file_cid,omitempty"`
 		Ciphertext   []byte `json:"ciphertext"`
 		SentAtUnix   int64  `json:"sent_at_unix"`
 	}{
@@ -1543,6 +1558,7 @@ func marshalGroupChatFileForSigning(msg GroupChatFile) ([]byte, error) {
 		FileName:     msg.FileName,
 		MIMEType:     msg.MIMEType,
 		FileSize:     msg.FileSize,
+		FileCID:      msg.FileCID,
 		Ciphertext:   msg.Ciphertext,
 		SentAtUnix:   msg.SentAtUnix,
 	})
@@ -2404,9 +2420,17 @@ func (s *Service) handleIncomingGroupFile(msg GroupChatFile) error {
 		FileName:     NormalizeChatFileName(msg.FileName),
 		MIMEType:     msg.MIMEType,
 		FileSize:     int64(len(plain)),
+		FileCID:      msg.FileCID,
 		Signature:    append([]byte(nil), msg.Signature...),
 		State:        GroupMessageStateReceived,
 		CreatedAt:    time.UnixMilli(msg.SentAtUnix).UTC(),
+	}
+	if incoming.FileCID == "" {
+		fileCID, err := ComputeChatFileCID(plain)
+		if err != nil {
+			return err
+		}
+		incoming.FileCID = fileCID
 	}
 	if _, err := s.store.AddGroupMessage(incoming, plain, nil); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -2514,6 +2538,13 @@ func (s *Service) handleGroupSyncRequest(req GroupSyncRequest, fromPeerID string
 		if err != nil {
 			return GroupSyncResponse{}, err
 		}
+		fileCID := item.FileCID
+		if fileCID == "" && len(item.PlainBlob) > 0 {
+			fileCID, err = ComputeChatFileCID(item.PlainBlob)
+			if err != nil {
+				return GroupSyncResponse{}, err
+			}
+		}
 		nonce := protocol.BuildGroupChatNonce(item.GroupID, item.SenderPeerID, item.SenderSeq)
 		aad := []byte(item.GroupID + "\x00group_chat_file")
 		ciphertext, err := protocol.AEADSeal(groupEpoch.WrappedKeyForLocal, nonce, item.PlainBlob, aad)
@@ -2530,6 +2561,7 @@ func (s *Service) handleGroupSyncRequest(req GroupSyncRequest, fromPeerID string
 			FileName:     item.FileName,
 			MIMEType:     item.MIMEType,
 			FileSize:     item.FileSize,
+			FileCID:      fileCID,
 			Ciphertext:   ciphertext,
 			SentAtUnix:   item.SentAtUnix,
 			Signature:    item.Signature,

@@ -22,6 +22,7 @@ type groupRetryDelivery struct {
 	FileName       string
 	MIMEType       string
 	FileSize       int64
+	FileCID        string
 	CiphertextBlob []byte
 	Signature      []byte
 	SentAtUnix     int64
@@ -51,6 +52,7 @@ type groupSyncFileMessage struct {
 	FileName     string
 	MIMEType     string
 	FileSize     int64
+	FileCID      string
 	PlainBlob    []byte
 	SentAtUnix   int64
 	Signature    []byte
@@ -112,6 +114,7 @@ func (s *Store) ensureGroupTables() error {
 			file_name TEXT NOT NULL DEFAULT '',
 			mime_type TEXT NOT NULL DEFAULT '',
 			file_size INTEGER NOT NULL DEFAULT 0,
+			file_cid TEXT NOT NULL DEFAULT '',
 			ciphertext_blob BLOB NOT NULL,
 			signature BLOB NOT NULL,
 			state TEXT NOT NULL,
@@ -172,7 +175,43 @@ func (s *Store) ensureGroupTables() error {
 	if err := s.ensureGroupRetentionColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureGroupMessageFileCIDColumn(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureGroupMessageFileCIDColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(group_messages)`)
+	if err != nil {
+		return err
+	}
+	hasFileCID := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "file_cid" {
+			hasFileCID = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasFileCID {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE group_messages ADD COLUMN file_cid TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func (s *Store) ensureGroupEventSignerColumn() error {
@@ -420,9 +459,9 @@ func (s *Store) AddGroupMessage(msg GroupMessage, ciphertext []byte, deliveries 
 	}
 	defer rollbackTx(tx)
 	if _, err := tx.Exec(`
-		INSERT OR REPLACE INTO group_messages(msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,ciphertext_blob,signature,state,sent_at,delivered_summary)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.GroupID, msg.Epoch, msg.SenderPeerID, msg.SenderSeq, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, ciphertext, msg.Signature, msg.State, formatDBTime(msg.CreatedAt), ""); err != nil {
+		INSERT OR REPLACE INTO group_messages(msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,signature,state,sent_at,delivered_summary)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.GroupID, msg.Epoch, msg.SenderPeerID, msg.SenderSeq, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.Signature, msg.State, formatDBTime(msg.CreatedAt), ""); err != nil {
 		return GroupMessage{}, err
 	}
 	for _, delivery := range deliveries {
@@ -463,7 +502,7 @@ func (s *Store) AddGroupMessage(msg GroupMessage, ciphertext []byte, deliveries 
 
 func (s *Store) ListGroupMessages(groupID string) ([]GroupMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,signature,state,sent_at,delivered_summary
+		SELECT msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,file_cid,signature,state,sent_at,delivered_summary
 		FROM group_messages
 		WHERE group_id=?
 		ORDER BY sent_at ASC
@@ -479,7 +518,7 @@ func (s *Store) ListGroupMessages(groupID string) ([]GroupMessage, error) {
 			sentAt           string
 			deliveredSummary string
 		)
-		if err := rows.Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.MsgType, &msg.Plaintext, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.Signature, &msg.State, &sentAt, &deliveredSummary); err != nil {
+		if err := rows.Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.MsgType, &msg.Plaintext, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.FileCID, &msg.Signature, &msg.State, &sentAt, &deliveredSummary); err != nil {
 			return nil, err
 		}
 		msg.CreatedAt = parseDBTime(sentAt)
@@ -496,10 +535,10 @@ func (s *Store) GetGroupMessage(msgID string) (GroupMessage, error) {
 		deliveredSummary string
 	)
 	err := s.db.QueryRow(`
-		SELECT msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,signature,state,sent_at,delivered_summary
+		SELECT msg_id,group_id,epoch,sender_peer_id,sender_seq,msg_type,plaintext,file_name,mime_type,file_size,file_cid,signature,state,sent_at,delivered_summary
 		FROM group_messages
 		WHERE msg_id=?
-	`, msgID).Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.MsgType, &msg.Plaintext, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.Signature, &msg.State, &sentAt, &deliveredSummary)
+	`, msgID).Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.MsgType, &msg.Plaintext, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.FileCID, &msg.Signature, &msg.State, &sentAt, &deliveredSummary)
 	if err != nil {
 		return GroupMessage{}, err
 	}
@@ -623,6 +662,7 @@ func (s *Store) ListGroupDeliveriesForRetry(now time.Time, limit int) ([]groupRe
 			m.file_name,
 			m.mime_type,
 			m.file_size,
+			m.file_cid,
 			m.ciphertext_blob,
 			m.signature,
 			m.sent_at,
@@ -653,6 +693,7 @@ func (s *Store) ListGroupDeliveriesForRetry(now time.Time, limit int) ([]groupRe
 			&item.FileName,
 			&item.MIMEType,
 			&item.FileSize,
+			&item.FileCID,
 			&item.CiphertextBlob,
 			&item.Signature,
 			&sentAt,
@@ -684,6 +725,7 @@ func (s *Store) ListGroupDeliveriesAwaitingAck(now time.Time, ackTimeout time.Du
 			m.file_name,
 			m.mime_type,
 			m.file_size,
+			m.file_cid,
 			m.ciphertext_blob,
 			m.signature,
 			m.sent_at,
@@ -714,6 +756,7 @@ func (s *Store) ListGroupDeliveriesAwaitingAck(now time.Time, ackTimeout time.Du
 			&item.FileName,
 			&item.MIMEType,
 			&item.FileSize,
+			&item.FileCID,
 			&item.CiphertextBlob,
 			&item.Signature,
 			&sentAt,
@@ -1013,7 +1056,7 @@ func (s *Store) ListGroupMessagesForSync(groupID string, cursors map[string]uint
 
 func (s *Store) ListGroupFileMessagesForSync(groupID string, cursors map[string]uint64) ([]groupSyncFileMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT msg_id, group_id, epoch, sender_peer_id, sender_seq, file_name, mime_type, file_size, ciphertext_blob, signature, sent_at
+		SELECT msg_id, group_id, epoch, sender_peer_id, sender_seq, file_name, mime_type, file_size, file_cid, ciphertext_blob, signature, sent_at
 		FROM group_messages
 		WHERE group_id=? AND msg_type=?
 		ORDER BY sent_at ASC
@@ -1028,7 +1071,7 @@ func (s *Store) ListGroupFileMessagesForSync(groupID string, cursors map[string]
 			msg    groupSyncFileMessage
 			sentAt string
 		)
-		if err := rows.Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.PlainBlob, &msg.Signature, &sentAt); err != nil {
+		if err := rows.Scan(&msg.MsgID, &msg.GroupID, &msg.Epoch, &msg.SenderPeerID, &msg.SenderSeq, &msg.FileName, &msg.MIMEType, &msg.FileSize, &msg.FileCID, &msg.PlainBlob, &msg.Signature, &sentAt); err != nil {
 			return nil, err
 		}
 		if cursors[msg.SenderPeerID] >= msg.SenderSeq {
