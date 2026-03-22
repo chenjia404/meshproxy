@@ -27,8 +27,8 @@ import (
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
 	"github.com/chenjia404/meshproxy/internal/geoip"
-	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/identity"
+	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/p2p"
@@ -146,20 +146,20 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	a := &App{
-		ctx:            ctx,
-		cfg:            cfg,
-		startTime:      time.Now(),
-		store:          store.NewMemoryStore(),
-		circuitStore:   store.NewCircuitStore(),
-		relayCache:     relayCache,
-		bootstrapCache: bootstrapCache,
-		myServersStore: myServersStore,
-		myGroupsStore:  myGroupsStore,
+		ctx:                   ctx,
+		cfg:                   cfg,
+		startTime:             time.Now(),
+		store:                 store.NewMemoryStore(),
+		circuitStore:          store.NewCircuitStore(),
+		relayCache:            relayCache,
+		bootstrapCache:        bootstrapCache,
+		myServersStore:        myServersStore,
+		myGroupsStore:         myGroupsStore,
 		connectedServersStore: connectedServersStore,
-		resourceIDsStore: resourceIDsStore,
-		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
-		autoUpdate:     cfg.AutoUpdate,
-		traffic:        traffic.NewRecorder(),
+		resourceIDsStore:      resourceIDsStore,
+		updater:               update.NewService("chenjia404", "meshproxy", "meshproxy"),
+		autoUpdate:            cfg.AutoUpdate,
+		traffic:               traffic.NewRecorder(),
 	}
 
 	// Identity
@@ -1184,14 +1184,14 @@ func (a *App) MeshServerListMyGroupsForConnection(ctx context.Context, connectio
 							// Prefer native numeric channel_id as stable id.
 							return int(ch.ChannelId)
 						}(),
-						ChannelID:        strconv.FormatUint(uint64(ch.ChannelId), 10),
-						Type:             ch.Type,
-						Name:             ch.Name,
-						Description:      ch.Description,
-						Visibility:       ch.Visibility,
-						SlowModeSeconds:  ch.SlowModeSeconds,
-						LastSeq:          ch.LastSeq,
-						CanView:          ch.CanView,
+						ChannelID:       strconv.FormatUint(uint64(ch.ChannelId), 10),
+						Type:            ch.Type,
+						Name:            ch.Name,
+						Description:     ch.Description,
+						Visibility:      ch.Visibility,
+						SlowModeSeconds: ch.SlowModeSeconds,
+						LastSeq:         ch.LastSeq,
+						CanView:         ch.CanView,
 						CanSendMessage:  ch.CanSendMessage,
 						CanSendImage:    ch.CanSendImage,
 						CanSendFile:     ch.CanSendFile,

@@ -19,9 +19,9 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
-	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/discovery"
 	"github.com/chenjia404/meshproxy/internal/exit"
+	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	"github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/protocol"
@@ -31,8 +31,11 @@ import (
 
 //go:generate go run ../tools/syncconsole
 //go:generate go run ../tools/syncchatui
-//go:embed console/* chat/*
+//go:embed console/*
 var consoleFS embed.FS
+
+// ChatPageCID 是 /chat 前端的 IPFS CID。請直接在程式碼中更新這個常量。
+const ChatPageCID = "QmQNFDvyviobckokk2tQANtB4GUpXJVmZB1PjdJgJFxN6k"
 
 // StatusProvider defines the subset of application state required by the local API.
 type StatusProvider interface {
@@ -312,7 +315,6 @@ type LocalAPI struct {
 	opts            *LocalAPIOpts
 	server          *http.Server
 	consoleHTML     []byte // embedded console index.html, served directly to avoid redirect
-	chatHTML        []byte // embedded chat index.html, served directly to avoid redirect
 	statusMu        sync.RWMutex
 	statusCache     map[string]any
 	statusCacheAt   time.Time
@@ -406,11 +408,6 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 		consoleHTML, _ = fs.ReadFile(sub, "index.html")
 	}
 	api.consoleHTML = consoleHTML
-	var chatHTML []byte
-	if sub, err := fs.Sub(consoleFS, "chat"); err == nil {
-		chatHTML, _ = fs.ReadFile(sub, "index.html")
-	}
-	api.chatHTML = chatHTML
 
 	// Wrap mux to serve /console and /console/ with 200 + body (never redirect)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,13 +428,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 			return
 		}
 		if path == "/chat" || path == "/chat/" {
-			if len(api.chatHTML) > 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusOK)
-				w.Write(api.chatHTML)
-				return
-			}
-			http.NotFound(w, r)
+			api.handleChatPage(w, r)
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -447,6 +438,22 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 		Handler: handler,
 	}
 	return api
+}
+
+func (a *LocalAPI) handleChatPage(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(ChatPageCID) == "" {
+		http.Error(w, "chat page cid is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if a.opts == nil || a.opts.IPFS == nil || !a.opts.IPFS.GatewayEnabled() {
+		http.Error(w, "chat page cid requires ipfs gateway", http.StatusServiceUnavailable)
+		return
+	}
+	target := "/ipfs/" + strings.TrimSpace(ChatPageCID) + "/"
+	if rawQuery := r.URL.RawQuery; rawQuery != "" {
+		target += "?" + rawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
@@ -1814,14 +1821,14 @@ func (a *LocalAPI) handleMeshServerServers(w http.ResponseWriter, r *http.Reques
 
 		// Convert server terminology to Space terminology for the response.
 		type spaceSummary struct {
-			ID                   int                    `json:"id"`
-			SpaceID              uint32                 `json:"space_id"`
-			Name                 string                 `json:"name"`
-			AvatarUrl            string                 `json:"avatar_url"`
-			Description          string                 `json:"description"`
-			Visibility           sessionv1.Visibility   `json:"visibility"`
-			MemberCount          uint32                 `json:"member_count"`
-			AllowChannelCreation bool                   `json:"allow_channel_creation"`
+			ID                   int                  `json:"id"`
+			SpaceID              uint32               `json:"space_id"`
+			Name                 string               `json:"name"`
+			AvatarUrl            string               `json:"avatar_url"`
+			Description          string               `json:"description"`
+			Visibility           sessionv1.Visibility `json:"visibility"`
+			MemberCount          uint32               `json:"member_count"`
+			AllowChannelCreation bool                 `json:"allow_channel_creation"`
 		}
 		type listSpacesResp struct {
 			Spaces []*spaceSummary `json:"spaces"`
@@ -1966,18 +1973,18 @@ func (a *LocalAPI) handleMeshServerMyServers(w http.ResponseWriter, r *http.Requ
 
 	// Convert server terminology to Space terminology for nested response fields.
 	type spaceSummary struct {
-		ID                   int                `json:"id"`
-		SpaceID              uint32             `json:"space_id"`
-		Name                 string             `json:"name"`
-		AvatarUrl            string             `json:"avatar_url"`
-		Description          string             `json:"description"`
+		ID                   int                  `json:"id"`
+		SpaceID              uint32               `json:"space_id"`
+		Name                 string               `json:"name"`
+		AvatarUrl            string               `json:"avatar_url"`
+		Description          string               `json:"description"`
 		Visibility           sessionv1.Visibility `json:"visibility"`
-		MemberCount          uint32             `json:"member_count"`
-		AllowChannelCreation bool              `json:"allow_channel_creation"`
+		MemberCount          uint32               `json:"member_count"`
+		AllowChannelCreation bool                 `json:"allow_channel_creation"`
 	}
 	type mySpaceItem struct {
-		Space *spaceSummary          `json:"space"`
-		Role  sessionv1.MemberRole  `json:"role"`
+		Space *spaceSummary        `json:"space"`
+		Role  sessionv1.MemberRole `json:"role"`
 	}
 	type listMySpacesResp struct {
 		Servers []*mySpaceItem `json:"servers"`
@@ -2036,23 +2043,23 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 					return
 				}
 				type channelSummaryWithID struct {
-					ID                int                `json:"id"`
-					ChannelId         uint32             `json:"channel_id"`
-					ServerId          uint32             `json:"server_id"`
-					Type              sessionv1.ChannelType `json:"type"`
-					Name              string             `json:"name"`
-					Description       string             `json:"description"`
-					Visibility        sessionv1.Visibility `json:"visibility"`
-					SlowModeSeconds  uint32             `json:"slow_mode_seconds"`
-					LastSeq          uint64             `json:"last_seq"`
-					CanView           bool               `json:"can_view"`
-					CanSendMessage   bool               `json:"can_send_message"`
-					CanSendImage     bool               `json:"can_send_image"`
-					CanSendFile      bool               `json:"can_send_file"`
+					ID              int                   `json:"id"`
+					ChannelId       uint32                `json:"channel_id"`
+					ServerId        uint32                `json:"server_id"`
+					Type            sessionv1.ChannelType `json:"type"`
+					Name            string                `json:"name"`
+					Description     string                `json:"description"`
+					Visibility      sessionv1.Visibility  `json:"visibility"`
+					SlowModeSeconds uint32                `json:"slow_mode_seconds"`
+					LastSeq         uint64                `json:"last_seq"`
+					CanView         bool                  `json:"can_view"`
+					CanSendMessage  bool                  `json:"can_send_message"`
+					CanSendImage    bool                  `json:"can_send_image"`
+					CanSendFile     bool                  `json:"can_send_file"`
 				}
 				type listChannelsRespWithID struct {
-					ServerId  string                      `json:"server_id"`
-					Channels  []*channelSummaryWithID   `json:"channels"`
+					ServerId string                  `json:"server_id"`
+					Channels []*channelSummaryWithID `json:"channels"`
 				}
 
 				out := &listChannelsRespWithID{
@@ -2067,19 +2074,19 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 						}
 						chIntID := a.meshChannelIntID(ch.ChannelId)
 						out.Channels = append(out.Channels, &channelSummaryWithID{
-							ID:               chIntID,
-							ChannelId:        ch.ChannelId,
-							ServerId:         ch.SpaceId,
-							Type:             ch.Type,
-							Name:             ch.Name,
-							Description:      ch.Description,
-							Visibility:       ch.Visibility,
+							ID:              chIntID,
+							ChannelId:       ch.ChannelId,
+							ServerId:        ch.SpaceId,
+							Type:            ch.Type,
+							Name:            ch.Name,
+							Description:     ch.Description,
+							Visibility:      ch.Visibility,
 							SlowModeSeconds: ch.SlowModeSeconds,
-							LastSeq:          ch.LastSeq,
-							CanView:          ch.CanView,
-							CanSendMessage:   ch.CanSendMessage,
-							CanSendImage:     ch.CanSendImage,
-							CanSendFile:      ch.CanSendFile,
+							LastSeq:         ch.LastSeq,
+							CanView:         ch.CanView,
+							CanSendMessage:  ch.CanSendMessage,
+							CanSendImage:    ch.CanSendImage,
+							CanSendFile:     ch.CanSendFile,
 						})
 					}
 				}
@@ -2102,26 +2109,26 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 					return
 				}
 				type channelSummaryWithID struct {
-					ID                int                `json:"id"`
-					ChannelId         uint32             `json:"channel_id"`
-					ServerId          uint32             `json:"server_id"`
-					Type              sessionv1.ChannelType `json:"type"`
-					Name              string             `json:"name"`
-					Description       string             `json:"description"`
-					Visibility        sessionv1.Visibility `json:"visibility"`
-					SlowModeSeconds  uint32             `json:"slow_mode_seconds"`
-					LastSeq          uint64             `json:"last_seq"`
-					CanView           bool               `json:"can_view"`
-					CanSendMessage   bool               `json:"can_send_message"`
-					CanSendImage     bool               `json:"can_send_image"`
-					CanSendFile      bool               `json:"can_send_file"`
+					ID              int                   `json:"id"`
+					ChannelId       uint32                `json:"channel_id"`
+					ServerId        uint32                `json:"server_id"`
+					Type            sessionv1.ChannelType `json:"type"`
+					Name            string                `json:"name"`
+					Description     string                `json:"description"`
+					Visibility      sessionv1.Visibility  `json:"visibility"`
+					SlowModeSeconds uint32                `json:"slow_mode_seconds"`
+					LastSeq         uint64                `json:"last_seq"`
+					CanView         bool                  `json:"can_view"`
+					CanSendMessage  bool                  `json:"can_send_message"`
+					CanSendImage    bool                  `json:"can_send_image"`
+					CanSendFile     bool                  `json:"can_send_file"`
 				}
 				type createChannelRespWithID struct {
-					Ok       bool                      `json:"ok"`
-					ServerID uint32                   `json:"server_id"`
-					ChannelID uint32                  `json:"channel_id"`
-					Channel *channelSummaryWithID    `json:"channel"`
-					Message  string                   `json:"message"`
+					Ok        bool                  `json:"ok"`
+					ServerID  uint32                `json:"server_id"`
+					ChannelID uint32                `json:"channel_id"`
+					Channel   *channelSummaryWithID `json:"channel"`
+					Message   string                `json:"message"`
 				}
 				out := &createChannelRespWithID{
 					Ok:        resp.Ok,
@@ -2132,16 +2139,16 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 				if resp.Channel != nil {
 					chID := a.meshChannelIntID(resp.Channel.ChannelId)
 					out.Channel = &channelSummaryWithID{
-						ID:               chID,
-						ChannelId:        resp.Channel.ChannelId,
-						ServerId:         resp.Channel.SpaceId,
-						Type:             resp.Channel.Type,
-						Name:             resp.Channel.Name,
-						Description:      resp.Channel.Description,
-						Visibility:       resp.Channel.Visibility,
+						ID:              chID,
+						ChannelId:       resp.Channel.ChannelId,
+						ServerId:        resp.Channel.SpaceId,
+						Type:            resp.Channel.Type,
+						Name:            resp.Channel.Name,
+						Description:     resp.Channel.Description,
+						Visibility:      resp.Channel.Visibility,
 						SlowModeSeconds: resp.Channel.SlowModeSeconds,
-						LastSeq:          resp.Channel.LastSeq,
-						CanView:          resp.Channel.CanView,
+						LastSeq:         resp.Channel.LastSeq,
+						CanView:         resp.Channel.CanView,
 						CanSendMessage:  resp.Channel.CanSendMessage,
 						CanSendImage:    resp.Channel.CanSendImage,
 						CanSendFile:     resp.Channel.CanSendFile,
@@ -2275,46 +2282,46 @@ func (a *LocalAPI) handleMeshServerServerItem(w http.ResponseWriter, r *http.Req
 				return
 			}
 			type channelSummaryWithID struct {
-				ID                int                   `json:"id"`
-				ChannelId         uint32                `json:"channel_id"`
-				ServerId          uint32                `json:"server_id"`
-				Type              sessionv1.ChannelType `json:"type"`
-				Name              string                `json:"name"`
-				Description       string                `json:"description"`
-				Visibility        sessionv1.Visibility  `json:"visibility"`
-				SlowModeSeconds  uint32                `json:"slow_mode_seconds"`
-				LastSeq          uint64                `json:"last_seq"`
-				CanView           bool                  `json:"can_view"`
-				CanSendMessage   bool                  `json:"can_send_message"`
-				CanSendImage     bool                  `json:"can_send_image"`
-				CanSendFile      bool                  `json:"can_send_file"`
+				ID              int                   `json:"id"`
+				ChannelId       uint32                `json:"channel_id"`
+				ServerId        uint32                `json:"server_id"`
+				Type            sessionv1.ChannelType `json:"type"`
+				Name            string                `json:"name"`
+				Description     string                `json:"description"`
+				Visibility      sessionv1.Visibility  `json:"visibility"`
+				SlowModeSeconds uint32                `json:"slow_mode_seconds"`
+				LastSeq         uint64                `json:"last_seq"`
+				CanView         bool                  `json:"can_view"`
+				CanSendMessage  bool                  `json:"can_send_message"`
+				CanSendImage    bool                  `json:"can_send_image"`
+				CanSendFile     bool                  `json:"can_send_file"`
 			}
 			type createGroupRespWithID struct {
-				Ok        bool                   `json:"ok"`
+				Ok        bool                  `json:"ok"`
 				ServerID  uint32                `json:"server_id"`
 				ChannelID uint32                `json:"channel_id"`
 				Channel   *channelSummaryWithID `json:"channel"`
 				Message   string                `json:"message"`
 			}
 			out := &createGroupRespWithID{
-				Ok:         resp.Ok,
-				ServerID:   resp.SpaceId,
-				ChannelID:  resp.ChannelId,
-				Message:    resp.Message,
+				Ok:        resp.Ok,
+				ServerID:  resp.SpaceId,
+				ChannelID: resp.ChannelId,
+				Message:   resp.Message,
 			}
 			if resp.Channel != nil {
 				chID := a.meshChannelIntID(resp.Channel.ChannelId)
 				out.Channel = &channelSummaryWithID{
-					ID:               chID,
-					ChannelId:        resp.Channel.ChannelId,
-					ServerId:         resp.Channel.SpaceId,
-					Type:             resp.Channel.Type,
-					Name:             resp.Channel.Name,
-					Description:      resp.Channel.Description,
-					Visibility:       resp.Channel.Visibility,
+					ID:              chID,
+					ChannelId:       resp.Channel.ChannelId,
+					ServerId:        resp.Channel.SpaceId,
+					Type:            resp.Channel.Type,
+					Name:            resp.Channel.Name,
+					Description:     resp.Channel.Description,
+					Visibility:      resp.Channel.Visibility,
 					SlowModeSeconds: resp.Channel.SlowModeSeconds,
-					LastSeq:          resp.Channel.LastSeq,
-					CanView:          resp.Channel.CanView,
+					LastSeq:         resp.Channel.LastSeq,
+					CanView:         resp.Channel.CanView,
 					CanSendMessage:  resp.Channel.CanSendMessage,
 					CanSendImage:    resp.Channel.CanSendImage,
 					CanSendFile:     resp.Channel.CanSendFile,
