@@ -170,7 +170,7 @@ func (c *Client) authenticate(ctx context.Context) error {
 		return fmt.Errorf("decode auth challenge: %w", err)
 	}
 	// 與 meshserver internal/auth.BuildChallengePayload 一致：node_peer_id、尾部 \n；ServerPeerId 對應 proto node_peer_id 欄位
-	payload := buildChallengePayload(string(c.protocolID), c.host.ID().String(), chal.NodePeerId, chal.Nonce, chal.IssuedAtMs, chal.ExpiresAtMs)
+	payload := BuildChallengePayload(string(c.protocolID), c.host.ID().String(), chal.NodePeerId, chal.Nonce, chal.IssuedAtMs, chal.ExpiresAtMs)
 	sig, err := c.privKey.Sign(payload)
 	if err != nil {
 		return fmt.Errorf("sign auth challenge: %w", err)
@@ -336,9 +336,10 @@ func (c *Client) readError() error {
 	return ErrNotConnected
 }
 
-// buildChallengePayload 與 meshserver internal/auth.BuildChallengePayload 一致：
+// BuildChallengePayload 與 meshserver internal/auth.BuildChallengePayload 一致：
+// 用於 libp2p AUTH_PROVE 與 HTTP POST /v1/auth/verify 的簽名輸入（UTF-8 位元組序列）。
 // 使用 node_peer_id（對應 AuthChallenge 的 node_peer_id/ServerPeerId）且含尾部換行。
-func buildChallengePayload(protocolID, clientPeerID, nodePeerID string, nonce []byte, issuedAtMs, expiresAtMs uint64) []byte {
+func BuildChallengePayload(protocolID, clientPeerID, nodePeerID string, nonce []byte, issuedAtMs, expiresAtMs uint64) []byte {
 	return []byte(fmt.Sprintf(
 		"protocol_id=%s\nclient_peer_id=%s\nnode_peer_id=%s\nnonce=%s\nissued_at_ms=%d\nexpires_at_ms=%d\n",
 		protocolID,

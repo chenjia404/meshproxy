@@ -578,6 +578,19 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 
 接收端會校驗 `InviteEnvelope` 與 `GroupInviteNoticePayload` 一致性（例如 `group_id`、`signer_peer_id` 與發送方），再套用遠端群組邀請邏輯。
 
+#### 邊界與行為說明
+
+| 情況 | 行為 |
+|------|------|
+| **`members` 為空或僅含空白** | 只建立「僅有建立者（控制者）」的群組，**不會**對任何人發送 `group_invite_notice`，也不會進入邀請迴圈。 |
+| **`members` 內重複 PeerID** | 實作會去重；同一對端只邀請一次，對應**一則** `group_invite_notice`。 |
+| **缺少與某成員的單聊會話** | 建立群組時會在驗證階段失敗，錯誤語意為需先有單聊；**不會**部分成功建立再邀請。 |
+| **建立成功後、邀請迴圈中某次 `InviteGroupMember` 失敗** | API 會回錯，但此時群組可能**已寫入**，且**先前幾位**被邀請者的狀態可能已落庫；並非整段建立+邀請在同一資料庫交易內原子提交。第三方若需嚴格一致，應以伺服器回傳與後續 **`GET /api/v1/groups/{group_id}`** 為準。 |
+| **`group_control` 廣播與「僅自己」的群** | 建立當下成員僅控制者時，對 `group_create` 事件的廣播收件者可能為空；被邀請者主要是在**後續每次 `InviteGroupMember`** 時收到群組控制流與私聊 `group_invite_notice`。 |
+| **私聊 `group_invite_notice` 發送失敗** | 實作上若 `sendDirectGroupInviteNotice` 失敗**僅記錄日誌**，`InviteGroupMember` / `CreateGroup` 仍可能回傳成功；意即**群內邀請狀態已寫入，但對方單聊裡可能沒有這條通知訊息**。對端可依賴群組同步／控制事件補齊，或請發起方重試邀請。 |
+| **僅透過 `POST .../groups/{group_id}/invite` 邀請** | 與建立時邀請相同：須已與對方有單聊，並同樣會嘗試發送一則 **`group_invite_notice`**（格式同上）。 |
+| **本機 PeerID** | 不會邀請自己；`members` 若誤含本機會在去重時略過。 |
+
 ---
 
 ### `GET /api/v1/groups/{group_id}`
@@ -803,6 +816,52 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 | 欄位 | 類型 | 說明 |
 |------|------|------|
 | `status` | string | 固定為 `connected` |
+
+---
+
+## meshserver HTTP JWT（向使用者指定的伺服器取得 `access_token`）
+
+當前端需要**直接**呼叫 [meshserver 的 HTTP API](https://github.com/chenjia404/meshserver/blob/master/docs/api.md)（例如 `GET /v1/spaces`、`POST /v1/channels/{channel_id}/messages`），必須先取得 **`Authorization: Bearer <access_token>`**。meshserver 使用與 libp2p 對齊的 **`POST /v1/auth/challenge`** → 簽名 → **`POST /v1/auth/verify`** 流程；mesh-proxy 在本機代為完成 challenge/verify，並以**本節點的 libp2p 身份金鑰**簽名（與 mesh-proxy 的 PeerID 一致）。
+
+> **安全提示**：誰能呼叫本機 Local API，誰就能以你的節點身份向指定 `base_url` 換取 JWT。請僅在受信任環境使用，或自行在網關層限制來源。
+
+### `POST /api/v1/meshserver/http/access_token`
+
+| 項目 | 說明 |
+|------|------|
+| 成功狀態碼 | **200 OK** |
+| Content-Type | `application/json` |
+| 前置條件 | 應用已啟用 meshserver 相關能力（與其他 `/api/v1/meshserver/*` 相同）；否則 **404** `meshserver client not available`。 |
+
+**請求 body**：
+
+| 欄位 | 類型 | 必填 | 說明 |
+|------|------|------|------|
+| `base_url` | string | 是 | meshserver 的 HTTP 站點根位址，**不含**路徑前綴。例如 `https://mesh.example.com`。實作會請求 `{base_url}/v1/auth/challenge` 與 `{base_url}/v1/auth/verify`。 |
+| `protocol_id` | string | 否 | 簽名 payload 用的協議 ID。省略時使用 challenge 回應中的 `protocol_id`（須與 meshserver 設定的 `libp2p_protocol_id` 一致，預設多為 `/meshserver/session/1.0.0`）。 |
+
+範例：
+
+```json
+{
+  "base_url": "https://your-meshserver.example.com",
+  "protocol_id": "/meshserver/session/1.0.0"
+}
+```
+
+**回應欄位**（與 meshserver `POST /v1/auth/verify` 成功 body 對齊）：
+
+| 欄位 | 類型 | 說明 |
+|------|------|------|
+| `access_token` | string | JWT，後續請求 meshserver 時置於 `Authorization: Bearer ...` |
+| `token_type` | string | 通常為 `Bearer` |
+| `expires_in` | number | 剩餘有效秒數（約值） |
+| `expires_at` | string | 過期時間，RFC3339Nano，UTC |
+| `user` | object | 使用者摘要（結構見 meshserver 文件之 `user`） |
+
+**錯誤**：多為 **400**，body 純文字，內容為失敗原因（例如 challenge/verify HTTP 非 200、簽名驗證失敗、JSON 解析錯誤等）。
+
+**後續用法**：取得 `access_token` 後，瀏覽器或第三方應用應**直接向 `base_url` 所屬 meshserver** 發送請求（與 mesh-proxy 不同源），並帶上官方文件中的 Bearer 標頭；無需再經 mesh-proxy 轉發。
 
 ---
 

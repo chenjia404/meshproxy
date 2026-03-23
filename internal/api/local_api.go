@@ -242,6 +242,10 @@ type MeshServerProvider interface {
 	// GetCreateSpacePermissions returns the caller's permissions to create spaces on this meshserver.
 	// This corresponds to GET_CREATE_SPACE_PERMISSIONS.
 	GetCreateSpacePermissions(ctx context.Context, connection string) (*sessionv1.GetCreateSpacePermissionsResp, error)
+
+	// FetchMeshServerHTTPAccessToken 以本機 libp2p 身份對使用者指定的 meshserver HTTP 基底 URL 完成
+	// POST /v1/auth/challenge 與 /v1/auth/verify，取得 JWT（與 meshserver 官方 HTTP API 一致）。
+	FetchMeshServerHTTPAccessToken(ctx context.Context, baseURL, protocolID string) (*meshserver.HTTPAccessTokenResult, error)
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -378,6 +382,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/meshserver/connections", api.handleMeshServerConnections)
 	mux.HandleFunc("/api/v1/meshserver/connections/", api.handleMeshServerConnectionItem)
 	mux.HandleFunc("/api/v1/meshserver/server/my_permissions", api.handleMeshServerServerMyPermissions)
+	mux.HandleFunc("/api/v1/meshserver/http/access_token", api.handleMeshServerHTTPAccessToken)
 	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
 	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
 	mux.HandleFunc("/api/v1/update/settings", api.handleUpdateSettings)
@@ -2638,6 +2643,38 @@ func (a *LocalAPI) handleMeshServerServerMyPermissions(w http.ResponseWriter, r 
 		"can_create_space": resp.CanCreateSpace,
 		"message":          resp.Message,
 	})
+}
+
+// handleMeshServerHTTPAccessToken proxies meshserver HTTP JWT auth (challenge + verify) using local libp2p identity.
+// POST /api/v1/meshserver/http/access_token
+func (a *LocalAPI) handleMeshServerHTTPAccessToken(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.MeshServer == nil {
+		http.Error(w, "meshserver client not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		BaseURL    string `json:"base_url"`
+		ProtocolID string `json:"protocol_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	baseURL := strings.TrimSpace(body.BaseURL)
+	if baseURL == "" {
+		http.Error(w, "base_url is required", http.StatusBadRequest)
+		return
+	}
+	out, err := a.opts.MeshServer.FetchMeshServerHTTPAccessToken(r.Context(), baseURL, strings.TrimSpace(body.ProtocolID))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, out)
 }
 
 func parseMeshServerVisibility(value string) sessionv1.Visibility {

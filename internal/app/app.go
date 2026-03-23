@@ -825,6 +825,17 @@ func (a *App) MeshServerGetCreateSpacePermissionsForConnection(ctx context.Conte
 	return client.GetCreateSpacePermissions(ctx)
 }
 
+// MeshServerFetchHTTPAccessToken 以本機 libp2p 身份對指定 meshserver HTTP 基底 URL 取得 JWT（見 meshserver docs/api.md）。
+func (a *App) MeshServerFetchHTTPAccessToken(ctx context.Context, baseURL, protocolID string) (*meshserver.HTTPAccessTokenResult, error) {
+	if a == nil || a.idMgr == nil {
+		return nil, fmt.Errorf("identity not available")
+	}
+	if a.host == nil {
+		return nil, fmt.Errorf("host not available")
+	}
+	return meshserver.FetchHTTPAccessToken(ctx, baseURL, a.host.Host.ID().String(), a.idMgr.PrivateKey(), protocolID)
+}
+
 func (a *App) MeshServerCreateSpaceFor(ctx context.Context, connection, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error) {
 	client, err := a.meshServerClient(connection)
 	if err != nil {
@@ -1568,6 +1579,13 @@ func (m *meshServerAPIAdapter) GetCreateSpacePermissions(ctx context.Context, co
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerGetCreateSpacePermissionsForConnection(ctx, connection)
+}
+
+func (m *meshServerAPIAdapter) FetchMeshServerHTTPAccessToken(ctx context.Context, baseURL, protocolID string) (*meshserver.HTTPAccessTokenResult, error) {
+	if m == nil || m.app == nil {
+		return nil, fmt.Errorf("meshserver client not available")
+	}
+	return m.app.MeshServerFetchHTTPAccessToken(ctx, baseURL, protocolID)
 }
 
 func (m *meshServerAPIAdapter) CreateSpace(ctx context.Context, connection, name, description string, visibility sessionv1.Visibility, allowChannelCreation bool) (*sessionv1.CreateSpaceResp, error) {
