@@ -92,8 +92,8 @@ func (c *ChatService) RevokeMessage(conversationID, msgID string) error {
 	return c.inner.RevokeMessage(conversationID, msgID)
 }
 
-func (c *ChatService) SendFile(conversationID, fileName, mimeType string, data []byte) (Message, error) {
-	return c.inner.SendFile(conversationID, fileName, mimeType, data)
+func (c *ChatService) SendFile(conversationID, fileName, mimeType string, data []byte, uploadToIPFS bool) (Message, error) {
+	return c.inner.SendFile(conversationID, fileName, mimeType, data, uploadToIPFS)
 }
 
 func (c *ChatService) GetMessageFile(conversationID, msgID string) (Message, []byte, error) {

@@ -28,9 +28,10 @@ import (
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
-// ipfsAvatarPinner 可選：將頭像寫入嵌入式 IPFS 並取得 CID（由 app 注入）。
+// ipfsAvatarPinner 可選：將頭像／聊天附件寫入嵌入式 IPFS 並取得 CID（由 app 注入）。
 type ipfsAvatarPinner interface {
 	PinAvatar(ctx context.Context, fileName string, data []byte) (cid string, err error)
+	PinChatFile(ctx context.Context, fileName string, data []byte) (cid string, err error)
 }
 
 type Service struct {
@@ -714,7 +715,7 @@ func (s *Service) ListMessagesPage(conversationID string, limit, offset int) ([]
 	return s.store.ListMessagesPage(conversationID, limit, offset)
 }
 
-func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byte) (Message, error) {
+func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byte, uploadToIPFS bool) (Message, error) {
 	if len(data) == 0 {
 		return Message{}, errors.New("file is empty")
 	}
@@ -733,9 +734,23 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if err != nil {
 		return Message{}, err
 	}
-	fileCID, err := ComputeChatFileCID(data)
-	if err != nil {
-		return Message{}, err
+	var fileCID string
+	if uploadToIPFS {
+		if s.ipfs == nil {
+			return Message{}, errors.New("ipfs not available for chat file upload")
+		}
+		fileCID, err = s.ipfs.PinChatFile(s.ctx, fileName, data)
+		if err != nil {
+			return Message{}, fmt.Errorf("ipfs pin chat file: %w", err)
+		}
+		if strings.TrimSpace(fileCID) == "" {
+			return Message{}, errors.New("ipfs pin chat file returned empty cid")
+		}
+	} else {
+		fileCID, err = ComputeChatFileCID(data)
+		if err != nil {
+			return Message{}, err
+		}
 	}
 	msg := Message{
 		MsgID:          uuid.NewString(),

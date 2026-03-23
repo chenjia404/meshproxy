@@ -2218,6 +2218,14 @@ func newChatIPFSAvatarPinner(emb *ipfsnode.EmbeddedIPFS) *chatIPFSAvatarPinner {
 }
 
 func (p *chatIPFSAvatarPinner) PinAvatar(ctx context.Context, fileName string, data []byte) (string, error) {
+	return p.pinFile(ctx, fileName, data)
+}
+
+func (p *chatIPFSAvatarPinner) PinChatFile(ctx context.Context, fileName string, data []byte) (string, error) {
+	return p.pinFile(ctx, fileName, data)
+}
+
+func (p *chatIPFSAvatarPinner) pinFile(ctx context.Context, fileName string, data []byte) (string, error) {
 	if p == nil || p.emb == nil || len(data) == 0 {
 		return "", nil
 	}

@@ -273,7 +273,7 @@ type ChatProvider interface {
 	ListMessagesPage(conversationID string, limit, offset int) ([]chat.Message, int, error)
 	SyncConversation(conversationID string) error
 	RevokeMessage(conversationID, msgID string) error
-	SendFile(conversationID, fileName, mimeType string, data []byte) (chat.Message, error)
+	SendFile(conversationID, fileName, mimeType string, data []byte, uploadToIPFS bool) (chat.Message, error)
 	GetMessageFile(conversationID, msgID string) (chat.Message, []byte, error)
 	SendText(conversationID, text string) (chat.Message, error)
 	ConnectPeer(peerID string) error
@@ -1490,7 +1490,11 @@ func (a *LocalAPI) handleChatConversationItem(w http.ResponseWriter, r *http.Req
 			}
 			fileName := chat.NormalizeChatFileName(header.Filename)
 			mimeType := http.DetectContentType(data)
-			msg, err := a.opts.ChatService.SendFile(conversationID, fileName, mimeType, data)
+			uploadToIPFS := false
+			if v := strings.TrimSpace(r.FormValue("upload_to_ipfs")); v != "" {
+				uploadToIPFS, _ = strconv.ParseBool(v)
+			}
+			msg, err := a.opts.ChatService.SendFile(conversationID, fileName, mimeType, data, uploadToIPFS)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
