@@ -3,3 +3,4 @@ dist/
 .gocache/
 .gopath/
 .gomodcache/
+shell.sh

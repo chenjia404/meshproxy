@@ -98,17 +98,18 @@ func (s *Store) MigrateConversationID(oldConversationID, newConversationID strin
 		}
 	}()
 
-	var peerID, state, lastMessageAt, lastTransportMode string
+	var peerID, state, lastMessageAt, lastMessage, lastTransportMode string
 	var unreadCount, retentionMinutes int
 	var retentionSyncState, retentionSyncedAt, createdAt string
 	if err := tx.QueryRow(`
-		SELECT peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at
+		SELECT peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at
 		FROM conversations
 		WHERE conversation_id=?
 	`, oldConversationID).Scan(
 		&peerID,
 		&state,
 		&lastMessageAt,
+		&lastMessage,
 		&lastTransportMode,
 		&unreadCount,
 		&retentionMinutes,
@@ -121,9 +122,9 @@ func (s *Store) MigrateConversationID(oldConversationID, newConversationID strin
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.Exec(`
-		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)
-	`, newConversationID, peerID, state, lastMessageAt, lastTransportMode, unreadCount, retentionMinutes, retentionSyncState, retentionSyncedAt, createdAt, now); err != nil {
+		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	`, newConversationID, peerID, state, lastMessageAt, lastMessage, lastTransportMode, unreadCount, retentionMinutes, retentionSyncState, retentionSyncedAt, createdAt, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`

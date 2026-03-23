@@ -178,6 +178,10 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("dedupe peers by peer_id: %w", err)
 	}
+	if err := s.backfillConversationLastMessagePreviews(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("backfill conversation last_message: %w", err)
+	}
 	return s, nil
 }
 
@@ -230,6 +234,7 @@ func (s *Store) migrate() error {
 			peer_id TEXT NOT NULL UNIQUE,
 			state TEXT NOT NULL,
 			last_message_at TEXT NOT NULL,
+			last_message TEXT NOT NULL DEFAULT '',
 			last_transport_mode TEXT NOT NULL,
 			unread_count INTEGER NOT NULL,
 			retention_minutes INTEGER NOT NULL DEFAULT 0,
@@ -304,6 +309,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.ensureConversationRetentionSyncColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureConversationLastMessageColumn(); err != nil {
 		return err
 	}
 	if err := s.ensureMessageFileColumns(); err != nil {
@@ -402,6 +410,92 @@ func (s *Store) ensureConversationRetentionSyncColumns() error {
 	}
 	if !hasAt {
 		if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN retention_synced_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureConversationLastMessageColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(conversations)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "last_message" {
+			has = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE conversations ADD COLUMN last_message TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// backfillConversationLastMessagePreviews 僅填寫 last_message 預覽字串，不修改 updated_at。
+func (s *Store) backfillConversationLastMessagePreviews() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT conversation_id FROM conversations`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		var cur string
+		if err := s.db.QueryRow(`SELECT last_message FROM conversations WHERE conversation_id=?`, id).Scan(&cur); err != nil {
+			return err
+		}
+		if cur != "" {
+			continue
+		}
+		var msgType, plaintext, fileName string
+		err := s.db.QueryRow(`
+			SELECT msg_type, plaintext, file_name FROM messages
+			WHERE conversation_id=?
+			ORDER BY created_at DESC, counter DESC
+			LIMIT 1
+		`, id).Scan(&msgType, &plaintext, &fileName)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		preview := messagePreviewFromMessage(Message{MsgType: msgType, Plaintext: plaintext, FileName: fileName})
+		if _, err := s.db.Exec(`UPDATE conversations SET last_message=? WHERE conversation_id=?`, preview, id); err != nil {
 			return err
 		}
 	}

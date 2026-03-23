@@ -16,6 +16,9 @@ func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conver
 		if conv.LastMessageAt.IsZero() {
 			conv.LastMessageAt = existing.LastMessageAt
 		}
+		if conv.LastMessage == "" && existing.LastMessage != "" {
+			conv.LastMessage = existing.LastMessage
+		}
 		if conv.UnreadCount == 0 && existing.UnreadCount > 0 {
 			conv.UnreadCount = existing.UnreadCount
 		}
@@ -34,6 +37,9 @@ func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conver
 	} else if err != sql.ErrNoRows {
 		return Conversation{}, err
 	} else if existingByPeer, err := s.GetConversationByPeer(conv.PeerID); err == nil {
+		if conv.LastMessage == "" && existingByPeer.LastMessage != "" {
+			conv.LastMessage = existingByPeer.LastMessage
+		}
 		if conv.RetentionMinutes == 0 && existingByPeer.RetentionMinutes > 0 {
 			conv.RetentionMinutes = existingByPeer.RetentionMinutes
 		}
@@ -57,9 +63,9 @@ func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conver
 		createdAt = conv.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)
-	`, conv.ConversationID, conv.PeerID, conv.State, lastMessageAt, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), createdAt, now)
+		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	`, conv.ConversationID, conv.PeerID, conv.State, lastMessageAt, conv.LastMessage, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), createdAt, now)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -77,8 +83,8 @@ func (s *Store) GetConversation(id string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
 	var retentionSyncedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE conversation_id=?`, id).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE conversation_id=?`, id).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -105,8 +111,8 @@ func (s *Store) GetConversationByPeer(peerID string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
 	var retentionSyncedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE peer_id=?`, peerID).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE peer_id=?`, peerID).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -121,7 +127,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	// Only list conversations for an established friendship: accepted request between peers,
 	// or legacy rows that have session state (E2E established) without a request row.
 	rows, err := s.db.Query(`
-		SELECT c.conversation_id,c.peer_id,c.state,c.last_message_at,c.last_transport_mode,c.unread_count,c.retention_minutes,c.retention_sync_state,c.retention_synced_at,c.created_at,c.updated_at
+		SELECT c.conversation_id,c.peer_id,c.state,c.last_message_at,c.last_message,c.last_transport_mode,c.unread_count,c.retention_minutes,c.retention_sync_state,c.retention_synced_at,c.created_at,c.updated_at
 		FROM conversations c
 		WHERE (
 			EXISTS (
@@ -144,7 +150,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	for rows.Next() {
 		var c Conversation
 		var lastMessageAt, retentionSyncedAt, createdAt, updatedAt string
-		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		c.LastMessageAt = parseDBTime(lastMessageAt)
@@ -271,8 +277,21 @@ func refreshConversationMessageSummaryTx(tx *sql.Tx, conversationID string, upda
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(created_at), '') FROM messages WHERE conversation_id=?`, conversationID).Scan(&lastMessageAt); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=? WHERE conversation_id=?`,
-		lastMessageAt.String, formatDBTime(updatedAt), conversationID)
+	preview := ""
+	var msgType, plaintext, fileName string
+	err := tx.QueryRow(`
+		SELECT msg_type, plaintext, file_name FROM messages
+		WHERE conversation_id=?
+		ORDER BY created_at DESC, counter DESC
+		LIMIT 1
+	`, conversationID).Scan(&msgType, &plaintext, &fileName)
+	if err == nil {
+		preview = messagePreviewFromMessage(Message{MsgType: msgType, Plaintext: plaintext, FileName: fileName})
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE conversations SET last_message_at=?, last_message=?, updated_at=? WHERE conversation_id=?`,
+		lastMessageAt.String, preview, formatDBTime(updatedAt), conversationID)
 	return err
 }
 

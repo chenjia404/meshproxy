@@ -33,14 +33,15 @@ func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext [
 	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
 		return err
 	}
+	preview := messagePreviewFromMessage(msg)
 	if incrementUnread {
-		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=?, unread_count=unread_count+1 WHERE conversation_id=?`,
-			createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, last_message=?, updated_at=?, last_transport_mode=?, unread_count=unread_count+1 WHERE conversation_id=?`,
+			createdAt, preview, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
 			return err
 		}
 	} else {
-		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
-			createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+		if _, err := tx.Exec(`UPDATE conversations SET last_message_at=?, last_message=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
+			createdAt, preview, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
 			return err
 		}
 	}
@@ -78,8 +79,9 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-	if _, err := s.db.Exec(`UPDATE conversations SET last_message_at=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
-		createdAt, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
+	preview := messagePreviewFromMessage(msg)
+	if _, err := s.db.Exec(`UPDATE conversations SET last_message_at=?, last_message=?, updated_at=?, last_transport_mode=? WHERE conversation_id=?`,
+		createdAt, preview, createdAt, msg.TransportMode, msg.ConversationID); err != nil {
 		return Message{}, err
 	}
 	return msg, nil

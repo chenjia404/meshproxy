@@ -104,6 +104,7 @@ type Conversation struct {
 	PeerID             string    `json:"peer_id"`
 	State              string    `json:"state"`
 	LastMessageAt      time.Time `json:"last_message_at"`
+	LastMessage        string    `json:"last_message,omitempty"`
 	LastTransportMode  string    `json:"last_transport_mode"`
 	UnreadCount        int       `json:"unread_count"`
 	RetentionMinutes   int       `json:"retention_minutes"`
