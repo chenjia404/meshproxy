@@ -304,3 +304,55 @@ func TestRelayV1BIngestRelayDataPacket_RejectsExcessiveGap(t *testing.T) {
 		t.Fatal("excessive gap should not buffer")
 	}
 }
+
+// TestRelayV1BConnectValidLocked：握手持锁路径依赖 connect 未过期；过期、src 不一致或已 purge 必须为 false。
+func TestRelayV1BConnectValidLocked(t *testing.T) {
+	s := &Service{ctx: context.Background()}
+	sid, src := "sid-ttl", "srcPeer"
+
+	s.relayV1BMu.Lock()
+	s.relayV1BConnect = map[string]relayV1BConnReg{
+		sid: {srcID: src, expireAt: time.Now().Unix() + 3600},
+	}
+	if !s.relayV1BConnectValidLocked(sid, src) {
+		t.Fatal("fresh connect should be valid")
+	}
+	s.relayV1BMu.Unlock()
+
+	s.relayV1BMu.Lock()
+	s.relayV1BConnect[sid] = relayV1BConnReg{srcID: src, expireAt: time.Now().Unix() - 1}
+	if s.relayV1BConnectValidLocked(sid, src) {
+		t.Fatal("expired connect must be invalid")
+	}
+	s.relayV1BMu.Unlock()
+
+	s.relayV1BMu.Lock()
+	s.relayV1BConnect = map[string]relayV1BConnReg{sid: {srcID: "other", expireAt: time.Now().Unix() + 3600}}
+	if s.relayV1BConnectValidLocked(sid, src) {
+		t.Fatal("src mismatch must be invalid")
+	}
+	s.relayV1BMu.Unlock()
+
+	s.relayV1BMu.Lock()
+	s.relayV1BConnect = map[string]relayV1BConnReg{sid: {srcID: src, expireAt: time.Now().Unix() + 3600}}
+	s.relayV1BRemoveConnectLocked(sid)
+	if s.relayV1BConnectValidLocked(sid, src) {
+		t.Fatal("removed connect must be invalid")
+	}
+	s.relayV1BMu.Unlock()
+}
+
+// TestRelayV1BMaybePurgeRemovesExpiredConnect：握手中途若 connect 已过期，maybePurge 后校验失败（与 ServeRelayHandshakeAsB 第二段持锁一致）。
+func TestRelayV1BMaybePurgeRemovesExpiredConnect(t *testing.T) {
+	s := &Service{ctx: context.Background()}
+	sid, src := "sid-purge", "srcP"
+	s.relayV1BMu.Lock()
+	s.relayV1BConnect = map[string]relayV1BConnReg{
+		sid: {srcID: src, expireAt: time.Now().Unix() - 5},
+	}
+	s.relayV1BMaybePurgeLocked(time.Now())
+	if s.relayV1BConnectValidLocked(sid, src) {
+		t.Fatal("expired entry should be purged; connect must not validate")
+	}
+	s.relayV1BMu.Unlock()
+}

@@ -110,6 +110,18 @@ func (s *Service) relayV1BEvictOldestLocked() {
 	}
 }
 
+// relayV1BConnectValidLocked 校驗 relayV1BConnect 中該 session 仍存在、src 一致且未過期（須已持 relayV1BMu；可在 maybePurge 後調用）。
+func (s *Service) relayV1BConnectValidLocked(sessionID, srcID string) bool {
+	if s.relayV1BConnect == nil {
+		return false
+	}
+	r, ok := s.relayV1BConnect[sessionID]
+	if !ok || r.srcID != srcID {
+		return false
+	}
+	return time.Now().Unix() <= r.expireAt
+}
+
 func (s *Service) relayV1BEnforcePerSrcCapLocked(srcID string) {
 	for s.relayV1BBySrc != nil && len(s.relayV1BBySrc[srcID]) >= relayV1BMaxSessionsPerSrc {
 		ids := s.relayV1BBySrc[srcID]
@@ -624,6 +636,10 @@ func (s *Service) ServeRelayHandshakeAsB(str network.Stream, req *chatrelay.Rela
 	// 一次性握手：已存在 (session_id, src_id) 密钥则拒绝重放，避免覆盖 tx/rx 与 packetSeq 导致与 A 静默失步。
 	s.relayV1BMu.Lock()
 	s.relayV1BMaybePurgeLocked(time.Now())
+	if !s.relayV1BConnectValidLocked(req.SessionID, req.SrcID) {
+		s.relayV1BMu.Unlock()
+		return
+	}
 	if s.relayV1BKeys != nil {
 		if _, exists := s.relayV1BKeys[hsKey]; exists {
 			s.relayV1BMu.Unlock()
@@ -667,6 +683,10 @@ func (s *Service) ServeRelayHandshakeAsB(str network.Stream, req *chatrelay.Rela
 
 	s.relayV1BMu.Lock()
 	s.relayV1BMaybePurgeLocked(time.Now())
+	if !s.relayV1BConnectValidLocked(req.SessionID, req.SrcID) {
+		s.relayV1BMu.Unlock()
+		return
+	}
 	if s.relayV1BKeys != nil {
 		if _, exists := s.relayV1BKeys[hsKey]; exists {
 			s.relayV1BMu.Unlock()
