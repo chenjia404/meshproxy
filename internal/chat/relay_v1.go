@@ -615,6 +615,18 @@ func (s *Service) ServeRelayHandshakeAsB(str network.Stream, req *chatrelay.Rela
 	if err := chatrelay.VerifyEd25519(pub, chatrelay.SignPrefixHandshake, canon, req.Signature.Value); err != nil {
 		return
 	}
+	hsKey := relayV1BKey(req.SessionID, req.SrcID)
+	// 一次性握手：已存在 (session_id, src_id) 密钥则拒绝重放，避免覆盖 tx/rx 与 packetSeq 导致与 A 静默失步。
+	s.relayV1BMu.Lock()
+	s.relayV1BMaybePurgeLocked(time.Now())
+	if s.relayV1BKeys != nil {
+		if _, exists := s.relayV1BKeys[hsKey]; exists {
+			s.relayV1BMu.Unlock()
+			return
+		}
+	}
+	s.relayV1BMu.Unlock()
+
 	priv, pubEph, err := protocol.GenerateEphemeralKeyPair()
 	if err != nil {
 		return
@@ -631,7 +643,6 @@ func (s *Service) ServeRelayHandshakeAsB(str network.Stream, req *chatrelay.Rela
 	if err != nil {
 		return
 	}
-	s.relayV1BStoreKeys(req.SessionID, req.SrcID, tx, rx)
 
 	resp := chatrelay.RelayHandshakeResponse{
 		Version:     1,
@@ -648,6 +659,18 @@ func (s *Service) ServeRelayHandshakeAsB(str network.Stream, req *chatrelay.Rela
 		return
 	}
 	resp.Signature = sig
+
+	s.relayV1BMu.Lock()
+	s.relayV1BMaybePurgeLocked(time.Now())
+	if s.relayV1BKeys != nil {
+		if _, exists := s.relayV1BKeys[hsKey]; exists {
+			s.relayV1BMu.Unlock()
+			return
+		}
+	}
+	s.relayV1BStoreKeysLocked(hsKey, tx, rx)
+	s.relayV1BMu.Unlock()
+
 	if err := tunnel.WriteJSONFrame(str, &resp); err != nil {
 		return
 	}
@@ -833,14 +856,12 @@ func (s *Service) relayV1BConnectExpire(sessionID string) int64 {
 	return r.expireAt
 }
 
-func (s *Service) relayV1BStoreKeys(sessionID, srcID string, tx, rx []byte) {
-	s.relayV1BMu.Lock()
-	defer s.relayV1BMu.Unlock()
+// relayV1BStoreKeysLocked 寫入握手導出的密鑰表項（須已持 relayV1BMu）。
+func (s *Service) relayV1BStoreKeysLocked(mapKey string, tx, rx []byte) {
 	if s.relayV1BKeys == nil {
 		s.relayV1BKeys = make(map[string]relayV1KeyEntry)
 	}
-	k := relayV1KeyEntry{tx: tx, rx: rx, lastDataSeq: ^uint64(0)}
-	s.relayV1BKeys[relayV1BKey(sessionID, srcID)] = k
+	s.relayV1BKeys[mapKey] = relayV1KeyEntry{tx: tx, rx: rx, lastDataSeq: ^uint64(0)}
 }
 
 func (s *Service) relayV1BGetKeys(sessionID, srcID string) (tx, rx []byte, ok bool) {
