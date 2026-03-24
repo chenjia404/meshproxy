@@ -16,6 +16,7 @@ import (
 )
 
 type Config = config.Config
+type ChatConfig = config.ChatConfig
 type APIConfig = config.APIConfig
 type P2PConfig = config.P2PConfig
 type Socks5Config = config.Socks5Config

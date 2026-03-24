@@ -331,6 +331,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureMessageIndexes(); err != nil {
 		return err
 	}
+	if err := s.ensureOfflineStoreCursorTable(); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -42,6 +42,11 @@ ipfs:
   auto_pin_on_add: true
   max_upload_bytes: 67108864        # 单次上传上限，默认 64MiB
 
+# 私聊：預設離線 store，格式與 p2p.bootstrap_peers 相同（每條為 multiaddr，含 /p2p/<peerID>）；亦可只寫 peer_id 走 DHT
+chat:
+  offline_store_peers: []
+  # - /ip4/1.2.3.4/tcp/4001/p2p/12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
 # 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
 circuit_pool:
   min_per_pool: 1

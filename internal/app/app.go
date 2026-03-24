@@ -274,7 +274,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.streamMgr = streamMgr
 	a.recentErrors = api.NewRecentErrorsStore(100)
 
-	chatSvc, err := chat.NewService(ctx, filepath.Join(cfg.DataDir, "chat.db"), filepath.Join(cfg.DataDir, chat.DefaultAvatarStorageDir), a.Host(), h.Routing, discoveryStore)
+	chatSvc, err := chat.NewService(ctx, filepath.Join(cfg.DataDir, "chat.db"), filepath.Join(cfg.DataDir, chat.DefaultAvatarStorageDir), a.Host(), h.Routing, discoveryStore, cfg.Chat.OfflineStoreNodes)
 	if err != nil {
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}

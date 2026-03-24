@@ -25,6 +25,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/binding"
 	"github.com/chenjia404/meshproxy/internal/discovery"
+	"github.com/chenjia404/meshproxy/internal/offlinestore"
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
@@ -50,6 +51,8 @@ type Service struct {
 	nodePriv  crypto.PrivKey
 
 	eventsHub *chatEventHub
+
+	offlineStoreNodes []offlinestore.OfflineStoreNode
 
 	autoConnectSeen      sync.Map
 	profileSyncSeen      sync.Map
@@ -101,7 +104,7 @@ const (
 	outboxRetryBatchSize    = 64
 )
 
-func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store) (*Service, error) {
+func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, routing corerouting.Routing, ds *discovery.Store, offlineStores []offlinestore.OfflineStoreNode) (*Service, error) {
 	s := &Service{
 		ctx:       ctx,
 		host:      h,
@@ -111,6 +114,7 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 		avatarDir: avatarDir,
 		eventsHub: newChatEventHub(),
 	}
+	s.offlineStoreNodes = append([]offlinestore.OfflineStoreNode(nil), offlineStores...)
 	// Used for jitter when scheduling retries.
 	rand.Seed(time.Now().UTC().UnixNano())
 	if err := os.MkdirAll(avatarDir, 0o755); err != nil {
@@ -141,6 +145,7 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	safe.Go("chat.groupRetryLoop", func() { s.runGroupRetryLoop() })
 	safe.Go("chat.friendRequestRetryLoop", func() { s.runFriendRequestRetryLoop() })
 	safe.Go("chat.relayKeepConnectedLoop", func() { s.runRelayKeepConnectedLoop() })
+	safe.Go("chat.offlineStoreFetch", func() { s.runOfflineStoreFetchLoop() })
 	return s, nil
 }
 
@@ -1057,7 +1062,7 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		return Request{}, err
 	}
 	_ = s.store.UpsertPeer(toPeerID, "", "")
-	if err := s.sendEnvelope(toPeerID, wire); err != nil {
+	if err := s.sendFriendControlEnvelope(toPeerID, wire, MessageTypeSessionRequest, req.RequestID); err != nil {
 		// Can't reach the friend right now: persist + retry with backoff for up to 1 week.
 		log.Printf("[chat] send friend request queued request=%s peer=%s err=%v", req.RequestID, toPeerID, err)
 		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, toPeerID, 0); retryErr != nil {
@@ -1117,20 +1122,20 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		}
 		_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
 		// retentionMinutes already applied in CreateConversation.
+		wire := SessionAccept{
+			Type:             MessageTypeSessionAccept,
+			RequestID:        req.RequestID,
+			ConversationID:   targetConvID,
+			FromPeerID:       s.localPeer,
+			ToPeerID:         req.FromPeerID,
+			Bio:              profile.Bio,
+			AvatarName:       avatarName,
+			RetentionMinutes: retentionMinutes,
+			ChatKexPub:       profile.ChatKexPub,
+			SentAtUnix:       time.Now().UnixMilli(),
+		}
 		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
-			wire := SessionAccept{
-				Type:             MessageTypeSessionAccept,
-				RequestID:        req.RequestID,
-				ConversationID:   targetConvID,
-				FromPeerID:       s.localPeer,
-				ToPeerID:         req.FromPeerID,
-				Bio:              profile.Bio,
-				AvatarName:       avatarName,
-				RetentionMinutes: retentionMinutes,
-				ChatKexPub:       profile.ChatKexPub,
-				SentAtUnix:       time.Now().UnixMilli(),
-			}
-			if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
+			if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionAccept, req.RequestID); err != nil {
 				log.Printf("[chat] send accept for existing conversation failed request=%s err=%v", requestID, err)
 				// Schedule retry for up to friendRequestRetryDeadline.
 				if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
@@ -1141,6 +1146,9 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 				_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
 			}
 		} else {
+			if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire); subErr != nil {
+				log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
+			}
 			// Can't connect now: schedule accept retry.
 			if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
 				log.Printf("[chat] schedule friend accept retry (existing conv, connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
@@ -1176,13 +1184,6 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		return Conversation{}, err
 	}
 	_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
-	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		// Connection not currently available: schedule retry of SessionAccept.
-		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
-			log.Printf("[chat] schedule friend accept retry (connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
-		}
-		return conv, nil
-	}
 	wire := SessionAccept{
 		Type:             MessageTypeSessionAccept,
 		RequestID:        req.RequestID,
@@ -1195,7 +1196,17 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		ChatKexPub:       profile.ChatKexPub,
 		SentAtUnix:       time.Now().UnixMilli(),
 	}
-	if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
+	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire); subErr != nil {
+			log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
+		}
+		// Connection not currently available: schedule retry of SessionAccept.
+		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
+			log.Printf("[chat] schedule friend accept retry (connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
+		}
+		return conv, nil
+	}
+	if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionAccept, req.RequestID); err != nil {
 		log.Printf("[chat] send accept failed request=%s err=%v", requestID, err)
 		// Schedule retry for up to friendRequestRetryDeadline.
 		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
@@ -1219,9 +1230,6 @@ func (s *Service) RejectRequest(requestID string) error {
 	if err := s.store.UpdateRequestState(requestID, RequestStateRejected, ""); err != nil {
 		return err
 	}
-	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		return nil
-	}
 	wire := SessionReject{
 		Type:       MessageTypeSessionReject,
 		RequestID:  requestID,
@@ -1229,7 +1237,13 @@ func (s *Service) RejectRequest(requestID string) error {
 		ToPeerID:   req.FromPeerID,
 		SentAtUnix: time.Now().UnixMilli(),
 	}
-	if err := s.sendEnvelope(req.FromPeerID, wire); err != nil {
+	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionReject, req.FromPeerID, requestID, wire); subErr != nil {
+			log.Printf("[chat] offline friend store (reject, no connect) request=%s err=%v", requestID, subErr)
+		}
+		return nil
+	}
+	if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionReject, requestID); err != nil {
 		log.Printf("[chat] send reject failed request=%s err=%v", requestID, err)
 	}
 	return nil
@@ -1762,14 +1776,15 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 			))
 		}
 		if sendAck {
-			_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
-				Type:           MessageTypeSessionAcceptAck,
-				RequestID:      accept.RequestID,
+			ackWire := SessionAcceptAck{
+				Type:             MessageTypeSessionAcceptAck,
+				RequestID:        accept.RequestID,
 				ConversationID: targetConvID,
-				FromPeerID:     s.localPeer,
-				ToPeerID:       accept.FromPeerID,
-				SentAtUnix:     time.Now().UTC().UnixMilli(),
-			})
+				FromPeerID:       s.localPeer,
+				ToPeerID:         accept.FromPeerID,
+				SentAtUnix:       time.Now().UTC().UnixMilli(),
+			}
+			_ = s.sendFriendControlEnvelope(accept.FromPeerID, ackWire, MessageTypeSessionAcceptAck, accept.RequestID)
 		}
 		return nil
 	} else if err != sql.ErrNoRows {
@@ -1836,14 +1851,15 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		))
 	}
 	if sendAck {
-		_ = s.sendEnvelope(accept.FromPeerID, SessionAcceptAck{
-			Type:           MessageTypeSessionAcceptAck,
-			RequestID:      accept.RequestID,
+		ackWire := SessionAcceptAck{
+			Type:             MessageTypeSessionAcceptAck,
+			RequestID:        accept.RequestID,
 			ConversationID: convID,
-			FromPeerID:     s.localPeer,
-			ToPeerID:       accept.FromPeerID,
-			SentAtUnix:     time.Now().UTC().UnixMilli(),
-		})
+			FromPeerID:       s.localPeer,
+			ToPeerID:         accept.FromPeerID,
+			SentAtUnix:       time.Now().UTC().UnixMilli(),
+		}
+		_ = s.sendFriendControlEnvelope(accept.FromPeerID, ackWire, MessageTypeSessionAcceptAck, accept.RequestID)
 	}
 	return nil
 }
@@ -2054,6 +2070,18 @@ func (s *Service) sendEnvelope(peerID string, v any) error {
 		return nil
 	}
 	return s.sendViaRelay(peerID, v)
+}
+
+// sendEnvelopeDirectOrRelay 先直連再中繼；若走了中繼則 usedRelay 為 true（用於離線 store 補充投遞）。
+func (s *Service) sendEnvelopeDirectOrRelay(peerID string, v any) (usedRelay bool, err error) {
+	protoID := protocolForEnvelope(v)
+	if err := s.sendJSON(peerID, protoID, v); err == nil {
+		return false, nil
+	}
+	if err := s.sendViaRelay(peerID, v); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Service) sendEnvelopeConnectedOnly(peerID string, v any) error {
@@ -2932,6 +2960,18 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 		return
 	}
 	if err := s.sendStoredDirectMessage(msg, storedBlob, cachedCiphertext); err != nil {
+		if s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext) == nil {
+			msg.State = MessageStateSentToTransport
+			if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
+				log.Printf("[chat] persist offline-sent state failed msg=%s: %v", msg.MsgID, updateErr)
+				return
+			}
+			if markErr := s.markOutboxSentToTransport(msg.MsgID, msg.ReceiverPeerID, 0, time.Now().UTC()); markErr != nil {
+				log.Printf("[chat] mark outbox sent after offline failed msg=%s: %v", msg.MsgID, markErr)
+			}
+			s.publishDirectMessageStateUpdate(msg.MsgID)
+			return
+		}
 		msg.State = MessageStateQueuedForRetry
 		if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
 			log.Printf("[chat] persist queued state failed msg=%s: %v", msg.MsgID, updateErr)
@@ -2959,7 +2999,17 @@ func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cached
 	if err != nil {
 		return err
 	}
-	return s.sendEnvelope(msg.ReceiverPeerID, wire)
+	usedRelay, err := s.sendEnvelopeDirectOrRelay(msg.ReceiverPeerID, wire)
+	if err != nil {
+		return err
+	}
+	// 經中繼送達的私聊文本類消息，額外最佳努力寫入離線 store（與直連失敗後專走 store 的路徑互補；失敗不影響已送達狀態）。
+	if usedRelay && (msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote) {
+		if subErr := s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext); subErr != nil {
+			log.Printf("[chat] offline store after relay msg=%s: %v", msg.MsgID, subErr)
+		}
+	}
+	return nil
 }
 
 func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiphertext []byte) (any, error) {
@@ -3010,6 +3060,16 @@ func (s *Service) retryOutboxJob(item outboxRetryItem) error {
 		return err
 	}
 	if err := s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil); err != nil {
+		if s.tryOfflineStoreSubmit(msg, item.CiphertextBlob, nil) == nil {
+			if err := s.store.UpdateMessageState(item.MsgID, MessageStateSentToTransport); err != nil {
+				return err
+			}
+			if err := s.markOutboxSentToTransport(item.MsgID, item.PeerID, item.RetryCount, time.Now().UTC()); err != nil {
+				return err
+			}
+			s.publishDirectMessageStateUpdate(item.MsgID)
+			return nil
+		}
 		_ = s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry)
 		s.publishDirectMessageStateUpdate(item.MsgID)
 		return s.scheduleOutboxRetry(item.MsgID, item.PeerID, item.RetryCount+1)
@@ -3354,7 +3414,7 @@ func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Ti
 			SentAtUnix:       now.UnixMilli(),
 		}
 
-		if err := s.sendEnvelope(item.PeerID, wire); err == nil {
+		if err := s.sendFriendControlEnvelope(item.PeerID, wire, MessageTypeSessionRequest, req.RequestID); err == nil {
 			return s.store.DeleteFriendRequestJob(item.RequestID)
 		} else {
 			if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
@@ -3391,7 +3451,7 @@ func (s *Service) retryFriendRequestJob(item friendRequestRetryItem, now time.Ti
 			ChatKexPub:       profile.ChatKexPub,
 			SentAtUnix:       now.UnixMilli(),
 		}
-		if err := s.sendEnvelope(item.PeerID, wire); err == nil {
+		if err := s.sendFriendControlEnvelope(item.PeerID, wire, MessageTypeSessionAccept, req.RequestID); err == nil {
 			// Ack may still be in-flight; keep retry job alive until we receive SessionAcceptAck.
 			if scheduleErr := s.scheduleFriendRequestRetry(req.RequestID, item.PeerID, item.RetryCount+1); scheduleErr != nil {
 				return fmt.Errorf("schedule retry (accept wait) failed: schedule=%v", scheduleErr)

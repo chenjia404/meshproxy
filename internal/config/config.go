@@ -6,8 +6,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
+	peer "github.com/libp2p/go-libp2p/core/peer"
 	"gopkg.in/yaml.v3"
+
+	"github.com/chenjia404/meshproxy/internal/offlinestore"
 )
 
 // ModeRelay only relay traffic.
@@ -58,6 +62,16 @@ type Config struct {
 
 	// IPFS 嵌入式閘道與最小寫入 API（復用同一 libp2p host，見 ipfs.md）。
 	IPFS IPFSConfig `yaml:"ipfs"`
+
+	// Chat 私聊相關（預設離線 store 節點等）。
+	Chat ChatConfig `yaml:"chat"`
+}
+
+// ChatConfig 私聊；OfflineStorePeers 與 p2p.bootstrap_peers 相同，為 multiaddr 字符串列表（含 /p2p/<peerID>）；亦可僅填 peer_id 走 DHT。
+// OfflineStoreNodes 由 Normalize 從 OfflineStorePeers 解析得到，不參與 YAML 反序列化。
+type ChatConfig struct {
+	OfflineStorePeers []string `yaml:"offline_store_peers"`
+	OfflineStoreNodes []offlinestore.OfflineStoreNode `yaml:"-"`
 }
 
 // IPFSConfig 嵌入式 IPFS 子系統（boxo + 共享 host）。
@@ -343,6 +357,7 @@ func Default() Config {
 			AutoPinOnAdd:        true,
 			MaxUploadBytes:      64 << 20,
 		},
+		Chat: ChatConfig{},
 	}
 }
 
@@ -491,10 +506,39 @@ func (c *Config) postProcess() error {
 	if err := c.IPFS.normalize(); err != nil {
 		return err
 	}
+	if err := c.resolveChatOfflineStorePeers(); err != nil {
+		return err
+	}
 	for _, srv := range c.MeshServer.Servers {
 		if srv.PeerID == "" {
 			return errors.New("meshserver.servers.peer_id must not be empty")
 		}
+	}
+	return nil
+}
+
+// resolveChatOfflineStorePeers 將 chat.offline_store_peers（與 bootstrap_peers 同格式的字符串列表）解析為 OfflineStoreNodes。
+func (c *Config) resolveChatOfflineStorePeers() error {
+	if c == nil {
+		return nil
+	}
+	c.Chat.OfflineStoreNodes = nil
+	seen := make(map[string]struct{})
+	for i, raw := range c.Chat.OfflineStorePeers {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		node, err := offlinestore.ParseOfflineStorePeerEntry(raw)
+		if err != nil {
+			return fmt.Errorf("chat.offline_store_peers[%d]: %w", i, err)
+		}
+		pid := strings.TrimSpace(node.PeerID)
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		c.Chat.OfflineStoreNodes = append(c.Chat.OfflineStoreNodes, node)
 	}
 	return nil
 }
@@ -587,6 +631,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Client.ExitSelection.Mode == ExitSelectionFixedPeer && c.Client.ExitSelection.FixedExitPeerID == "" {
 		return errors.New("client.exit_selection.fixed_exit_peer_id required when mode is fixed_peer")
+	}
+	for i, n := range c.Chat.OfflineStoreNodes {
+		pid := strings.TrimSpace(n.PeerID)
+		if pid == "" {
+			return fmt.Errorf("chat.offline_store_peers[%d]: peer_id is required", i)
+		}
+		if _, err := peer.Decode(pid); err != nil {
+			return fmt.Errorf("chat.offline_store_peers[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
