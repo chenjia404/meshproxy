@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,23 +249,26 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 		}
 		batches++
 		var maxOK uint64
+		var sawNonEmpty bool
 		for _, raw := range resp.Items {
 			if len(raw) == 0 {
 				continue
 			}
+			sawNonEmpty = true
 			seq, perr := s.processOneOfflineFetchItem(raw)
 			if perr != nil {
-				log.Printf("[chat] offline fetch item: %v", perr)
-				break
+				log.Printf("[chat] offline fetch item store_seq=%d: %v", seq, perr)
 			}
+			// 失败仍计入该条 store_seq，以便 ACK 跳过毒丸，避免永久堵死后续合法消息
 			if seq > maxOK {
 				maxOK = seq
 			}
 		}
 		if maxOK == 0 {
-			if len(resp.Items) == 0 {
+			if !sawNonEmpty {
 				break
 			}
+			log.Printf("[chat] offline fetch peer=%s: non-empty batch but no store_seq (cannot advance cursor)", node.PeerID)
 			return
 		}
 		ackReq, err := s.signOfflineAckReq(int64(maxOK))
@@ -338,34 +343,59 @@ func (s *Service) signOfflineAckReq(ackSeq int64) (*offlinestore.AckMessagesRequ
 	}, nil
 }
 
+// offlineStoreSeqJSONRx 在整条 JSON 损坏时尽力提取 store_seq，供跳过毒丸、推进 ACK 游标。
+var offlineStoreSeqJSONRx = regexp.MustCompile(`"store_seq"\s*:\s*([0-9]+)`)
+
+func peekOfflineStoreSeq(raw []byte) uint64 {
+	var w struct {
+		StoreSeq uint64 `json:"store_seq"`
+	}
+	if err := json.Unmarshal(raw, &w); err == nil {
+		return w.StoreSeq
+	}
+	m := offlineStoreSeqJSONRx.FindSubmatch(raw)
+	if len(m) != 2 {
+		return 0
+	}
+	n, err := strconv.ParseUint(string(m[1]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err error) {
 	var wire StoredMessageWire
 	if err := json.Unmarshal(raw, &wire); err != nil {
-		return 0, err
+		return peekOfflineStoreSeq(raw), err
 	}
+	seq := wire.StoreSeq
 	if wire.Message == nil {
-		return 0, errors.New("nil offline message")
+		return seq, errors.New("nil offline message")
 	}
 	env := wire.Message
 	if strings.TrimSpace(env.RecipientID) != s.localPeer {
-		return 0, errors.New("recipient mismatch")
+		return seq, errors.New("recipient mismatch")
 	}
 	if err := verifyOfflineEnvelope(env.SenderID, env, offlineDefaultTTLSec); err != nil {
-		return 0, err
+		return seq, err
 	}
 	if env.Cipher.Algorithm == OfflineFriendAlgoPlain {
-		return s.processOfflineFriendPayload(env, wire.StoreSeq)
+		if _, err := s.processOfflineFriendPayload(env, seq); err != nil {
+			return seq, err
+		}
+		return seq, nil
 	}
 	if _, err := s.store.GetSessionState(env.ConversationID); err != nil {
-		return 0, err
+		return seq, err
 	}
 	counter, msgType, err := decodeRecipientKeyID(env.Cipher.RecipientKeyID)
 	if err != nil {
-		return 0, err
+		return seq, err
 	}
 	ctBytes, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
 	if err != nil {
-		return 0, err
+		return seq, err
 	}
 	ct := ChatText{
 		Type:           msgType,
@@ -378,7 +408,7 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		SentAtUnix:     offlineSentAtUnix(env),
 	}
 	if err := s.handleIncomingChatText(ct, TransportModeDirect, "", true); err != nil {
-		return 0, err
+		return seq, err
 	}
-	return wire.StoreSeq, nil
+	return seq, nil
 }
