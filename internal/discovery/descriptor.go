@@ -40,6 +40,8 @@ type NodeDescriptor struct {
 	ExitInfo    *ExitDescriptor `json:"exit_info,omitempty"` // exit-only metadata for selection
 	Pricing     string   `json:"pricing"` // free-form for now
 	ExpiresAt   int64    `json:"expires_at"`
+	// StartedAtUnix is the local process start time (Unix seconds, UTC). Omitted when 0 for wire compatibility with pre-1.0.1 peers.
+	StartedAtUnix int64  `json:"started_at_unix,omitempty"`
 	Signature   string   `json:"signature"` // base64-encoded
 }
 

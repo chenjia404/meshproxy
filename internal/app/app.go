@@ -71,8 +71,9 @@ type App struct {
 	recentErrors   *api.RecentErrorsStore
 	relayCache     *relaycache.Cache
 	bootstrapCache *relaycache.Cache
-	selfDesc       *discovery.NodeDescriptor
-	updater        *update.Service
+	selfDesc           *discovery.NodeDescriptor
+	selfPeerExchangeDesc *discovery.NodeDescriptor // same as selfDesc plus signed started_at_unix; used for /peer-exchange/1.0.1 only
+	updater            *update.Service
 	autoUpdateMu   sync.RWMutex
 	autoUpdate     bool
 	traffic        *traffic.Recorder
@@ -247,6 +248,14 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("sign self descriptor: %w", err)
 	}
 	a.selfDesc = selfDesc
+	// Second descriptor: identical fields + started_at_unix, for peer-exchange/1.0.1 (gossip and 1.0.0 use selfDesc without this field).
+	pxDesc := *selfDesc
+	pxDesc.StartedAtUnix = a.startTime.Unix()
+	pxDesc.Signature = ""
+	if err := discovery.SignDescriptor(idMgr.PrivateKey(), &pxDesc); err != nil {
+		return nil, fmt.Errorf("sign peer-exchange self descriptor: %w", err)
+	}
+	a.selfPeerExchangeDesc = &pxDesc
 	discoveryStore := discovery.NewStore()
 	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
 	discoveryMgr.Start()
@@ -1879,7 +1888,7 @@ func (a *App) runPeerExchangeSubscriber(ctx context.Context) {
 }
 
 func (a *App) publishPeerExchange() {
-	msg, err := a.buildPeerExchangeMessage(false)
+	msg, err := a.buildPeerExchangeMessage(false, false)
 	if err != nil || msg == nil || len(msg.Entries) == 0 {
 		return
 	}
@@ -1892,7 +1901,9 @@ func (a *App) publishPeerExchange() {
 	}
 }
 
-func (a *App) buildPeerExchangeMessage(allowEmpty bool) (*discovery.PeerExchangeMessage, error) {
+// buildPeerExchangeMessage builds a signed PeerExchangeMessage. If includeSenderStartup is true, Sender uses
+// selfPeerExchangeDesc (started_at_unix + version); otherwise Sender uses selfDesc so gossip and legacy 1.0.0 peers verify.
+func (a *App) buildPeerExchangeMessage(allowEmpty bool, includeSenderStartup bool) (*discovery.PeerExchangeMessage, error) {
 	if a.discovery == nil || a.selfDesc == nil || a.idMgr == nil {
 		return nil, nil
 	}
@@ -1924,7 +1935,12 @@ func (a *App) buildPeerExchangeMessage(allowEmpty bool) (*discovery.PeerExchange
 	if len(entries) == 0 && !allowEmpty {
 		return nil, nil
 	}
-	senderCopy := *a.selfDesc
+	var senderCopy discovery.NodeDescriptor
+	if includeSenderStartup && a.selfPeerExchangeDesc != nil {
+		senderCopy = *a.selfPeerExchangeDesc
+	} else {
+		senderCopy = *a.selfDesc
+	}
 	now := time.Now()
 	msg := &discovery.PeerExchangeMessage{
 		Version:   "v1",
@@ -1944,6 +1960,7 @@ func (a *App) installDirectPeerExchange() {
 		return
 	}
 	a.Host().SetStreamHandler(p2p.ProtocolPeerX, a.handlePeerExchangeStream)
+	a.Host().SetStreamHandler(p2p.ProtocolPeerXLegacy, a.handlePeerExchangeStream)
 	a.Host().Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(_ network.Network, conn network.Conn) {
 			a.recordConnectedRelay(conn.RemotePeer(), conn.RemoteMultiaddr())
@@ -2010,13 +2027,18 @@ func (a *App) exchangePeerSnapshot(pid peer.ID) {
 	ctx, cancel := context.WithTimeout(a.ctx, peerExchangeDialTimeout)
 	defer cancel()
 	stream, err := a.Host().NewStream(ctx, pid, p2p.ProtocolPeerX)
+	includeSenderStartup := true
+	if err != nil {
+		stream, err = a.Host().NewStream(ctx, pid, p2p.ProtocolPeerXLegacy)
+		includeSenderStartup = false
+	}
 	if err != nil {
 		return
 	}
 	defer stream.Close()
 	_ = stream.SetDeadline(time.Now().Add(peerExchangeStreamTimeout))
 
-	req, err := a.buildPeerExchangeMessage(true)
+	req, err := a.buildPeerExchangeMessage(true, includeSenderStartup)
 	if err != nil || req == nil {
 		return
 	}
@@ -2046,6 +2068,7 @@ func (a *App) exchangePeerSnapshot(pid peer.ID) {
 func (a *App) handlePeerExchangeStream(stream network.Stream) {
 	defer stream.Close()
 	_ = stream.SetDeadline(time.Now().Add(peerExchangeStreamTimeout))
+	includeSenderStartup := stream.Protocol() == p2p.ProtocolPeerX
 
 	var req discovery.PeerExchangeMessage
 	if err := json.NewDecoder(stream).Decode(&req); err != nil {
@@ -2060,7 +2083,7 @@ func (a *App) handlePeerExchangeStream(stream network.Stream) {
 		}
 	}
 
-	resp, err := a.buildPeerExchangeMessage(true)
+	resp, err := a.buildPeerExchangeMessage(true, includeSenderStartup)
 	if err != nil || resp == nil {
 		return
 	}
