@@ -380,6 +380,9 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 	if err := verifyOfflineEnvelope(env.SenderID, env, offlineDefaultTTLSec); err != nil {
 		return seq, err
 	}
+	if err := validateOfflineEnvelopeTiming(env, &wire, offlineDefaultTTLSec, time.Now().UTC()); err != nil {
+		return seq, err
+	}
 	if env.Cipher.Algorithm == OfflineFriendAlgoECIES {
 		if _, err := s.processOfflineFriendPayload(env, seq); err != nil {
 			return seq, err

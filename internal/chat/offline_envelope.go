@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -20,6 +21,12 @@ const (
 
 	// OfflineFriendAlgoECIES 好友控制离线载荷：ECIES（临时 X25519 + 对端 libp2p Ed25519 身份映射到 Curve25519）+ ChaCha20-Poly1305；store 仅见密文与临时公钥。
 	OfflineFriendAlgoECIES = "mesh-friend-ecies-v1"
+
+	// offlineFriendMaxAgeSec 好友控制离线消息：按 CreatedAt 起算最长接受时长（与产品策略一致，不依赖 store）。
+	offlineFriendMaxAgeSec = int64(30 * 24 * 3600)
+
+	// offlineEnvelopeFutureSkewSec 允许 created_at 略晚于本地时钟（秒），防止轻微时钟不同步误拒。
+	offlineEnvelopeFutureSkewSec = int64(300)
 )
 
 // OfflineCipherPayload 對應 store OfflineMessageEnvelope.cipher
@@ -166,6 +173,51 @@ func verifyOfflineEnvelope(senderPeer string, msg *OfflineMessageEnvelope, defau
 	ok, err := pubKey.Verify(payload, sig)
 	if err != nil || !ok {
 		return errors.New("signature verification failed")
+	}
+	return nil
+}
+
+// offlineEnvelopeCreatedUnix 将 envelope.created_at 规范为 Unix 秒（兼容毫秒时间戳）。
+func offlineEnvelopeCreatedUnix(env *OfflineMessageEnvelope) int64 {
+	if env == nil {
+		return 0
+	}
+	if env.CreatedAt > 1_000_000_000_000 {
+		return env.CreatedAt / 1000
+	}
+	return env.CreatedAt
+}
+
+// validateOfflineEnvelopeTiming 客户端侧时效：不信任 store 重放历史条目；需在验签通过后调用。
+// - wire.ExpireAt：若 store 提供且已过期则拒收。
+// - created_at + ttl_sec：不得超过签名人声明的 TTL（canonical 已含 ttl）。
+// - 好友控制：额外将有效窗口上限封顶为 offlineFriendMaxAgeSec（30 天）。
+func validateOfflineEnvelopeTiming(env *OfflineMessageEnvelope, wire *StoredMessageWire, defaultTTL int64, now time.Time) error {
+	if env == nil {
+		return errors.New("nil envelope")
+	}
+	nowUnix := now.Unix()
+	if wire != nil && wire.ExpireAt > 0 && nowUnix > wire.ExpireAt {
+		return errors.New("offline message: past store expire_at")
+	}
+	created := offlineEnvelopeCreatedUnix(env)
+	if created <= 0 {
+		return errors.New("offline envelope: invalid created_at")
+	}
+	if nowUnix+offlineEnvelopeFutureSkewSec < created {
+		return errors.New("offline envelope: created_at in the future")
+	}
+	ttl := env.effectiveTTL(defaultTTL)
+	if ttl <= 0 {
+		ttl = defaultTTL
+	}
+	if env.Cipher.Algorithm == OfflineFriendAlgoECIES {
+		if ttl > offlineFriendMaxAgeSec {
+			ttl = offlineFriendMaxAgeSec
+		}
+	}
+	if nowUnix > created+ttl {
+		return errors.New("offline message: past signed ttl window")
 	}
 	return nil
 }
