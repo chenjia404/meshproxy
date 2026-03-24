@@ -21,7 +21,9 @@ import (
 	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	multiaddr "github.com/multiformats/go-multiaddr"
 
+	"github.com/chenjia404/meshproxy/internal/binding"
 	"github.com/chenjia404/meshproxy/internal/discovery"
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
@@ -43,6 +45,7 @@ type Service struct {
 	localPeer string
 	avatarDir string
 	ipfs      ipfsAvatarPinner
+	nodePriv  crypto.PrivKey
 
 	eventsHub *chatEventHub
 
@@ -343,19 +346,20 @@ func (s *Service) maybeSyncProfile(peerID string) {
 	if err != nil {
 		return
 	}
-	key := peerID + "\x00" + profile.Nickname + "\x00" + profile.Bio + "\x00" + profile.Avatar
+	key := peerID + "\x00" + profile.Nickname + "\x00" + profile.Bio + "\x00" + profile.Avatar + "\x00" + profile.BindingEthAddress
 	if !s.beginProfileSync(peerID, key) {
 		return
 	}
 	safe.Go("chat.profileSync", func() {
 		wire := ProfileSync{
-			Type:       MessageTypeProfileSync,
-			FromPeerID: s.localPeer,
-			ToPeerID:   peerID,
-			Nickname:   profile.Nickname,
-			Bio:        profile.Bio,
-			AvatarName: profile.Avatar,
-			SentAtUnix: time.Now().UnixMilli(),
+			Type:              MessageTypeProfileSync,
+			FromPeerID:        s.localPeer,
+			ToPeerID:          peerID,
+			Nickname:          profile.Nickname,
+			Bio:               profile.Bio,
+			AvatarName:        profile.Avatar,
+			BindingEthAddress: strings.TrimSpace(profile.BindingEthAddress),
+			SentAtUnix:        time.Now().UnixMilli(),
 		}
 		if err := s.sendEnvelopeConnectedOnly(peerID, wire); err != nil {
 			s.finishProfileSync(peerID, key, false, err)
@@ -367,6 +371,7 @@ func (s *Service) maybeSyncProfile(peerID string) {
 		s.finishProfileSync(peerID, key, true, nil)
 
 		s.syncPeerAvatar(peerID)
+		s.maybeSyncBinding(peerID)
 	})
 }
 
@@ -528,6 +533,9 @@ func (s *Service) handleProfileSync(sync ProfileSync) error {
 		}
 		_ = s.store.UpdateRequestsAvatar(sync.FromPeerID, avatarName)
 		s.requestAvatarFetch(sync.FromPeerID, avatarName)
+	}
+	if err := s.store.UpdatePeerBindingEthAddress(sync.FromPeerID, sync.BindingEthAddress); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1423,6 +1431,7 @@ func (s *Service) OnPeerConnected(peerID string) {
 			}
 		}
 		s.maybeSyncProfile(peerID)
+		s.maybeSyncBinding(peerID)
 		conv, err := s.store.GetConversationByPeer(peerID)
 		if err == nil {
 			if err := s.SyncConversation(conv.ConversationID); err != nil {
@@ -1482,6 +1491,7 @@ func (s *Service) handleGroupSyncStream(str network.Stream) {
 
 func (s *Service) serveRequestStream(str network.Stream) {
 	defer str.Close()
+	remotePeer := str.Conn().RemotePeer().String()
 	var env map[string]any
 	if err := tunnel.ReadJSONFrame(str, &env); err != nil {
 		return
@@ -1524,12 +1534,20 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if err := remarshal(env, &sync); err != nil {
 			return
 		}
+		if !streamPeerIdentityOK(remotePeer, sync.FromPeerID) {
+			log.Printf("[chat] profile sync ignored (request stream): stream peer mismatch stream=%s claimed=%s", remotePeer, sync.FromPeerID)
+			return
+		}
 		if err := s.handleProfileSync(sync); err != nil {
 			log.Printf("[chat] handle profile sync failed peer=%s err=%v", sync.FromPeerID, err)
 		}
 	case MessageTypeAvatarRequest:
 		var req AvatarRequest
 		if err := remarshal(env, &req); err != nil {
+			return
+		}
+		if !streamPeerIdentityOK(remotePeer, req.FromPeerID) {
+			log.Printf("[chat] avatar request ignored (request stream): stream peer mismatch stream=%s claimed=%s", remotePeer, req.FromPeerID)
 			return
 		}
 		safe.Go("chat.avatarRequest", func() {
@@ -1542,8 +1560,24 @@ func (s *Service) serveRequestStream(str network.Stream) {
 		if err := remarshal(env, &resp); err != nil {
 			return
 		}
+		if !streamPeerIdentityOK(remotePeer, resp.FromPeerID) {
+			log.Printf("[chat] avatar response ignored (request stream): stream peer mismatch stream=%s claimed=%s", remotePeer, resp.FromPeerID)
+			return
+		}
 		if err := s.handleAvatarResponse(resp); err != nil {
 			log.Printf("[chat] handle avatar response failed peer=%s avatar=%s err=%v", resp.FromPeerID, resp.AvatarName, err)
+		}
+	case MessageTypeBindingSync:
+		var bmsg binding.BindingSync
+		if err := remarshal(env, &bmsg); err != nil {
+			return
+		}
+		if !streamPeerIdentityOK(remotePeer, bmsg.FromPeerID) {
+			log.Printf("[chat] binding sync ignored (request stream): stream peer mismatch stream=%s claimed=%s", remotePeer, bmsg.FromPeerID)
+			return
+		}
+		if err := s.handleBindingSync(bmsg); err != nil {
+			log.Printf("[chat] handle binding sync failed peer=%s err=%v", bmsg.FromPeerID, err)
 		}
 	}
 }
@@ -2156,7 +2190,7 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 
 func protocolForEnvelope(v any) coreprotocol.ID {
 	switch v.(type) {
-	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, SessionAcceptAck, *SessionAcceptAck, ProfileSync, *ProfileSync, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse:
+	case SessionRequest, *SessionRequest, SessionAccept, *SessionAccept, SessionReject, *SessionReject, SessionAcceptAck, *SessionAcceptAck, ProfileSync, *ProfileSync, AvatarRequest, *AvatarRequest, AvatarResponse, *AvatarResponse, binding.BindingSync, *binding.BindingSync:
 		return p2p.ProtocolChatRequest
 	case ChatText, *ChatText:
 		return p2p.ProtocolChatMsg
@@ -2325,6 +2359,12 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 			return err
 		}
 		return s.handleAvatarResponse(resp)
+	case MessageTypeBindingSync:
+		var bmsg binding.BindingSync
+		if err := remarshal(env, &bmsg); err != nil {
+			return err
+		}
+		return s.handleBindingSync(bmsg)
 	case MessageTypeChatText, MessageTypeGroupInviteNote:
 		var msg ChatText
 		if err := remarshal(env, &msg); err != nil {

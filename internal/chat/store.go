@@ -137,6 +137,14 @@ func NewStore(path, localPeerID string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.ensureProfileBindingColumns(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.ensurePeerBindingColumns(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureRequestBioColumn(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -582,8 +590,14 @@ func (s *Store) ensureProfile(localPeerID string) error {
 func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	var p Profile
 	var privB64, createdAt string
-	err := s.db.QueryRow(`SELECT peer_id,nickname,bio,avatar,IFNULL(avatar_cid,''),chat_kex_priv,chat_kex_pub,created_at FROM profile WHERE peer_id = ?`, localPeerID).
-		Scan(&p.PeerID, &p.Nickname, &p.Bio, &p.Avatar, &p.AvatarCID, &privB64, &p.ChatKexPub, &createdAt)
+	var bindingSeq uint64
+	var bindingJSON, bindingUpdatedAt string
+	err := s.db.QueryRow(`
+		SELECT peer_id,nickname,bio,avatar,IFNULL(avatar_cid,''),chat_kex_priv,chat_kex_pub,created_at,
+			IFNULL(binding_seq,0), IFNULL(binding_record_json,''), IFNULL(binding_updated_at,''), IFNULL(binding_eth_address,'')
+		FROM profile WHERE peer_id = ?`, localPeerID).
+		Scan(&p.PeerID, &p.Nickname, &p.Bio, &p.Avatar, &p.AvatarCID, &privB64, &p.ChatKexPub, &createdAt,
+			&bindingSeq, &bindingJSON, &bindingUpdatedAt, &p.BindingEthAddress)
 	if err != nil {
 		return Profile{}, nil, err
 	}
@@ -594,6 +608,7 @@ func (s *Store) GetProfile(localPeerID string) (Profile, []byte, error) {
 	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
 		p.CreatedAt = t
 	}
+	scanProfileBinding(&p, bindingJSON, bindingUpdatedAt, bindingSeq)
 	return p, priv, nil
 }
 
@@ -782,6 +797,17 @@ func (s *Store) UpsertPeer(peerID, nickname, bio string) error {
 	return err
 }
 
+// UpdatePeerBindingEthAddress 僅更新 peers.binding_eth_address（例如 profile_sync 冗餘展示）。
+func (s *Store) UpdatePeerBindingEthAddress(peerID, eth string) error {
+	if peerID == "" {
+		return nil
+	}
+	eth = strings.TrimSpace(eth)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`UPDATE peers SET binding_eth_address=?, updated_at=? WHERE peer_id=?`, eth, now, peerID)
+	return err
+}
+
 func (s *Store) UpdatePeerAvatar(peerID, avatar string) error {
 	return s.updatePeerAvatar(peerID, avatar, nil)
 }
@@ -957,7 +983,12 @@ func (s *Store) ListContacts() ([]Contact, error) {
 				  AND r.from_peer_id = p.peer_id AND r.to_peer_id = ?
 				ORDER BY r.updated_at DESC, r.created_at DESC
 				LIMIT 1
-			), '')
+			), ''),
+			IFNULL(p.binding_record_json,''),
+			IFNULL(p.binding_eth_address,''),
+			IFNULL(p.binding_status,''),
+			IFNULL(p.binding_validated_at,''),
+			IFNULL(p.binding_error,'')
 		FROM peers p
 		INNER JOIN conversations c ON c.peer_id = p.peer_id
 			AND c.state = ?
@@ -991,12 +1022,15 @@ func (s *Store) ListContacts() ([]Contact, error) {
 		var c Contact
 		var blocked int
 		var lastSeenAt, updatedAt string
-		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname); err != nil {
+		var bindJSON, bindEth, bindStatus, bindValAt, bindErr string
+		if err := rows.Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname,
+			&bindJSON, &bindEth, &bindStatus, &bindValAt, &bindErr); err != nil {
 			return nil, err
 		}
 		c.Blocked = blocked != 0
 		c.LastSeenAt = parseDBTime(lastSeenAt)
 		c.UpdatedAt = parseDBTime(updatedAt)
+		scanContactBinding(&c, bindJSON, bindEth, bindStatus, bindValAt, bindErr)
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -1006,6 +1040,7 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 	var c Contact
 	var blocked int
 	var lastSeenAt, updatedAt string
+	var bindJSON, bindEth, bindStatus, bindValAt, bindErr string
 	err := s.db.QueryRow(`
 		SELECT
 			p.peer_id,
@@ -1024,7 +1059,12 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 				  AND r.from_peer_id = p.peer_id AND r.to_peer_id = ?
 				ORDER BY r.updated_at DESC, r.created_at DESC
 				LIMIT 1
-			), '')
+			), ''),
+			IFNULL(p.binding_record_json,''),
+			IFNULL(p.binding_eth_address,''),
+			IFNULL(p.binding_status,''),
+			IFNULL(p.binding_validated_at,''),
+			IFNULL(p.binding_error,'')
 		FROM peers p
 		LEFT JOIN conversations c ON c.conversation_id = (
 			SELECT c2.conversation_id FROM conversations c2
@@ -1034,13 +1074,15 @@ func (s *Store) GetPeer(peerID string) (Contact, error) {
 		)
 		WHERE p.peer_id=?
 	`, s.localPeerID, peerID).
-		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname)
+		Scan(&c.PeerID, &c.Nickname, &c.Bio, &c.Avatar, &c.CID, &blocked, &lastSeenAt, &updatedAt, &c.RetentionMinutes, &c.RemoteNickname,
+			&bindJSON, &bindEth, &bindStatus, &bindValAt, &bindErr)
 	if err != nil {
 		return Contact{}, err
 	}
 	c.Blocked = blocked != 0
 	c.LastSeenAt = parseDBTime(lastSeenAt)
 	c.UpdatedAt = parseDBTime(updatedAt)
+	scanContactBinding(&c, bindJSON, bindEth, bindStatus, bindValAt, bindErr)
 	return c, nil
 }
 

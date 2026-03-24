@@ -433,21 +433,23 @@ func marshalSessionRejectForRelaySigning(m SessionReject) ([]byte, error) {
 
 func marshalProfileSyncForRelaySigning(m ProfileSync) ([]byte, error) {
 	return json.Marshal(struct {
-		Type       string `json:"type"`
-		FromPeerID string `json:"from_peer_id"`
-		ToPeerID   string `json:"to_peer_id"`
-		Nickname   string `json:"nickname"`
-		Bio        string `json:"bio"`
-		AvatarName string `json:"avatar_name"`
-		SentAtUnix int64  `json:"sent_at_unix"`
+		Type              string `json:"type"`
+		FromPeerID        string `json:"from_peer_id"`
+		ToPeerID          string `json:"to_peer_id"`
+		Nickname          string `json:"nickname"`
+		Bio               string `json:"bio"`
+		AvatarName        string `json:"avatar_name"`
+		BindingEthAddress string `json:"binding_eth_address"`
+		SentAtUnix        int64  `json:"sent_at_unix"`
 	}{
-		Type:       m.Type,
-		FromPeerID: m.FromPeerID,
-		ToPeerID:   m.ToPeerID,
-		Nickname:   m.Nickname,
-		Bio:        m.Bio,
-		AvatarName: m.AvatarName,
-		SentAtUnix: m.SentAtUnix,
+		Type:              m.Type,
+		FromPeerID:        m.FromPeerID,
+		ToPeerID:          m.ToPeerID,
+		Nickname:          m.Nickname,
+		Bio:               m.Bio,
+		AvatarName:        m.AvatarName,
+		BindingEthAddress: strings.TrimSpace(m.BindingEthAddress),
+		SentAtUnix:        m.SentAtUnix,
 	})
 }
 

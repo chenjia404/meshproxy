@@ -1,9 +1,13 @@
 package sdk
 
-import "github.com/chenjia404/meshproxy/internal/chat"
+import (
+	"github.com/chenjia404/meshproxy/internal/binding"
+	"github.com/chenjia404/meshproxy/internal/chat"
+)
 
 type Profile = chat.Profile
 type Contact = chat.Contact
+type ContactBindingDetails = chat.ContactBindingDetails
 type Request = chat.Request
 type Conversation = chat.Conversation
 type Message = chat.Message
@@ -11,6 +15,10 @@ type Group = chat.Group
 type GroupDetails = chat.GroupDetails
 type GroupMember = chat.GroupMember
 type GroupMessage = chat.GroupMessage
+
+type BindingDraft = binding.BindingDraft
+type BindingPayload = binding.BindingPayload
+type BindingRecord = binding.BindingRecord
 
 type ChatService struct {
 	inner *chat.Service
@@ -38,6 +46,10 @@ func (c *ChatService) UpdateContactNickname(peerID, nickname string) (Contact, e
 
 func (c *ChatService) SetContactBlocked(peerID string, blocked bool) (Contact, error) {
 	return c.inner.SetContactBlocked(peerID, blocked)
+}
+
+func (c *ChatService) GetContactBindingDetails(peerID string) (ContactBindingDetails, error) {
+	return c.inner.GetContactBindingDetails(peerID)
 }
 
 func (c *ChatService) ListRequests() ([]Request, error) {
@@ -182,4 +194,20 @@ func (c *ChatService) GetGroupMessageFile(groupID, msgID string) (GroupMessage, 
 
 func (c *ChatService) SyncGroup(groupID, fromPeerID string) error {
 	return c.inner.SyncGroup(groupID, fromPeerID)
+}
+
+func (c *ChatService) CreateBindingDraft(ethAddress string, chainID uint64, ttlSeconds int64) (BindingDraft, error) {
+	return c.inner.CreateBindingDraft(ethAddress, chainID, ttlSeconds)
+}
+
+func (c *ChatService) FinalizeBindingRecord(payload BindingPayload, peerSignature, ethSignature string) (Profile, error) {
+	return c.inner.FinalizeBindingRecord(payload, peerSignature, ethSignature)
+}
+
+func (c *ChatService) ClearLocalBinding() (Profile, error) {
+	return c.inner.ClearLocalBinding()
+}
+
+func (c *ChatService) GetLocalPeerProfile() (Profile, error) {
+	return c.inner.GetLocalPeerProfile()
 }

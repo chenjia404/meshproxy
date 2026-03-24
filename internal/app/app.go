@@ -270,6 +270,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	if a.ipfsEmb != nil {
 		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
 	}

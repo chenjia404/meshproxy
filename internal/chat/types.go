@@ -1,6 +1,10 @@
 package chat
 
-import "time"
+import (
+	"time"
+
+	"github.com/chenjia404/meshproxy/internal/binding"
+)
 
 const (
 	MessageTypeSessionRequest        = "session_request"
@@ -22,6 +26,7 @@ const (
 	MessageTypeMessageRevoke         = "message_revoke"
 	MessageTypeRetentionUpdate       = "retention_update"
 	MessageTypeRetentionAck          = "retention_ack"
+	MessageTypeBindingSync           = binding.MessageTypeBindingSync
 )
 
 const (
@@ -64,6 +69,12 @@ type Profile struct {
 	AvatarCID  string    `json:"avatar_cid,omitempty"`
 	ChatKexPub string    `json:"chat_kex_pub"`
 	CreatedAt  time.Time `json:"created_at"`
+
+	// bindingRecord 由 store 從 binding_record_json 載入，供 P2P 同步等內部邏輯使用，不參與 JSON。
+	bindingRecord *binding.BindingRecord `json:"-"`
+	// BindingEthAddress 冗餘欄位，供 API（如 GET /chat/me）展示；完整記錄見庫內 binding_record_json。
+	BindingEthAddress string `json:"binding_eth_address,omitempty"`
+	BindingUpdatedAt  int64  `json:"-"` // Unix 毫秒；不對外 JSON
 }
 
 type Contact struct {
@@ -77,6 +88,32 @@ type Contact struct {
 	Blocked          bool      `json:"blocked"`
 	LastSeenAt       time.Time `json:"last_seen_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+
+	// 以下欄位由 store 載入，僅內部／除錯使用，API（GET /chat/contacts）只對外回傳 binding_eth_address。
+	bindingRecord      *binding.BindingRecord `json:"-"`
+	BindingStatus      string                 `json:"-"`
+	BindingValidatedAt int64                  `json:"-"`
+	BindingError       string                 `json:"-"`
+	BindingEthAddress  string                 `json:"binding_eth_address,omitempty"`
+}
+
+// ContactBindingDetails 為 GET /chat/contacts/{peer_id}/binding 回應（完整 BindingRecord 與本機校驗狀態）。
+type ContactBindingDetails struct {
+	PeerID             string                 `json:"peer_id"`
+	Binding            *binding.BindingRecord `json:"binding,omitempty"`
+	BindingStatus      string                 `json:"binding_status,omitempty"`
+	BindingValidatedAt int64                  `json:"binding_validated_at,omitempty"`
+	BindingError       string                 `json:"binding_error,omitempty"`
+}
+
+func contactBindingDetailsFrom(c Contact) ContactBindingDetails {
+	return ContactBindingDetails{
+		PeerID:             c.PeerID,
+		Binding:            c.bindingRecord,
+		BindingStatus:      c.BindingStatus,
+		BindingValidatedAt: c.BindingValidatedAt,
+		BindingError:       c.BindingError,
+	}
 }
 
 type Request struct {
@@ -184,14 +221,15 @@ type SessionReject struct {
 }
 
 type ProfileSync struct {
-	Type       string `json:"type"`
-	FromPeerID string `json:"from_peer_id"`
-	ToPeerID   string `json:"to_peer_id"`
-	Nickname   string `json:"nickname"`
-	Bio        string `json:"bio"`
-	AvatarName string `json:"avatar_name"`
-	SentAtUnix int64  `json:"sent_at_unix"`
-	Signature  []byte `json:"signature,omitempty"`
+	Type              string `json:"type"`
+	FromPeerID        string `json:"from_peer_id"`
+	ToPeerID          string `json:"to_peer_id"`
+	Nickname          string `json:"nickname"`
+	Bio               string `json:"bio"`
+	AvatarName        string `json:"avatar_name"`
+	BindingEthAddress string `json:"binding_eth_address,omitempty"`
+	SentAtUnix        int64  `json:"sent_at_unix"`
+	Signature         []byte `json:"signature,omitempty"`
 }
 
 type AvatarRequest struct {

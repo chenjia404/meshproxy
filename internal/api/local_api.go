@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/chenjia404/meshproxy/internal/binding"
 	"github.com/chenjia404/meshproxy/internal/chat"
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
@@ -296,6 +299,11 @@ type ChatProvider interface {
 	SendGroupFile(groupID, fileName, mimeType string, data []byte) (chat.GroupMessage, error)
 	GetGroupMessageFile(groupID, msgID string) (chat.GroupMessage, []byte, error)
 	SyncGroup(groupID, fromPeerID string) error
+	CreateBindingDraft(ethAddress string, chainID uint64, ttlSeconds int64) (binding.BindingDraft, error)
+	FinalizeBindingRecord(payload binding.BindingPayload, peerSignature, ethSignature string) (chat.Profile, error)
+	ClearLocalBinding() (chat.Profile, error)
+	GetLocalPeerProfile() (chat.Profile, error)
+	GetContactBindingDetails(peerID string) (chat.ContactBindingDetails, error)
 	Close() error
 }
 
@@ -361,6 +369,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/me", api.handleChatMe)
 	mux.HandleFunc("/api/v1/chat/profile", api.handleChatProfile)
 	mux.HandleFunc("/api/v1/chat/profile/avatar", api.handleChatProfileAvatar)
+	mux.HandleFunc("/api/v1/chat/profile/binding/draft", api.handleChatProfileBindingDraft)
+	mux.HandleFunc("/api/v1/chat/profile/binding", api.handleChatProfileBinding)
 	mux.HandleFunc("/api/v1/chat/avatars/", api.handleChatAvatar)
 	mux.HandleFunc("/api/v1/chat/contacts", api.handleChatContacts)
 	mux.HandleFunc("/api/v1/chat/contacts/", api.handleChatContactItem)
@@ -1118,6 +1128,65 @@ func (a *LocalAPI) handleChatProfileAvatar(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, profile)
 }
 
+func (a *LocalAPI) handleChatProfileBindingDraft(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		EthAddress string `json:"eth_address"`
+		ChainID    uint64 `json:"chain_id"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	draft, err := a.opts.ChatService.CreateBindingDraft(body.EthAddress, body.ChainID, body.TTLSeconds)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, draft)
+}
+
+func (a *LocalAPI) handleChatProfileBinding(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.ChatService == nil {
+		http.Error(w, "chat service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var body struct {
+			Payload       binding.BindingPayload `json:"payload"`
+			PeerSignature string                 `json:"peer_signature"`
+			EthSignature  string                 `json:"eth_signature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		profile, err := a.opts.ChatService.FinalizeBindingRecord(body.Payload, body.PeerSignature, body.EthSignature)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, profile)
+	case http.MethodDelete:
+		if _, err := a.opts.ChatService.ClearLocalBinding(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (a *LocalAPI) handleChatAvatar(w http.ResponseWriter, r *http.Request) {
 	if a.opts == nil || a.opts.ChatService == nil {
 		http.Error(w, "chat service not available", http.StatusNotFound)
@@ -1220,6 +1289,23 @@ func (a *LocalAPI) handleChatContactItem(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	peerID, action := parts[0], parts[1]
+	if action == "binding" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		details, err := a.opts.ChatService.GetContactBindingDetails(peerID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, details)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
