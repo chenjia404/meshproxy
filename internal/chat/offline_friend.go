@@ -1,6 +1,7 @@
 package chat
 
 import (
+	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -8,9 +9,11 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
-// buildOfflineFriendEnvelope 構建與 store-node 兼容的 OfflineMessageEnvelope；cipher 內為明文 JSON（mesh-friend-plain-json）。
+// buildOfflineFriendEnvelope 构建 OfflineMessageEnvelope；内层 JSON 经 ECIES（mesh-friend-ecies-v1）加密，store 不可读业务内容。
 func (s *Service) buildOfflineFriendEnvelope(kind, recipientPeer, msgID string, payloadJSON []byte) (*OfflineMessageEnvelope, error) {
 	if s == nil {
 		return nil, errors.New("nil service")
@@ -22,7 +25,10 @@ func (s *Service) buildOfflineFriendEnvelope(kind, recipientPeer, msgID string, 
 	convID := deriveStableConversationID(s.localPeer, recipientPeer)
 	ttl := offlineDefaultTTLSec
 	now := time.Now().UTC()
-	nonce := make([]byte, 12)
+	nonce := make([]byte, protocol.AEADNonceSize)
+	if _, err := crand.Read(nonce); err != nil {
+		return nil, err
+	}
 	env := &OfflineMessageEnvelope{
 		Version:        1,
 		MsgID:          msgID,
@@ -32,13 +38,19 @@ func (s *Service) buildOfflineFriendEnvelope(kind, recipientPeer, msgID string, 
 		CreatedAt:      now.Unix(),
 		TTLSec:         &ttl,
 		Cipher: OfflineCipherPayload{
-			Algorithm:      OfflineFriendAlgoPlain,
+			Algorithm:      OfflineFriendAlgoECIES,
 			RecipientKeyID: encodeRecipientKeyID(0, kind),
 			Nonce:          base64.StdEncoding.EncodeToString(nonce),
-			Ciphertext:     base64.StdEncoding.EncodeToString(payloadJSON),
+			Ciphertext:     "",
 		},
 		Signature: OfflineSignature{},
 	}
+	aad := offlineFriendECIESAAD(env, offlineDefaultTTLSec)
+	ct, err := encryptOfflineFriendECIES(recipientPeer, payloadJSON, aad, nonce)
+	if err != nil {
+		return nil, err
+	}
+	env.Cipher.Ciphertext = base64.StdEncoding.EncodeToString(ct)
 	return env, nil
 }
 
@@ -64,7 +76,7 @@ func (s *Service) tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID string,
 	return s.submitSignedOfflineEnvelope(env, quiet)
 }
 
-// sendFriendControlEnvelope 直連失敗則中繼；中繼成功或直連失敗時最佳努力寫入離線 store（明文 JSON + 外層簽名）。
+// sendFriendControlEnvelope 直连失败则中继；中继成功或直连失败时最佳努力写入离线 store（内层 ECIES + 外层签名）。
 func (s *Service) sendFriendControlEnvelope(peerID string, v any, kind string, msgID string) error {
 	usedRelay, err := s.sendEnvelopeDirectOrRelay(peerID, v)
 	if err != nil {
@@ -81,7 +93,7 @@ func (s *Service) sendFriendControlEnvelope(peerID string, v any, kind string, m
 	return nil
 }
 
-// offlineFriendInnerSenderMustMatchEnv 離線好友載荷為明文 JSON，須與外層 OfflineMessageEnvelope.SenderID（已驗簽）一致，防止用自己的 key 簽封包卻在內層冒充他人。
+// offlineFriendInnerSenderMustMatchEnv 解密后的内层 JSON 中 from_peer_id 须与外層已验签的 SenderID 一致。
 func offlineFriendInnerSenderMustMatchEnv(env *OfflineMessageEnvelope, innerFromPeerID string) error {
 	if env == nil {
 		return errors.New("offline friend: nil envelope")
@@ -93,7 +105,7 @@ func offlineFriendInnerSenderMustMatchEnv(env *OfflineMessageEnvelope, innerFrom
 }
 
 func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, storeSeq uint64) (uint64, error) {
-	payload, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
+	payload, err := s.decryptOfflineFriendPayloadBytes(env)
 	if err != nil {
 		return 0, err
 	}

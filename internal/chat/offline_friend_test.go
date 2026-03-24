@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func TestOfflineFriendInnerSenderMustMatchEnv(t *testing.T) {
@@ -49,10 +53,28 @@ func TestOfflineFriendInnerSenderMustMatchEnv(t *testing.T) {
 	}
 }
 
-// testOfflineFriendService 僅用於離線好友路徑測試：真實 SQLite + 精簡 Service（無 libp2p host）。
-func testOfflineFriendService(t *testing.T) (*Service, func()) {
+func mustTestEd25519Key(t *testing.T) libp2pcrypto.PrivKey {
 	t.Helper()
-	localPeer := "12D3KooLOCALOFFLINETEST"
+	priv, _, err := libp2pcrypto.GenerateEd25519Key(crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return priv
+}
+
+func mustPeerIDStr(t *testing.T, priv libp2pcrypto.PrivKey) string {
+	t.Helper()
+	id, err := peer.IDFromPublicKey(priv.GetPublic())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id.String()
+}
+
+// testOfflineFriendServiceWithKey 真实 SQLite + 本节点 libp2p 私钥（用于 ECIES 解密）。
+func testOfflineFriendServiceWithKey(t *testing.T, localPriv libp2pcrypto.PrivKey) (*Service, func()) {
+	t.Helper()
+	localPeer := mustPeerIDStr(t, localPriv)
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "chat.db")
 	st, err := NewStore(path, localPeer)
@@ -64,51 +86,85 @@ func testOfflineFriendService(t *testing.T) (*Service, func()) {
 		localPeer: localPeer,
 		store:     st,
 		eventsHub: newChatEventHub(),
+		nodePriv:  localPriv,
 	}
 	cleanup := func() { _ = st.Close() }
 	return s, cleanup
 }
 
-func mustEncodeOfflineFriendPayload(t *testing.T, v any) string {
+func buildTestECIESOfflineFriendEnvelope(t *testing.T, senderPriv libp2pcrypto.PrivKey, senderID, recipientID, kind, msgID string, plain []byte) *OfflineMessageEnvelope {
 	t.Helper()
-	b, err := json.Marshal(v)
+	convID := deriveStableConversationID(senderID, recipientID)
+	ttl := offlineDefaultTTLSec
+	nonce := make([]byte, 12)
+	if _, err := crand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	env := &OfflineMessageEnvelope{
+		Version:        1,
+		MsgID:          msgID,
+		SenderID:       senderID,
+		RecipientID:    recipientID,
+		ConversationID: convID,
+		CreatedAt:      1700000000,
+		TTLSec:         &ttl,
+		Cipher: OfflineCipherPayload{
+			Algorithm:      OfflineFriendAlgoECIES,
+			RecipientKeyID: encodeRecipientKeyID(0, kind),
+			Nonce:          base64.StdEncoding.EncodeToString(nonce),
+		},
+	}
+	aad := offlineFriendECIESAAD(env, offlineDefaultTTLSec)
+	ct, err := encryptOfflineFriendECIES(recipientID, plain, aad, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
-}
-
-func offlineFriendTestEnvelope(kind, senderID, b64Cipher string) *OfflineMessageEnvelope {
-	return &OfflineMessageEnvelope{
-		SenderID: senderID,
-		Cipher: OfflineCipherPayload{
-			RecipientKeyID: encodeRecipientKeyID(0, kind),
-			Ciphertext:     b64Cipher,
-		},
+	env.Cipher.Ciphertext = base64.StdEncoding.EncodeToString(ct)
+	if err := signOfflineEnvelope(senderPriv, env, offlineDefaultTTLSec); err != nil {
+		t.Fatal(err)
 	}
+	return env
 }
 
 func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	t.Parallel()
-	s, cleanup := testOfflineFriendService(t)
+	recvPriv := mustTestEd25519Key(t)
+	recvID := mustPeerIDStr(t, recvPriv)
+	s, cleanup := testOfflineFriendServiceWithKey(t, recvPriv)
 	defer cleanup()
 
 	t.Run("invalid base64 ciphertext", func(t *testing.T) {
-		env := offlineFriendTestEnvelope(MessageTypeSessionRequest, "12D3KooA", "@@@not-valid-base64@@@")
+		env := &OfflineMessageEnvelope{
+			SenderID: mustPeerIDStr(t, mustTestEd25519Key(t)),
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineFriendAlgoECIES,
+				RecipientKeyID: encodeRecipientKeyID(0, MessageTypeSessionRequest),
+				Nonce:          base64.StdEncoding.EncodeToString(make([]byte, 12)),
+				Ciphertext:     "@@@",
+			},
+		}
 		_, err := s.processOfflineFriendPayload(env, 7)
 		if err == nil {
 			t.Fatal("expected error")
 		}
 	})
 
-	t.Run("empty recipient_key_id", func(t *testing.T) {
-		env := &OfflineMessageEnvelope{
-			SenderID: "12D3KooA",
-			Cipher: OfflineCipherPayload{
-				RecipientKeyID: "",
-				Ciphertext:     mustEncodeOfflineFriendPayload(t, map[string]string{"type": MessageTypeSessionRequest}),
-			},
+	t.Run("unsupported algorithm", func(t *testing.T) {
+		snd := mustTestEd25519Key(t)
+		req, _ := json.Marshal(SessionRequest{Type: MessageTypeSessionRequest, RequestID: "x", FromPeerID: mustPeerIDStr(t, snd), ToPeerID: recvID})
+		env := buildTestECIESOfflineFriendEnvelope(t, snd, mustPeerIDStr(t, snd), recvID, MessageTypeSessionRequest, "m1", req)
+		env.Cipher.Algorithm = "mesh-friend-plain-json"
+		_, err := s.processOfflineFriendPayload(env, 1)
+		if err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Fatalf("got %v", err)
 		}
+	})
+
+	t.Run("empty recipient_key_id", func(t *testing.T) {
+		snd := mustTestEd25519Key(t)
+		req, _ := json.Marshal(SessionRequest{Type: MessageTypeSessionRequest})
+		env := buildTestECIESOfflineFriendEnvelope(t, snd, mustPeerIDStr(t, snd), recvID, MessageTypeSessionRequest, "m2", req)
+		env.Cipher.RecipientKeyID = ""
 		_, err := s.processOfflineFriendPayload(env, 1)
 		if err == nil {
 			t.Fatal("expected error")
@@ -116,14 +172,39 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	})
 
 	t.Run("unknown offline friend kind in recipient_key_id", func(t *testing.T) {
+		sndPriv := mustTestEd25519Key(t)
+		sndID := mustPeerIDStr(t, sndPriv)
+		plain := []byte(`{}`)
+		convID := deriveStableConversationID(sndID, recvID)
+		ttl := offlineDefaultTTLSec
+		nonce := make([]byte, 12)
+		if _, err := crand.Read(nonce); err != nil {
+			t.Fatal(err)
+		}
 		env := &OfflineMessageEnvelope{
-			SenderID: "12D3KooA",
+			Version:        1,
+			MsgID:          "m3",
+			SenderID:       sndID,
+			RecipientID:    recvID,
+			ConversationID: convID,
+			CreatedAt:      1700000000,
+			TTLSec:         &ttl,
 			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineFriendAlgoECIES,
 				RecipientKeyID: encodeRecipientKeyID(0, "chat_message"),
-				Ciphertext:     mustEncodeOfflineFriendPayload(t, map[string]string{"foo": "bar"}),
+				Nonce:          base64.StdEncoding.EncodeToString(nonce),
 			},
 		}
-		_, err := s.processOfflineFriendPayload(env, 2)
+		aad := offlineFriendECIESAAD(env, offlineDefaultTTLSec)
+		ct, err := encryptOfflineFriendECIES(recvID, plain, aad, nonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.Cipher.Ciphertext = base64.StdEncoding.EncodeToString(ct)
+		if err := signOfflineEnvelope(sndPriv, env, offlineDefaultTTLSec); err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.processOfflineFriendPayload(env, 2)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -133,7 +214,8 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	})
 
 	t.Run("malformed json for session_request", func(t *testing.T) {
-		env := offlineFriendTestEnvelope(MessageTypeSessionRequest, "12D3KooA", base64.StdEncoding.EncodeToString([]byte(`{"type":`)))
+		snd := mustTestEd25519Key(t)
+		env := buildTestECIESOfflineFriendEnvelope(t, snd, mustPeerIDStr(t, snd), recvID, MessageTypeSessionRequest, "m4", []byte(`{"type":`))
 		_, err := s.processOfflineFriendPayload(env, 3)
 		if err == nil {
 			t.Fatal("expected error")
@@ -150,7 +232,8 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	} {
 		tc := tc
 		t.Run("malformed json for "+tc.name, func(t *testing.T) {
-			env := offlineFriendTestEnvelope(tc.kind, "12D3KooA", base64.StdEncoding.EncodeToString([]byte(`{"type":`)))
+			snd := mustTestEd25519Key(t)
+			env := buildTestECIESOfflineFriendEnvelope(t, snd, mustPeerIDStr(t, snd), recvID, tc.kind, "m5-"+tc.name, []byte(`{"type":`))
 			_, err := s.processOfflineFriendPayload(env, 0)
 			if err == nil {
 				t.Fatal("expected error")
@@ -159,13 +242,10 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	}
 
 	t.Run("invalid base64 in recipient_key_id", func(t *testing.T) {
-		env := &OfflineMessageEnvelope{
-			SenderID: "12D3KooA",
-			Cipher: OfflineCipherPayload{
-				RecipientKeyID: "not-valid-base64!!!",
-				Ciphertext:     mustEncodeOfflineFriendPayload(t, map[string]string{"type": MessageTypeSessionRequest}),
-			},
-		}
+		snd := mustTestEd25519Key(t)
+		plain := []byte(`{}`)
+		env := buildTestECIESOfflineFriendEnvelope(t, snd, mustPeerIDStr(t, snd), recvID, MessageTypeSessionRequest, "m6", plain)
+		env.Cipher.RecipientKeyID = "not-valid-base64!!!"
 		_, err := s.processOfflineFriendPayload(env, 0)
 		if err == nil {
 			t.Fatal("expected error")
@@ -173,20 +253,27 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 	})
 
 	t.Run("counter in recipient_key_id does not change routing", func(t *testing.T) {
-		remote := "12D3KooREMOTESESSION"
+		sndPriv := mustTestEd25519Key(t)
+		sndID := mustPeerIDStr(t, sndPriv)
 		req := SessionRequest{
 			Type:       MessageTypeSessionRequest,
 			RequestID:  "req-counter-key",
-			FromPeerID: remote,
-			ToPeerID:   s.localPeer,
+			FromPeerID: sndID,
+			ToPeerID:   recvID,
 			SentAtUnix: 1700000000000,
 		}
-		env := &OfflineMessageEnvelope{
-			SenderID: remote,
-			Cipher: OfflineCipherPayload{
-				RecipientKeyID: encodeRecipientKeyID(999, MessageTypeSessionRequest),
-				Ciphertext:     mustEncodeOfflineFriendPayload(t, req),
-			},
+		b, _ := json.Marshal(req)
+		env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionRequest, "m7", b)
+		env.Cipher.RecipientKeyID = encodeRecipientKeyID(999, MessageTypeSessionRequest)
+		nonce, _ := base64.StdEncoding.DecodeString(env.Cipher.Nonce)
+		aad := offlineFriendECIESAAD(env, offlineDefaultTTLSec)
+		ct, err := encryptOfflineFriendECIES(recvID, b, aad, nonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.Cipher.Ciphertext = base64.StdEncoding.EncodeToString(ct)
+		if err := signOfflineEnvelope(sndPriv, env, offlineDefaultTTLSec); err != nil {
+			t.Fatal(err)
 		}
 		seq, err := s.processOfflineFriendPayload(env, 99)
 		if err != nil {
@@ -199,37 +286,40 @@ func TestProcessOfflineFriendPayload_InvalidEnvelope(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.FromPeerID != remote {
+		if got.FromPeerID != sndID {
 			t.Fatalf("FromPeerID: got %q", got.FromPeerID)
 		}
 	})
 }
 
-// TestProcessOfflineFriendPayload_InnerSenderMismatch 確保四種控制訊息在內層 from_peer_id 與外層 SenderID 不一致時一律失敗，且不依賴 store 狀態。
 func TestProcessOfflineFriendPayload_InnerSenderMismatch(t *testing.T) {
 	t.Parallel()
-	s := &Service{localPeer: "12D3KooLOCAL"}
-	attacker := "12D3KooAttacker"
-	victim := "12D3KooVictim"
-	baseEnv := func(kind string, payload any) *OfflineMessageEnvelope {
-		return &OfflineMessageEnvelope{
-			SenderID: attacker,
-			Cipher: OfflineCipherPayload{
-				RecipientKeyID: encodeRecipientKeyID(0, kind),
-				Ciphertext:     mustEncodeOfflineFriendPayload(t, payload),
-			},
+	recvPriv := mustTestEd25519Key(t)
+	recvID := mustPeerIDStr(t, recvPriv)
+	sndPriv := mustTestEd25519Key(t)
+	sndID := mustPeerIDStr(t, sndPriv)
+	victimID := mustPeerIDStr(t, mustTestEd25519Key(t))
+	s, cleanup := testOfflineFriendServiceWithKey(t, recvPriv)
+	defer cleanup()
+
+	basePlain := func(kind string, payload any) []byte {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
 		}
+		return b
 	}
 
 	t.Run("session_request claims victim", func(t *testing.T) {
 		t.Parallel()
-		env := baseEnv(MessageTypeSessionRequest, SessionRequest{
+		p := basePlain(MessageTypeSessionRequest, SessionRequest{
 			Type:       MessageTypeSessionRequest,
 			RequestID:  "r1",
-			FromPeerID: victim,
-			ToPeerID:   s.localPeer,
+			FromPeerID: victimID,
+			ToPeerID:   recvID,
 			SentAtUnix: 1,
 		})
+		env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionRequest, "r1", p)
 		_, err := s.processOfflineFriendPayload(env, 1)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("want mismatch error, got %v", err)
@@ -238,14 +328,15 @@ func TestProcessOfflineFriendPayload_InnerSenderMismatch(t *testing.T) {
 
 	t.Run("session_accept claims victim", func(t *testing.T) {
 		t.Parallel()
-		env := baseEnv(MessageTypeSessionAccept, SessionAccept{
-			Type:           MessageTypeSessionAccept,
-			RequestID:      "r1",
-			ConversationID: "c1",
-			FromPeerID:     victim,
-			ToPeerID:       s.localPeer,
-			SentAtUnix:     1,
+		p := basePlain(MessageTypeSessionAccept, SessionAccept{
+			Type:             MessageTypeSessionAccept,
+			RequestID:        "r1",
+			ConversationID:   "c1",
+			FromPeerID:       victimID,
+			ToPeerID:         recvID,
+			SentAtUnix:       1,
 		})
+		env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionAccept, "r1a", p)
 		_, err := s.processOfflineFriendPayload(env, 1)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("want mismatch error, got %v", err)
@@ -254,13 +345,14 @@ func TestProcessOfflineFriendPayload_InnerSenderMismatch(t *testing.T) {
 
 	t.Run("session_reject claims victim", func(t *testing.T) {
 		t.Parallel()
-		env := baseEnv(MessageTypeSessionReject, SessionReject{
+		p := basePlain(MessageTypeSessionReject, SessionReject{
 			Type:       MessageTypeSessionReject,
 			RequestID:  "r1",
-			FromPeerID: victim,
-			ToPeerID:   s.localPeer,
+			FromPeerID: victimID,
+			ToPeerID:   recvID,
 			SentAtUnix: 1,
 		})
+		env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionReject, "r1b", p)
 		_, err := s.processOfflineFriendPayload(env, 1)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("want mismatch error, got %v", err)
@@ -269,14 +361,15 @@ func TestProcessOfflineFriendPayload_InnerSenderMismatch(t *testing.T) {
 
 	t.Run("session_accept_ack claims victim", func(t *testing.T) {
 		t.Parallel()
-		env := baseEnv(MessageTypeSessionAcceptAck, SessionAcceptAck{
+		p := basePlain(MessageTypeSessionAcceptAck, SessionAcceptAck{
 			Type:           MessageTypeSessionAcceptAck,
 			RequestID:      "r1",
 			ConversationID: "c1",
-			FromPeerID:     victim,
-			ToPeerID:       s.localPeer,
+			FromPeerID:     victimID,
+			ToPeerID:       recvID,
 			SentAtUnix:     1,
 		})
+		env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionAcceptAck, "r1c", p)
 		_, err := s.processOfflineFriendPayload(env, 1)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("want mismatch error, got %v", err)
@@ -286,26 +379,24 @@ func TestProcessOfflineFriendPayload_InnerSenderMismatch(t *testing.T) {
 
 func TestProcessOfflineFriendPayload_SessionRequest_Success(t *testing.T) {
 	t.Parallel()
-	s, cleanup := testOfflineFriendService(t)
+	recvPriv := mustTestEd25519Key(t)
+	recvID := mustPeerIDStr(t, recvPriv)
+	sndPriv := mustTestEd25519Key(t)
+	sndID := mustPeerIDStr(t, sndPriv)
+	s, cleanup := testOfflineFriendServiceWithKey(t, recvPriv)
 	defer cleanup()
 
-	remote := "12D3KooREMOTESENDER"
 	reqID := "offline-friend-req-success-1"
 	req := SessionRequest{
 		Type:       MessageTypeSessionRequest,
 		RequestID:  reqID,
-		FromPeerID: remote,
-		ToPeerID:   s.localPeer,
+		FromPeerID: sndID,
+		ToPeerID:   recvID,
 		Nickname:   "Bob",
 		SentAtUnix: 1700000000123,
 	}
-	env := &OfflineMessageEnvelope{
-		SenderID: remote,
-		Cipher: OfflineCipherPayload{
-			RecipientKeyID: encodeRecipientKeyID(0, MessageTypeSessionRequest),
-			Ciphertext:     mustEncodeOfflineFriendPayload(t, req),
-		},
-	}
+	b, _ := json.Marshal(req)
+	env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionRequest, "msg-ok", b)
 	storeSeq := uint64(42)
 	outSeq, err := s.processOfflineFriendPayload(env, storeSeq)
 	if err != nil {
@@ -321,35 +412,34 @@ func TestProcessOfflineFriendPayload_SessionRequest_Success(t *testing.T) {
 	if stored.State != RequestStatePending {
 		t.Fatalf("state: want %s got %s", RequestStatePending, stored.State)
 	}
-	if stored.FromPeerID != remote {
-		t.Fatalf("FromPeerID: want %q got %q", remote, stored.FromPeerID)
+	if stored.FromPeerID != sndID {
+		t.Fatalf("FromPeerID: want %q got %q", sndID, stored.FromPeerID)
 	}
-	if stored.ToPeerID != s.localPeer {
-		t.Fatalf("ToPeerID: want %q got %q", s.localPeer, stored.ToPeerID)
+	if stored.ToPeerID != recvID {
+		t.Fatalf("ToPeerID: want %q got %q", recvID, stored.ToPeerID)
 	}
 }
 
 func TestProcessOfflineFriendPayload_SessionRequest_WrongToPeerID_NoOp(t *testing.T) {
 	t.Parallel()
-	s, cleanup := testOfflineFriendService(t)
+	recvPriv := mustTestEd25519Key(t)
+	recvID := mustPeerIDStr(t, recvPriv)
+	sndPriv := mustTestEd25519Key(t)
+	sndID := mustPeerIDStr(t, sndPriv)
+	otherID := mustPeerIDStr(t, mustTestEd25519Key(t))
+	s, cleanup := testOfflineFriendServiceWithKey(t, recvPriv)
 	defer cleanup()
 
-	remote := "12D3KooREMOTEOTHER"
 	reqID := "offline-friend-req-wrong-to"
 	req := SessionRequest{
 		Type:       MessageTypeSessionRequest,
 		RequestID:  reqID,
-		FromPeerID: remote,
-		ToPeerID:   "12D3KooSomeoneElse",
+		FromPeerID: sndID,
+		ToPeerID:   otherID,
 		SentAtUnix: 1,
 	}
-	env := &OfflineMessageEnvelope{
-		SenderID: remote,
-		Cipher: OfflineCipherPayload{
-			RecipientKeyID: encodeRecipientKeyID(0, MessageTypeSessionRequest),
-			Ciphertext:     mustEncodeOfflineFriendPayload(t, req),
-		},
-	}
+	b, _ := json.Marshal(req)
+	env := buildTestECIESOfflineFriendEnvelope(t, sndPriv, sndID, recvID, MessageTypeSessionRequest, "msg-wto", b)
 	if _, err := s.processOfflineFriendPayload(env, 5); err != nil {
 		t.Fatal(err)
 	}
@@ -359,31 +449,39 @@ func TestProcessOfflineFriendPayload_SessionRequest_WrongToPeerID_NoOp(t *testin
 	}
 }
 
-// TestBuildOfflineFriendEnvelope_InnerSenderMatchesOuter 正常建包時 SenderID 與 JSON from_peer_id 同源，須通過 offlineFriendInnerSenderMustMatchEnv。
 func TestBuildOfflineFriendEnvelope_InnerSenderMatchesOuter(t *testing.T) {
 	t.Parallel()
-	local := "12D3KooBUILDLOCAL"
-	remote := "12D3KooBUILDREMOTE"
-	s := &Service{localPeer: local}
+	sndPriv := mustTestEd25519Key(t)
+	sndID := mustPeerIDStr(t, sndPriv)
+	recPriv := mustTestEd25519Key(t)
+	recID := mustPeerIDStr(t, recPriv)
+	s := &Service{
+		localPeer: sndID,
+		nodePriv:  sndPriv,
+	}
 	req := SessionRequest{
 		Type:       MessageTypeSessionRequest,
 		RequestID:  "build-req-1",
-		FromPeerID: local,
-		ToPeerID:   remote,
+		FromPeerID: sndID,
+		ToPeerID:   recID,
 		SentAtUnix: 1,
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := s.buildOfflineFriendEnvelope(MessageTypeSessionRequest, remote, "msg-1", b)
+	env, err := s.buildOfflineFriendEnvelope(MessageTypeSessionRequest, recID, "msg-1", b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.SenderID != local {
-		t.Fatalf("SenderID: want %q got %q", local, env.SenderID)
+	if env.SenderID != sndID {
+		t.Fatalf("SenderID: want %q got %q", sndID, env.SenderID)
 	}
-	payload, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
+	if env.Cipher.Algorithm != OfflineFriendAlgoECIES {
+		t.Fatalf("algorithm: want %s", OfflineFriendAlgoECIES)
+	}
+	recvSvc := &Service{localPeer: recID, nodePriv: recPriv}
+	payload, err := recvSvc.decryptOfflineFriendPayloadBytes(env)
 	if err != nil {
 		t.Fatal(err)
 	}

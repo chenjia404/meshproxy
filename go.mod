@@ -3,6 +3,7 @@ module github.com/chenjia404/meshproxy
 go 1.25.7
 
 require (
+	filippo.io/edwards25519 v1.1.0
 	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3

@@ -18,8 +18,8 @@ const (
 	offlineDefaultTTLSec = int64(2592000) // 30d，與 store-node 預設 default_ttl_sec 一致
 	offlineDeviceID      = "mesh-proxy"
 
-	// OfflineFriendAlgoPlain 好友控制消息（SessionRequest/Accept/Reject/Ack）離線載荷：cipher 為明文 JSON（base64），依賴外層 OfflineMessageEnvelope 的 Ed25519 簽名。
-	OfflineFriendAlgoPlain = "mesh-friend-plain-json"
+	// OfflineFriendAlgoECIES 好友控制离线载荷：ECIES（临时 X25519 + 对端 libp2p Ed25519 身份映射到 Curve25519）+ ChaCha20-Poly1305；store 仅见密文与临时公钥。
+	OfflineFriendAlgoECIES = "mesh-friend-ecies-v1"
 )
 
 // OfflineCipherPayload 對應 store OfflineMessageEnvelope.cipher
@@ -38,15 +38,15 @@ type OfflineSignature struct {
 
 // OfflineMessageEnvelope 對應 store-node protocol.OfflineMessageEnvelope（JSON 欄位名一致）
 type OfflineMessageEnvelope struct {
-	Version        int                 `json:"version"`
-	MsgID          string              `json:"msg_id"`
-	SenderID       string              `json:"sender_id"`
-	RecipientID    string              `json:"recipient_id"`
-	ConversationID string              `json:"conversation_id"`
-	CreatedAt      int64               `json:"created_at"`
-	TTLSec         *int64              `json:"ttl_sec,omitempty"`
+	Version        int                  `json:"version"`
+	MsgID          string               `json:"msg_id"`
+	SenderID       string               `json:"sender_id"`
+	RecipientID    string               `json:"recipient_id"`
+	ConversationID string               `json:"conversation_id"`
+	CreatedAt      int64                `json:"created_at"`
+	TTLSec         *int64               `json:"ttl_sec,omitempty"`
 	Cipher         OfflineCipherPayload `json:"cipher"`
-	Signature      OfflineSignature    `json:"signature"`
+	Signature      OfflineSignature     `json:"signature"`
 }
 
 func (m *OfflineMessageEnvelope) effectiveTTL(defaultTTL int64) int64 {

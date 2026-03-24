@@ -33,6 +33,8 @@ const (
 const (
 	HKDFLabelChatSession0 = "mesh-proxy/chat/e2ee/v1/hkdf-0"
 	HKDFLabelChatSession1 = "mesh-proxy/chat/e2ee/v1/hkdf-1"
+	// HKDFLabelOfflineFriendAEAD 离线好友控制 ECIES 载荷 AEAD 密钥（与私聊会话密钥域分离）。
+	HKDFLabelOfflineFriendAEAD = "mesh-proxy/chat/offline_friend_e2ee/v1/aead-key"
 )
 
 // GenerateEphemeralKeyPair 生成一對 X25519 臨時密鑰。返回 (priv, pub, error)。
@@ -90,6 +92,16 @@ func DeriveChatSessionKeys(sharedSecret []byte) (key0, key1 []byte, err error) {
 		return nil, nil, err
 	}
 	return key0, key1, nil
+}
+
+// DeriveOfflineFriendAEADKey 从 X25519 共享密钥派生离线好友控制消息的 ChaCha20-Poly1305 密钥。
+func DeriveOfflineFriendAEADKey(sharedSecret []byte) ([]byte, error) {
+	key := make([]byte, AEADKeySize)
+	rd := hkdf.New(sha3.New256, sharedSecret, nil, []byte(HKDFLabelOfflineFriendAEAD))
+	if _, err := io.ReadFull(rd, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 // BuildAEADNonce 根據 direction 和 counter 構建 12 字節 nonce，保證不重複。
