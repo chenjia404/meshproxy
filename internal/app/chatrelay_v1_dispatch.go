@@ -59,7 +59,7 @@ func (a *App) dispatchRelayV1Handshake(str network.Stream) {
 		return
 	}
 	if a.relayModeEnabled() && a.chatRelayV1Table != nil {
-		relay.ForwardRelayHandshake(a.ctx, a.Host(), a.traffic, str, &req)
+		relay.ForwardRelayHandshake(a.ctx, a.Host(), a.chatRelayV1Table, a.traffic, str, &req)
 		return
 	}
 	_ = str.Close()

@@ -265,8 +265,8 @@ func ForwardRelayConnect(ctx context.Context, h host.Host, tbl *ChatRelayV1Table
 	}
 }
 
-// ForwardRelayHandshake 轉發握手請求/響應（單輪請求-響應）。
-func ForwardRelayHandshake(ctx context.Context, h host.Host, tr *traffic.Recorder, str network.Stream, req *chatrelay.RelayHandshakeRequest) {
+// ForwardRelayHandshake 轉發握手請求/響應（單輪請求-響應）。須先有本中繼上已成功 connect 並登記的 session，否則不撥下游（減少無 connect 的握手 DoS）。
+func ForwardRelayHandshake(ctx context.Context, h host.Host, tbl *ChatRelayV1Table, tr *traffic.Recorder, str network.Stream, req *chatrelay.RelayHandshakeRequest) {
 	defer str.Close()
 	_ = str.SetDeadline(time.Now().Add(45 * time.Second))
 	if req == nil {
@@ -274,6 +274,10 @@ func ForwardRelayHandshake(ctx context.Context, h host.Host, tr *traffic.Recorde
 	}
 	inbound := str.Conn().RemotePeer()
 	if !relayV1InboundSrcMatchesRemotePeer(inbound, req.SrcID) || !relayV1SigBlockPresent(req.Signature) {
+		return
+	}
+	now := time.Now().Unix()
+	if tbl == nil || !tbl.ValidSession(req.SessionID, req.SrcID, req.DstID, now) {
 		return
 	}
 	dstPID, err := peer.Decode(strings.TrimSpace(req.DstID))
