@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	offlineFetchInterval     = 90 * time.Second
-	offlineFetchLimit        = 100
-	offlineSubmitConcurrency = 4
+	offlineFetchInterval = 90 * time.Second
+	offlineFetchLimit    = 100
+	// offlineFetchMaxBatchesPerPoll 单次轮询在同一 store 上最多连续拉取批次数；收到 HasMore 时继续下一页，避免积压需多轮 90s 才能清空。
+	offlineFetchMaxBatchesPerPoll = 500
+	offlineSubmitConcurrency      = 4
 )
 
 func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinestore.OfflineStoreNode {
@@ -231,49 +233,78 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 		return
 	}
 	client := offlinestore.NewLibp2pStoreClient(s.host)
-	resp, err := client.FetchMessages(s.ctx, storePID, s.localPeer, lastAck, offlineFetchLimit)
-	if err != nil || resp == nil || !resp.OK {
+	var batches int
+	var finalSeq uint64
+	var stoppedDueToCap bool
+	lastAckI64 := lastAck
+	for batch := 0; batch < offlineFetchMaxBatchesPerPoll; batch++ {
+		resp, err := client.FetchMessages(s.ctx, storePID, s.localPeer, lastAckI64, offlineFetchLimit)
+		if err != nil || resp == nil || !resp.OK {
+			if err != nil {
+				log.Printf("[chat] offline fetch peer=%s: %v", node.PeerID, err)
+			}
+			return
+		}
+		batches++
+		var maxOK uint64
+		for _, raw := range resp.Items {
+			if len(raw) == 0 {
+				continue
+			}
+			seq, perr := s.processOneOfflineFetchItem(raw)
+			if perr != nil {
+				log.Printf("[chat] offline fetch item: %v", perr)
+				break
+			}
+			if seq > maxOK {
+				maxOK = seq
+			}
+		}
+		if maxOK == 0 {
+			if len(resp.Items) == 0 {
+				break
+			}
+			return
+		}
+		ackReq, err := s.signOfflineAckReq(int64(maxOK))
 		if err != nil {
-			log.Printf("[chat] offline fetch peer=%s: %v", node.PeerID, err)
+			log.Printf("[chat] offline ack sign: %v", err)
+			return
 		}
-		return
-	}
-	var maxOK uint64
-	for _, raw := range resp.Items {
-		if len(raw) == 0 {
-			continue
+		ackCtx, ackCancel := context.WithTimeout(s.ctx, offlinestore.DefaultRPCTimeout)
+		ackResp, err := client.AckMessages(ackCtx, storePID, ackReq)
+		ackCancel()
+		if err != nil || ackResp == nil || !ackResp.OK {
+			if err != nil {
+				log.Printf("[chat] offline ack peer=%s: %v", node.PeerID, err)
+			}
+			return
 		}
-		seq, perr := s.processOneOfflineFetchItem(raw)
-		if perr != nil {
-			log.Printf("[chat] offline fetch item: %v", perr)
+		if err := s.store.SetOfflineStoreLastAckSeq(node.PeerID, int64(maxOK)); err != nil {
+			log.Printf("[chat] offline cursor save: %v", err)
+			return
+		}
+		finalSeq = maxOK
+		lastAckI64 = int64(maxOK)
+		if !resp.HasMore {
 			break
 		}
-		if seq > maxOK {
-			maxOK = seq
+		if batch == offlineFetchMaxBatchesPerPoll-1 {
+			stoppedDueToCap = true
+			break
 		}
 	}
-	if maxOK == 0 {
+	if finalSeq == 0 {
 		return
 	}
-	ackReq, err := s.signOfflineAckReq(int64(maxOK))
-	if err != nil {
-		log.Printf("[chat] offline ack sign: %v", err)
-		return
+	if batches > 1 {
+		log.Printf("[chat] offline store: fetched peer=%s batches=%d max_seq=%d", node.PeerID, batches, finalSeq)
+	} else {
+		log.Printf("[chat] offline store: fetched peer=%s items_ok max_seq=%d", node.PeerID, finalSeq)
 	}
-	ackCtx, ackCancel := context.WithTimeout(s.ctx, offlinestore.DefaultRPCTimeout)
-	defer ackCancel()
-	ackResp, err := client.AckMessages(ackCtx, storePID, ackReq)
-	if err != nil || ackResp == nil || !ackResp.OK {
-		if err != nil {
-			log.Printf("[chat] offline ack peer=%s: %v", node.PeerID, err)
-		}
-		return
+	if stoppedDueToCap {
+		log.Printf("[chat] offline store: peer=%s backlog truncated at %d batches (next interval continues)", node.PeerID, offlineFetchMaxBatchesPerPoll)
 	}
-	if err := s.store.SetOfflineStoreLastAckSeq(node.PeerID, int64(maxOK)); err != nil {
-		log.Printf("[chat] offline cursor save: %v", err)
-		return
-	}
-	log.Printf("[chat] offline store: fetched peer=%s items_ok max_seq=%d", node.PeerID, maxOK)
 }
 
 func (s *Service) signOfflineAckReq(ackSeq int64) (*offlinestore.AckMessagesRequest, error) {
@@ -337,14 +368,14 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		return 0, err
 	}
 	ct := ChatText{
-		Type:             msgType,
+		Type:           msgType,
 		ConversationID: env.ConversationID,
-		MsgID:            env.MsgID,
-		FromPeerID:       env.SenderID,
-		ToPeerID:         env.RecipientID,
-		Ciphertext:       ctBytes,
-		Counter:          counter,
-		SentAtUnix:       offlineSentAtUnix(env),
+		MsgID:          env.MsgID,
+		FromPeerID:     env.SenderID,
+		ToPeerID:       env.RecipientID,
+		Ciphertext:     ctBytes,
+		Counter:        counter,
+		SentAtUnix:     offlineSentAtUnix(env),
 	}
 	if err := s.handleIncomingChatText(ct, TransportModeDirect, "", true); err != nil {
 		return 0, err
