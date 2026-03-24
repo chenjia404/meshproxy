@@ -42,7 +42,7 @@ func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinesto
 	return out
 }
 
-func (s *Service) tryOfflineStoreSubmit(msg Message, storedBlob, cachedCiphertext []byte) error {
+func (s *Service) tryOfflineStoreSubmit(msg Message, storedBlob, cachedCiphertext []byte, quiet bool) error {
 	if s == nil || s.nodePriv == nil || s.host == nil {
 		return errors.New("offline store: not configured")
 	}
@@ -62,11 +62,12 @@ func (s *Service) tryOfflineStoreSubmit(msg Message, storedBlob, cachedCiphertex
 	if err := signOfflineEnvelope(s.nodePriv, env, offlineDefaultTTLSec); err != nil {
 		return err
 	}
-	return s.submitSignedOfflineEnvelope(env)
+	return s.submitSignedOfflineEnvelope(env, quiet)
 }
 
 // submitSignedOfflineEnvelope 將已簽名的 OfflineMessageEnvelope 並發提交到配置的 store 節點。
-func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope) error {
+// quiet 為 true 時不記錄「submitting / submit ok」（例如中繼已成功後的冗餘寫入）。
+func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope, quiet bool) error {
 	if s == nil || s.host == nil {
 		return errors.New("offline store: nil service or host")
 	}
@@ -80,6 +81,10 @@ func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope) error
 	}
 	req := &offlinestore.StoreMessageRequest{Version: 1, Message: rawMsg}
 	client := offlinestore.NewLibp2pStoreClient(s.host)
+
+	if !quiet {
+		log.Printf("[chat] offline store: submitting msg=%s recipient=%s stores=%d", env.MsgID, env.RecipientID, len(nodes))
+	}
 
 	var okCount int
 	var mu sync.Mutex
@@ -128,6 +133,9 @@ func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope) error
 			return lastErr
 		}
 		return errors.New("offline store: all submissions failed")
+	}
+	if !quiet {
+		log.Printf("[chat] offline store: submit ok msg=%s accepted=%d/%d", env.MsgID, okCount, len(nodes))
 	}
 	return nil
 }
@@ -263,7 +271,9 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 	}
 	if err := s.store.SetOfflineStoreLastAckSeq(node.PeerID, int64(maxOK)); err != nil {
 		log.Printf("[chat] offline cursor save: %v", err)
+		return
 	}
+	log.Printf("[chat] offline store: fetched peer=%s items_ok max_seq=%d", node.PeerID, maxOK)
 }
 
 func (s *Service) signOfflineAckReq(ackSeq int64) (*offlinestore.AckMessagesRequest, error) {

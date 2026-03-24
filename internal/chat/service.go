@@ -115,6 +115,9 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 		eventsHub: newChatEventHub(),
 	}
 	s.offlineStoreNodes = append([]offlinestore.OfflineStoreNode(nil), offlineStores...)
+	if len(s.offlineStoreNodes) > 0 {
+		log.Printf("[chat] offline store: %d node(s) configured", len(s.offlineStoreNodes))
+	}
 	// Used for jitter when scheduling retries.
 	rand.Seed(time.Now().UTC().UnixNano())
 	if err := os.MkdirAll(avatarDir, 0o755); err != nil {
@@ -1146,7 +1149,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 				_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
 			}
 		} else {
-			if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire); subErr != nil {
+			if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire, false); subErr != nil {
 				log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
 			}
 			// Can't connect now: schedule accept retry.
@@ -1197,7 +1200,7 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		SentAtUnix:       time.Now().UnixMilli(),
 	}
 	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire); subErr != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire, false); subErr != nil {
 			log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
 		}
 		// Connection not currently available: schedule retry of SessionAccept.
@@ -1238,7 +1241,7 @@ func (s *Service) RejectRequest(requestID string) error {
 		SentAtUnix: time.Now().UnixMilli(),
 	}
 	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionReject, req.FromPeerID, requestID, wire); subErr != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionReject, req.FromPeerID, requestID, wire, false); subErr != nil {
 			log.Printf("[chat] offline friend store (reject, no connect) request=%s err=%v", requestID, subErr)
 		}
 		return nil
@@ -2072,7 +2075,8 @@ func (s *Service) sendEnvelope(peerID string, v any) error {
 	return s.sendViaRelay(peerID, v)
 }
 
-// sendEnvelopeDirectOrRelay 先直連再中繼；若走了中繼則 usedRelay 為 true（用於離線 store 補充投遞）。
+// sendEnvelopeDirectOrRelay 先直連再中繼；若走了中繼則 usedRelay 為 true。
+// 私聊已發送消息請用 sendStoredDirectMessage（直連失敗即寫離線 store 再試中繼）。
 func (s *Service) sendEnvelopeDirectOrRelay(peerID string, v any) (usedRelay bool, err error) {
 	protoID := protocolForEnvelope(v)
 	if err := s.sendJSON(peerID, protoID, v); err == nil {
@@ -2943,7 +2947,7 @@ func (s *Service) publishDirectMessageStateUpdate(msgID string) {
 	s.publishChatEvent(newDirectMessageStateEvent(m))
 }
 
-// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端；失败则标记 queued 并调度重试。
+// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端（sendStoredDirectMessage：直連失敗即寫離線 store 再試中繼）；失败则标记 queued 并调度重试。
 // 若用户在发送完成前撤回并删除本地消息，则放弃发送（避免对已删消息改状态）。
 func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cachedCiphertext []byte) {
 	cur, err := s.store.GetMessage(msg.MsgID)
@@ -2960,18 +2964,7 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 		return
 	}
 	if err := s.sendStoredDirectMessage(msg, storedBlob, cachedCiphertext); err != nil {
-		if s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext) == nil {
-			msg.State = MessageStateSentToTransport
-			if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
-				log.Printf("[chat] persist offline-sent state failed msg=%s: %v", msg.MsgID, updateErr)
-				return
-			}
-			if markErr := s.markOutboxSentToTransport(msg.MsgID, msg.ReceiverPeerID, 0, time.Now().UTC()); markErr != nil {
-				log.Printf("[chat] mark outbox sent after offline failed msg=%s: %v", msg.MsgID, markErr)
-			}
-			s.publishDirectMessageStateUpdate(msg.MsgID)
-			return
-		}
+		log.Printf("[chat] outbound send failed msg=%s peer=%s: %v", msg.MsgID, msg.ReceiverPeerID, err)
 		msg.State = MessageStateQueuedForRetry
 		if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
 			log.Printf("[chat] persist queued state failed msg=%s: %v", msg.MsgID, updateErr)
@@ -2999,17 +2992,32 @@ func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cached
 	if err != nil {
 		return err
 	}
-	usedRelay, err := s.sendEnvelopeDirectOrRelay(msg.ReceiverPeerID, wire)
-	if err != nil {
-		return err
+	protoID := protocolForEnvelope(wire)
+	directErr := s.sendJSON(msg.ReceiverPeerID, protoID, wire)
+	if directErr == nil {
+		return nil
 	}
-	// 經中繼送達的私聊文本類消息，額外最佳努力寫入離線 store（與直連失敗後專走 store 的路徑互補；失敗不影響已送達狀態）。
-	if usedRelay && (msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote) {
-		if subErr := s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext); subErr != nil {
-			log.Printf("[chat] offline store after relay msg=%s: %v", msg.MsgID, subErr)
+	// 直連失敗則立即最佳努力寫入離線 store，再嘗試中繼；若 store 成功而中繼仍失敗，視為已送達（由對端拉取）。
+	var storeErr error
+	var storeOK bool
+	if msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote {
+		storeErr = s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext, false)
+		storeOK = (storeErr == nil)
+		if storeErr != nil {
+			log.Printf("[chat] offline store after direct fail msg=%s: %v", msg.MsgID, storeErr)
 		}
 	}
-	return nil
+	relayErr := s.sendViaRelay(msg.ReceiverPeerID, wire)
+	if relayErr == nil {
+		return nil
+	}
+	if storeOK {
+		return nil
+	}
+	if storeErr != nil {
+		return fmt.Errorf("relay: %v; offline store: %w", relayErr, storeErr)
+	}
+	return fmt.Errorf("relay: %v; direct: %v", relayErr, directErr)
 }
 
 func (s *Service) buildDirectEnvelope(msg Message, storedBlob []byte, cachedCiphertext []byte) (any, error) {
@@ -3060,16 +3068,7 @@ func (s *Service) retryOutboxJob(item outboxRetryItem) error {
 		return err
 	}
 	if err := s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil); err != nil {
-		if s.tryOfflineStoreSubmit(msg, item.CiphertextBlob, nil) == nil {
-			if err := s.store.UpdateMessageState(item.MsgID, MessageStateSentToTransport); err != nil {
-				return err
-			}
-			if err := s.markOutboxSentToTransport(item.MsgID, item.PeerID, item.RetryCount, time.Now().UTC()); err != nil {
-				return err
-			}
-			s.publishDirectMessageStateUpdate(item.MsgID)
-			return nil
-		}
+		log.Printf("[chat] retry outbox send failed msg=%s peer=%s: %v", item.MsgID, item.PeerID, err)
 		_ = s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry)
 		s.publishDirectMessageStateUpdate(item.MsgID)
 		return s.scheduleOutboxRetry(item.MsgID, item.PeerID, item.RetryCount+1)

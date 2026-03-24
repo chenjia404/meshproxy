@@ -42,7 +42,7 @@ func (s *Service) buildOfflineFriendEnvelope(kind, recipientPeer, msgID string, 
 	return env, nil
 }
 
-func (s *Service) tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID string, payload any) error {
+func (s *Service) tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID string, payload any, quiet bool) error {
 	if s == nil || s.nodePriv == nil || s.host == nil {
 		return errors.New("offline friend store: not configured")
 	}
@@ -61,20 +61,20 @@ func (s *Service) tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID string,
 	if err := signOfflineEnvelope(s.nodePriv, env, offlineDefaultTTLSec); err != nil {
 		return err
 	}
-	return s.submitSignedOfflineEnvelope(env)
+	return s.submitSignedOfflineEnvelope(env, quiet)
 }
 
 // sendFriendControlEnvelope 直連失敗則中繼；中繼成功或直連失敗時最佳努力寫入離線 store（明文 JSON + 外層簽名）。
 func (s *Service) sendFriendControlEnvelope(peerID string, v any, kind string, msgID string) error {
 	usedRelay, err := s.sendEnvelopeDirectOrRelay(peerID, v)
 	if err != nil {
-		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v); subErr != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v, false); subErr != nil {
 			log.Printf("[chat] offline friend store after send fail kind=%s id=%s: %v", kind, msgID, subErr)
 		}
 		return err
 	}
 	if usedRelay {
-		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v); subErr != nil {
+		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v, true); subErr != nil {
 			log.Printf("[chat] offline friend store after relay kind=%s id=%s: %v", kind, msgID, subErr)
 		}
 	}
