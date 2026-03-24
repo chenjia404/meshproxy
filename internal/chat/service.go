@@ -1682,6 +1682,22 @@ func (s *Service) handleIncomingSessionRequestEnvelope(req SessionRequest, trans
 		return nil
 	}
 	avatarName := NormalizeAvatarFileName(req.AvatarName)
+	// 重复 SessionRequest（如中继成功后仍写入离线 store、再 fetch 到副本）不得把已接受/已拒绝/已屏蔽的请求改回 pending。
+	if strings.TrimSpace(req.RequestID) != "" {
+		if existing, err := s.store.GetRequest(req.RequestID); err == nil {
+			switch existing.State {
+			case RequestStateAccepted, RequestStateRejected, RequestStateBlocked:
+				_ = s.store.UpsertPeer(req.FromPeerID, req.Nickname, req.Bio)
+				if avatarName != "" {
+					_ = s.store.UpdatePeerAvatar(req.FromPeerID, avatarName)
+					s.requestAvatarFetch(req.FromPeerID, avatarName)
+				}
+				return nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	stored := Request{
 		RequestID:         req.RequestID,
 		FromPeerID:        req.FromPeerID,

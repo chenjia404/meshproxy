@@ -111,7 +111,10 @@ func (s *Store) UpsertIncomingRequest(req Request) error {
 		INSERT INTO requests(request_id,from_peer_id,to_peer_id,state,intro_text,nickname,bio,avatar,retention_minutes,remote_chat_kex_pub,conversation_id,last_transport_mode,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(request_id) DO UPDATE SET
-			state=excluded.state,
+			state=CASE
+				WHEN requests.state IN ('accepted', 'rejected', 'blocked') THEN requests.state
+				ELSE excluded.state
+			END,
 			intro_text=excluded.intro_text,
 			nickname=excluded.nickname,
 			bio=excluded.bio,
