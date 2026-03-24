@@ -4,3 +4,4 @@ dist/
 .gopath/
 .gomodcache/
 shell.sh
+node.exe
