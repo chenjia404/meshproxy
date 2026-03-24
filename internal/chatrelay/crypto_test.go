@@ -6,6 +6,10 @@ import (
 	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
+// 协议级回归测试（connect/handshake/heartbeat/限流/重放等）见：
+//   - internal/chat/relay_v1_protocol_test.go
+//   - internal/relay/chatrelay_v1_test.go
+
 func TestDeriveRelaySessionKeysAndDataRoundTrip(t *testing.T) {
 	priv1, pub1, err := protocol.GenerateEphemeralKeyPair()
 	if err != nil {
