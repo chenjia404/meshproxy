@@ -188,6 +188,15 @@ type relayV1PeerSession struct {
 	stopHB chan struct{}
 }
 
+// relayV1PeerSessionStopHeartbeatLocked 关闭心跳 goroutine（须已持 st.mu）。
+func relayV1PeerSessionStopHeartbeatLocked(st *relayV1PeerSession) {
+	if st == nil || st.stopHB == nil {
+		return
+	}
+	close(st.stopHB)
+	st.stopHB = nil
+}
+
 // A 端 relayV1Sessions 惰性回收：過期項 + 總量超上限時按 lastUsedUnix 淘汰。
 const (
 	relayV1ASessionPurgeInterval = 2 * time.Second
@@ -220,6 +229,12 @@ func (s *Service) relayV1MaybePurgeStaleRelaySessionsLocked() {
 		}
 	}
 	for _, dst := range rm {
+		st := s.relayV1Sessions[dst]
+		if st != nil {
+			st.mu.Lock()
+			relayV1PeerSessionStopHeartbeatLocked(st)
+			st.mu.Unlock()
+		}
 		delete(s.relayV1Sessions, dst)
 	}
 	for len(s.relayV1Sessions) > relayV1ASessionMaxEntries {
@@ -240,6 +255,12 @@ func (s *Service) relayV1MaybePurgeStaleRelaySessionsLocked() {
 		}
 		if worstDst == "" {
 			break
+		}
+		st := s.relayV1Sessions[worstDst]
+		if st != nil {
+			st.mu.Lock()
+			relayV1PeerSessionStopHeartbeatLocked(st)
+			st.mu.Unlock()
 		}
 		delete(s.relayV1Sessions, worstDst)
 	}
@@ -381,10 +402,7 @@ func relayV1ValidateHandshakeResponse(hsResp *chatrelay.RelayHandshakeResponse, 
 }
 
 func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPeerID string, st *relayV1PeerSession) error {
-	if st.stopHB != nil {
-		close(st.stopHB)
-		st.stopHB = nil
-	}
+	relayV1PeerSessionStopHeartbeatLocked(st)
 	sessionID := uuid.NewString()
 	ttl := 3600
 	ts := time.Now().Unix()
@@ -773,10 +791,7 @@ func (s *Service) relayV1ActivateOutboundSession(dstPeerID string, relayPID peer
 	st := s.relayV1SessionFor(dstPeerID)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.stopHB != nil {
-		close(st.stopHB)
-		st.stopHB = nil
-	}
+	relayV1PeerSessionStopHeartbeatLocked(st)
 	st.relay = relayPID
 	st.sessionID = sessionID
 	st.expireAt = expireAt
