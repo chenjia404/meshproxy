@@ -161,6 +161,9 @@ func NewService(ctx context.Context, dbPath, avatarDir string, h host.Host, rout
 	safe.Go("chat.friendRequestRetryLoop", func() { s.runFriendRequestRetryLoop() })
 	safe.Go("chat.relayKeepConnectedLoop", func() { s.runRelayKeepConnectedLoop() })
 	safe.Go("chat.offlineStoreFetch", func() { s.runOfflineStoreFetchLoop() })
+	if len(s.offlineStoreNodes) > 0 {
+		safe.Go("chat.offlineStoreKeepConnected", func() { s.runOfflineStoreKeepConnectedLoop() })
+	}
 	return s, nil
 }
 

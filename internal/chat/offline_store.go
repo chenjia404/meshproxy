@@ -26,6 +26,15 @@ const (
 	// offlineFetchMaxBatchesPerPoll 单次轮询在同一 store 上最多连续拉取批次数；收到 HasMore 时继续下一页，避免积压需多轮 90s 才能清空。
 	offlineFetchMaxBatchesPerPoll = 500
 	offlineSubmitConcurrency      = 4
+
+	// offlineStoreConnProtectTag 标记离线 store 对端，避免 ConnManager 因空闲裁撤底层连接（后续 NewStream 仍复用同一条连接）。
+	offlineStoreConnProtectTag = "meshproxy-offline-store"
+	// offlineStorePeerAddrTTL 写入 peerstore 的 store 地址 TTL，宜长于默认 1h，减少地址过期后的重复解析。
+	offlineStorePeerAddrTTL = 24 * time.Hour
+	// offlineStoreConnectTimeout 首次拨号 / 保活拨号超时。
+	offlineStoreConnectTimeout = 30 * time.Second
+	// offlineStoreKeepAliveInterval 周期性确保与已配置 store 仍连接并维持 Protect。
+	offlineStoreKeepAliveInterval = 2 * time.Minute
 )
 
 func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinestore.OfflineStoreNode {
@@ -44,6 +53,26 @@ func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinesto
 	}
 	_ = forRecipientPeerID // 預留：日後合併對端 profile 中的 store 列表
 	return out
+}
+
+// connectOfflineStorePeerAndProtect 连接离线 store 并将 peer 标记为受保护，避免空闲时被 ConnManager 断开，便于后续 RPC 复用同一条传输连接。
+func (s *Service) connectOfflineStorePeerAndProtect(node offlinestore.OfflineStoreNode) error {
+	if s == nil || s.host == nil {
+		return errors.New("offline store: nil service or host")
+	}
+	cctx, cancel := context.WithTimeout(s.ctx, offlineStoreConnectTimeout)
+	defer cancel()
+	if err := offlinestore.ConnectStorePeer(cctx, s.host, s.routing, node, offlineStorePeerAddrTTL); err != nil {
+		return err
+	}
+	pid, err := peer.Decode(strings.TrimSpace(node.PeerID))
+	if err != nil {
+		return err
+	}
+	if cm := s.host.ConnManager(); cm != nil {
+		cm.Protect(pid, offlineStoreConnProtectTag)
+	}
+	return nil
 }
 
 func (s *Service) tryOfflineStoreSubmit(msg Message, storedBlob, cachedCiphertext []byte, quiet bool) error {
@@ -109,15 +138,15 @@ func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope, quiet
 				mu.Unlock()
 				return
 			}
-			cctx, ccancel := context.WithTimeout(s.ctx, offlinestore.DefaultRPCTimeout)
-			defer ccancel()
-			if connErr := offlinestore.ConnectStorePeer(cctx, s.host, s.routing, node, offlinestore.DefaultStoreAddrTTL); connErr != nil {
+			if connErr := s.connectOfflineStorePeerAndProtect(node); connErr != nil {
 				mu.Lock()
 				lastErr = connErr
 				mu.Unlock()
 				return
 			}
-			resp, stErr := client.StoreMessage(cctx, pid, req)
+			smCtx, smCancel := context.WithTimeout(s.ctx, offlinestore.DefaultRPCTimeout)
+			resp, stErr := client.StoreMessage(smCtx, pid, req)
+			smCancel()
 			if stErr != nil {
 				mu.Lock()
 				lastErr = stErr
@@ -206,6 +235,37 @@ func (s *Service) runOfflineStoreFetchLoop() {
 	}
 }
 
+// runOfflineStoreKeepConnectedLoop 启动后尽早连接各离线 store，并周期性重连 + Protect，复用底层连接、减少频繁建连。
+func (s *Service) runOfflineStoreKeepConnectedLoop() {
+	delay := time.Duration(2+rand.Intn(8)) * time.Second
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	tick := time.NewTicker(offlineStoreKeepAliveInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-t.C:
+			s.warmOfflineStoreConnectionsOnce()
+		case <-tick.C:
+			s.warmOfflineStoreConnectionsOnce()
+		}
+	}
+}
+
+func (s *Service) warmOfflineStoreConnectionsOnce() {
+	if s == nil || s.host == nil {
+		return
+	}
+	nodes := s.mergeOfflineStoreNodes("")
+	for _, node := range nodes {
+		if err := s.connectOfflineStorePeerAndProtect(node); err != nil {
+			log.Printf("[chat] offline store keep-connected peer=%s: %v", node.PeerID, err)
+		}
+	}
+}
+
 func (s *Service) pollOfflineStoresOnce() {
 	if s == nil || s.host == nil || s.nodePriv == nil {
 		return
@@ -224,9 +284,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 	if err != nil {
 		return
 	}
-	cctx, ccancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer ccancel()
-	if err := offlinestore.ConnectStorePeer(cctx, s.host, s.routing, node, offlinestore.DefaultStoreAddrTTL); err != nil {
+	if err := s.connectOfflineStorePeerAndProtect(node); err != nil {
 		return
 	}
 	lastAck, err := s.store.GetOfflineStoreLastAckSeq(node.PeerID)
