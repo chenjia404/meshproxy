@@ -81,6 +81,17 @@ func (s *Service) sendFriendControlEnvelope(peerID string, v any, kind string, m
 	return nil
 }
 
+// offlineFriendInnerSenderMustMatchEnv 離線好友載荷為明文 JSON，須與外層 OfflineMessageEnvelope.SenderID（已驗簽）一致，防止用自己的 key 簽封包卻在內層冒充他人。
+func offlineFriendInnerSenderMustMatchEnv(env *OfflineMessageEnvelope, innerFromPeerID string) error {
+	if env == nil {
+		return errors.New("offline friend: nil envelope")
+	}
+	if strings.TrimSpace(innerFromPeerID) != strings.TrimSpace(env.SenderID) {
+		return fmt.Errorf("offline friend: inner from_peer_id does not match envelope sender_id")
+	}
+	return nil
+}
+
 func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, storeSeq uint64) (uint64, error) {
 	payload, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
 	if err != nil {
@@ -96,12 +107,18 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return 0, err
 		}
+		if err := offlineFriendInnerSenderMustMatchEnv(env, req.FromPeerID); err != nil {
+			return 0, err
+		}
 		if err := s.handleIncomingSessionRequestEnvelope(req, TransportModeDirect, true); err != nil {
 			return 0, err
 		}
 	case MessageTypeSessionAccept:
 		var acc SessionAccept
 		if err := json.Unmarshal(payload, &acc); err != nil {
+			return 0, err
+		}
+		if err := offlineFriendInnerSenderMustMatchEnv(env, acc.FromPeerID); err != nil {
 			return 0, err
 		}
 		if err := s.handleIncomingSessionAcceptEnvelope(acc, true, true); err != nil {
@@ -112,12 +129,18 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := json.Unmarshal(payload, &rej); err != nil {
 			return 0, err
 		}
+		if err := offlineFriendInnerSenderMustMatchEnv(env, rej.FromPeerID); err != nil {
+			return 0, err
+		}
 		if err := s.handleIncomingSessionRejectEnvelope(rej, true); err != nil {
 			return 0, err
 		}
 	case MessageTypeSessionAcceptAck:
 		var ack SessionAcceptAck
 		if err := json.Unmarshal(payload, &ack); err != nil {
+			return 0, err
+		}
+		if err := offlineFriendInnerSenderMustMatchEnv(env, ack.FromPeerID); err != nil {
 			return 0, err
 		}
 		if err := s.handleIncomingSessionAcceptAckEnvelope(ack); err != nil {
