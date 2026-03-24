@@ -37,6 +37,37 @@ const (
 	offlineStoreKeepAliveInterval = 2 * time.Minute
 )
 
+type offlineFetchItemError struct {
+	err       error
+	permanent bool
+}
+
+func (e *offlineFetchItemError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *offlineFetchItemError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newPermanentOfflineFetchItemError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &offlineFetchItemError{err: err, permanent: true}
+}
+
+func isPermanentOfflineFetchItemError(err error) bool {
+	var target *offlineFetchItemError
+	return errors.As(err, &target) && target.permanent
+}
+
 func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinestore.OfflineStoreNode {
 	seen := make(map[string]struct{})
 	var out []offlinestore.OfflineStoreNode
@@ -315,9 +346,16 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 			sawNonEmpty = true
 			seq, perr := s.processOneOfflineFetchItem(raw)
 			if perr != nil {
-				log.Printf("[chat] offline fetch item store_seq=%d: %v", seq, perr)
+				if isPermanentOfflineFetchItemError(perr) {
+					log.Printf("[chat] offline fetch item store_seq=%d skipped permanently: %v", seq, perr)
+					if seq > maxOK {
+						maxOK = seq
+					}
+					continue
+				}
+				log.Printf("[chat] offline fetch item store_seq=%d blocked for retry: %v", seq, perr)
+				break
 			}
-			// 失败仍计入该条 store_seq，以便 ACK 跳过毒丸，避免永久堵死后续合法消息
 			if seq > maxOK {
 				maxOK = seq
 			}
@@ -425,21 +463,21 @@ func peekOfflineStoreSeq(raw []byte) uint64 {
 func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err error) {
 	var wire StoredMessageWire
 	if err := json.Unmarshal(raw, &wire); err != nil {
-		return peekOfflineStoreSeq(raw), err
+		return peekOfflineStoreSeq(raw), newPermanentOfflineFetchItemError(err)
 	}
 	seq := wire.StoreSeq
 	if wire.Message == nil {
-		return seq, errors.New("nil offline message")
+		return seq, newPermanentOfflineFetchItemError(errors.New("nil offline message"))
 	}
 	env := wire.Message
 	if strings.TrimSpace(env.RecipientID) != s.localPeer {
-		return seq, errors.New("recipient mismatch")
+		return seq, newPermanentOfflineFetchItemError(errors.New("recipient mismatch"))
 	}
 	if err := verifyOfflineEnvelope(env.SenderID, env, offlineDefaultTTLSec); err != nil {
-		return seq, err
+		return seq, newPermanentOfflineFetchItemError(err)
 	}
 	if err := validateOfflineEnvelopeTiming(env, &wire, offlineDefaultTTLSec, time.Now().UTC()); err != nil {
-		return seq, err
+		return seq, newPermanentOfflineFetchItemError(err)
 	}
 	if env.Cipher.Algorithm == OfflineFriendAlgoECIES {
 		if _, err := s.processOfflineFriendPayload(env, seq); err != nil {
@@ -447,16 +485,13 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		}
 		return seq, nil
 	}
-	if _, err := s.store.GetSessionState(env.ConversationID); err != nil {
-		return seq, err
-	}
 	counter, msgType, err := decodeRecipientKeyID(env.Cipher.RecipientKeyID)
 	if err != nil {
-		return seq, err
+		return seq, newPermanentOfflineFetchItemError(err)
 	}
 	ctBytes, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
 	if err != nil {
-		return seq, err
+		return seq, newPermanentOfflineFetchItemError(err)
 	}
 	ct := ChatText{
 		Type:           msgType,
