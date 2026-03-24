@@ -182,19 +182,79 @@ type relayV1PeerSession struct {
 	packetSeq   uint64
 	handshakeOK bool
 
+	lastUsedUnix int64 // 最近一次成功建立/發送/首選命中（供 map 超限時淘汰最久未用）
+
 	hbFail int
 	stopHB chan struct{}
+}
+
+// A 端 relayV1Sessions 惰性回收：過期項 + 總量超上限時按 lastUsedUnix 淘汰。
+const (
+	relayV1ASessionPurgeInterval = 2 * time.Second
+	relayV1ASessionMaxEntries    = 4096
+)
+
+func (s *Service) relayV1MaybePurgeStaleRelaySessionsLocked() {
+	if s.relayV1Sessions == nil {
+		return
+	}
+	now := time.Now()
+	heavy := s.relayV1SessionsLastPurge.IsZero() || now.Sub(s.relayV1SessionsLastPurge) >= relayV1ASessionPurgeInterval ||
+		len(s.relayV1Sessions) > relayV1ASessionMaxEntries
+	if !heavy {
+		return
+	}
+	s.relayV1SessionsLastPurge = now
+	nowUnix := now.Unix()
+	var rm []string
+	for dst, st := range s.relayV1Sessions {
+		if st == nil {
+			rm = append(rm, dst)
+			continue
+		}
+		st.mu.Lock()
+		expired := st.handshakeOK && nowUnix >= st.expireAt-5
+		st.mu.Unlock()
+		if expired {
+			rm = append(rm, dst)
+		}
+	}
+	for _, dst := range rm {
+		delete(s.relayV1Sessions, dst)
+	}
+	for len(s.relayV1Sessions) > relayV1ASessionMaxEntries {
+		var worstDst string
+		var worstScore int64 = 1<<62 - 1
+		for dst, st := range s.relayV1Sessions {
+			if st == nil {
+				worstDst = dst
+				break
+			}
+			st.mu.Lock()
+			t := st.lastUsedUnix
+			st.mu.Unlock()
+			if t < worstScore {
+				worstScore = t
+				worstDst = dst
+			}
+		}
+		if worstDst == "" {
+			break
+		}
+		delete(s.relayV1Sessions, worstDst)
+	}
 }
 
 func (s *Service) relayV1SessionFor(dstPeer string) *relayV1PeerSession {
 	s.relayV1SessionsMu.Lock()
 	defer s.relayV1SessionsMu.Unlock()
+	s.relayV1MaybePurgeStaleRelaySessionsLocked()
 	if s.relayV1Sessions == nil {
 		s.relayV1Sessions = make(map[string]*relayV1PeerSession)
 	}
 	st, ok := s.relayV1Sessions[dstPeer]
 	if !ok {
-		st = &relayV1PeerSession{}
+		st = &relayV1PeerSession{lastUsedUnix: time.Now().Unix()}
 		s.relayV1Sessions[dstPeer] = st
 	}
 	return st
@@ -247,6 +307,7 @@ func (s *Service) sendViaRelayV1(relayPID peer.ID, dstPeerID string, payload []b
 	if err := tunnel.WriteJSONFrame(str, &frame); err != nil {
 		return err
 	}
+	st.lastUsedUnix = time.Now().Unix()
 	s.relayV1MaybeStartHeartbeat(relayPID, dstPeerID, st)
 	return nil
 }
@@ -431,6 +492,7 @@ func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPee
 	st.txKey, st.rxKey = tx, rx
 	st.packetSeq = 0
 	st.handshakeOK = true
+	st.lastUsedUnix = time.Now().Unix()
 	return nil
 }
 
@@ -721,11 +783,13 @@ func (s *Service) relayV1ActivateOutboundSession(dstPeerID string, relayPID peer
 	st.txKey, st.rxKey = txSend, rxRecv
 	st.packetSeq = 0
 	st.handshakeOK = true
+	st.lastUsedUnix = time.Now().Unix()
 }
 
 // relayV1PreferredRelayForDst 若對該 peer 已有未過期的 relay-v1 會話，返回綁定的中繼（供 sendViaRelay 優先使用）。
 func (s *Service) relayV1PreferredRelayForDst(dstPeerID string) (peer.ID, bool) {
 	s.relayV1SessionsMu.Lock()
+	s.relayV1MaybePurgeStaleRelaySessionsLocked()
 	if s.relayV1Sessions == nil {
 		s.relayV1SessionsMu.Unlock()
 		return "", false
@@ -746,6 +810,7 @@ func (s *Service) relayV1PreferredRelayForDst(dstPeerID string) (peer.ID, bool) 
 	if st.relay == "" {
 		return "", false
 	}
+	st.lastUsedUnix = time.Now().Unix()
 	return st.relay, true
 }
 

@@ -55,15 +55,16 @@ type Service struct {
 	offlineStoreNodes []offlinestore.OfflineStoreNode
 
 	// ChatRelay V1（《聊天中继.md》）：按目標 peer 復用會話。
-	relayV1SessionsMu     sync.Mutex // 僅保護 relayV1Sessions map 本身；單會話狀態用 relayV1PeerSession.mu。
-	relayV1Sessions       map[string]*relayV1PeerSession
-	relayV1BMu            sync.Mutex
-	relayV1BConnect       map[string]relayV1BConnReg // session_id -> 已接受的 connect
-	relayV1BKeys          map[string]relayV1KeyEntry // "session_id\x00src_id" -> 密鑰
-	relayV1BBySrc         map[string][]string        // 每 src 的 session_id FIFO（按源淘汰）
-	relayV1BLastPurge     time.Time
-	relayV1BLastConnectAt map[string]time.Time
-	relayV1BLastHbAt      map[string]time.Time
+	relayV1SessionsMu        sync.Mutex // 僅保護 relayV1Sessions map 本身；單會話狀態用 relayV1PeerSession.mu。
+	relayV1Sessions          map[string]*relayV1PeerSession
+	relayV1SessionsLastPurge time.Time // A 端 map 惰性清理節流（與 relayV1MaybePurgeStaleRelaySessionsLocked）
+	relayV1BMu               sync.Mutex
+	relayV1BConnect          map[string]relayV1BConnReg // session_id -> 已接受的 connect
+	relayV1BKeys             map[string]relayV1KeyEntry // "session_id\x00src_id" -> 密鑰
+	relayV1BBySrc            map[string][]string        // 每 src 的 session_id FIFO（按源淘汰）
+	relayV1BLastPurge        time.Time
+	relayV1BLastConnectAt    map[string]time.Time
+	relayV1BLastHbAt         map[string]time.Time
 
 	autoConnectSeen      sync.Map
 	profileSyncSeen      sync.Map
