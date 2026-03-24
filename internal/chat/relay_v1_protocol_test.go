@@ -257,3 +257,50 @@ func TestRelayV1VerifyHeartbeatPong_RejectsBadReplay(t *testing.T) {
 		t.Fatal("wrong session_id must fail")
 	}
 }
+
+// TestRelayV1BIngestRelayDataPacket_ReordersToContiguousDelivery：多 stream 下先到高序号再补低序号，应按 0,1,2… 连续交付。
+func TestRelayV1BIngestRelayDataPacket_ReordersToContiguousDelivery(t *testing.T) {
+	s := &Service{ctx: context.Background()}
+	sid, src := "sid-reorder", "srcA"
+	rx := make([]byte, 32)
+	s.relayV1BMu.Lock()
+	if s.relayV1BKeys == nil {
+		s.relayV1BKeys = make(map[string]relayV1KeyEntry)
+	}
+	s.relayV1BKeys[relayV1BKey(sid, src)] = relayV1KeyEntry{tx: rx, rx: rx, lastDataSeq: ^uint64(0)}
+	s.relayV1BMu.Unlock()
+
+	if out := s.relayV1BIngestRelayDataPacket(sid, src, 1, []byte("one")); len(out) != 0 {
+		t.Fatalf("seq 1 before 0 should buffer only, got %d", len(out))
+	}
+	out := s.relayV1BIngestRelayDataPacket(sid, src, 0, []byte("zero"))
+	if len(out) != 2 || string(out[0]) != "zero" || string(out[1]) != "one" {
+		t.Fatalf("want [zero one], got %#v", out)
+	}
+	if s.relayV1BIngestRelayDataPacket(sid, src, 1, []byte("dup")) != nil {
+		t.Fatal("duplicate seq must drop")
+	}
+	out2 := s.relayV1BIngestRelayDataPacket(sid, src, 2, []byte("two"))
+	if len(out2) != 1 || string(out2[0]) != "two" {
+		t.Fatalf("want [two], got %#v", out2)
+	}
+}
+
+// TestRelayV1BIngestRelayDataPacket_RejectsExcessiveGap：超前序号超过窗口则拒绝，避免内存被撑爆。
+func TestRelayV1BIngestRelayDataPacket_RejectsExcessiveGap(t *testing.T) {
+	s := &Service{ctx: context.Background()}
+	sid, src := "sid-gap", "srcA"
+	rx := make([]byte, 32)
+	s.relayV1BMu.Lock()
+	if s.relayV1BKeys == nil {
+		s.relayV1BKeys = make(map[string]relayV1KeyEntry)
+	}
+	s.relayV1BKeys[relayV1BKey(sid, src)] = relayV1KeyEntry{tx: rx, rx: rx, lastDataSeq: 0}
+	s.relayV1BMu.Unlock()
+
+	// nextExpected=1，gap 需严格大于 relayV1BMaxDataReorderGap
+	far := uint64(1) + relayV1BMaxDataReorderGap + 1
+	if s.relayV1BIngestRelayDataPacket(sid, src, far, []byte("far")) != nil {
+		t.Fatal("excessive gap should not buffer")
+	}
+}

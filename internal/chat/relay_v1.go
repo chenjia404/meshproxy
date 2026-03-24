@@ -29,7 +29,8 @@ type relayV1BConnReg struct {
 
 type relayV1KeyEntry struct {
 	tx, rx      []byte
-	lastDataSeq uint64 // 首包前為 ^uint64(0)，僅接受 packet_seq==0
+	lastDataSeq uint64            // 已連續交付的最大 packet_seq；首包前為 ^uint64(0)（下一期望為 0）
+	pending     map[uint64][]byte // 已解密明文，等待缺號到齊後再交業務層（多 stream 亂序）
 }
 
 func relayV1BKey(sessionID, srcID string) string {
@@ -43,6 +44,10 @@ const (
 	relayV1BPurgeInterval     = 2 * time.Second
 	relayV1BMinConnectGap     = 200 * time.Millisecond
 	relayV1BMinHeartbeatGap   = 400 * time.Millisecond
+
+	// 多 stream 轉發亂序：允許的超前序號缺口與 pending 上限（防內存放大）。
+	relayV1BMaxDataReorderGap   = uint64(64)
+	relayV1BMaxDataPendingSlots = 64
 )
 
 func relayV1BRemoveStringFromSlice(s []string, x string) []string {
@@ -774,10 +779,9 @@ func (s *Service) ServeRelayDataAsB(str network.Stream, frame *chatrelay.RelayDa
 	if err != nil {
 		return
 	}
-	if !s.relayV1BAdvanceDataSeq(frame.SessionID, frame.SrcID, frame.PacketSeq) {
-		return
+	for _, chunk := range s.relayV1BIngestRelayDataPacket(frame.SessionID, frame.SrcID, frame.PacketSeq, plain) {
+		_ = s.processEnvelopeBytes(chunk)
 	}
-	_ = s.processEnvelopeBytes(plain)
 }
 
 // relayV1BHeartbeatAllowedAndHasConnect 惰性 purge、心跳限流並校驗 connect 仍有效（單鎖）。
@@ -861,7 +865,7 @@ func (s *Service) relayV1BStoreKeysLocked(mapKey string, tx, rx []byte) {
 	if s.relayV1BKeys == nil {
 		s.relayV1BKeys = make(map[string]relayV1KeyEntry)
 	}
-	s.relayV1BKeys[mapKey] = relayV1KeyEntry{tx: tx, rx: rx, lastDataSeq: ^uint64(0)}
+	s.relayV1BKeys[mapKey] = relayV1KeyEntry{tx: tx, rx: rx, lastDataSeq: ^uint64(0), pending: nil}
 }
 
 func (s *Service) relayV1BGetKeys(sessionID, srcID string) (tx, rx []byte, ok bool) {
@@ -875,27 +879,75 @@ func (s *Service) relayV1BGetKeys(sessionID, srcID string) (tx, rx []byte, ok bo
 	return k.tx, k.rx, true
 }
 
-func (s *Service) relayV1BAdvanceDataSeq(sessionID, srcID string, seq uint64) bool {
+// relayV1BIngestRelayDataPacket 在持鎖下更新序號前沿；返回應按序交給業務層的明文切片（可能多段，因 flush pending）。
+func (s *Service) relayV1BIngestRelayDataPacket(sessionID, srcID string, seq uint64, plain []byte) [][]byte {
 	s.relayV1BMu.Lock()
 	defer s.relayV1BMu.Unlock()
 	s.relayV1BMaybePurgeLocked(time.Now())
 	key := relayV1BKey(sessionID, srcID)
 	k, ok := s.relayV1BKeys[key]
 	if !ok {
-		return false
+		return nil
 	}
-	if k.lastDataSeq == ^uint64(0) {
-		if seq != 0 {
-			return false
+
+	nextExpected := uint64(0)
+	if k.lastDataSeq != ^uint64(0) {
+		nextExpected = k.lastDataSeq + 1
+	}
+
+	// 已連續交付過的包：重複
+	if k.lastDataSeq != ^uint64(0) && seq <= k.lastDataSeq {
+		return nil
+	}
+	if k.pending != nil {
+		if _, dup := k.pending[seq]; dup {
+			return nil
 		}
-		k.lastDataSeq = 0
+	}
+
+	var out [][]byte
+	push := func(p []byte) {
+		pc := make([]byte, len(p))
+		copy(pc, p)
+		out = append(out, pc)
+	}
+
+	if seq == nextExpected {
+		push(plain)
+		k.lastDataSeq = seq
+		for {
+			nx := k.lastDataSeq + 1
+			pend, ok2 := k.pending[nx]
+			if !ok2 {
+				break
+			}
+			delete(k.pending, nx)
+			push(pend)
+			k.lastDataSeq = nx
+		}
+		if len(k.pending) == 0 {
+			k.pending = nil
+		}
 		s.relayV1BKeys[key] = k
-		return true
+		return out
 	}
-	if seq <= k.lastDataSeq {
-		return false
+
+	if seq < nextExpected {
+		return nil
 	}
-	k.lastDataSeq = seq
+	gap := seq - nextExpected
+	if gap > relayV1BMaxDataReorderGap {
+		return nil
+	}
+	if k.pending == nil {
+		k.pending = make(map[uint64][]byte)
+	}
+	if len(k.pending) >= relayV1BMaxDataPendingSlots {
+		return nil
+	}
+	pc := make([]byte, len(plain))
+	copy(pc, plain)
+	k.pending[seq] = pc
 	s.relayV1BKeys[key] = k
-	return true
+	return nil
 }
