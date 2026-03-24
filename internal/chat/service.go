@@ -52,7 +52,8 @@ type Service struct {
 
 	eventsHub *chatEventHub
 
-	offlineStoreNodes []offlinestore.OfflineStoreNode
+	offlineStoreNodes  []offlinestore.OfflineStoreNode
+	offlineStoreSyncMu sync.Mutex
 
 	// ChatRelay V1（《聊天中继.md》）：按目標 peer 復用會話。
 	relayV1SessionsMu        sync.Mutex // 僅保護 relayV1Sessions map 本身；單會話狀態用 relayV1PeerSession.mu。
@@ -1624,6 +1625,9 @@ func (s *Service) serveRequestStream(str network.Stream) {
 // errChatEnvelopeIgnored 表示控制面封包被丢弃（伪造、未知 request_id、或对端不匹配）。
 var errChatEnvelopeIgnored = errors.New("chat: envelope ignored")
 
+// errChatCounterGap 表示序號缺口在同步補洞後仍無法對齊（對端離線或同步失敗）；已額外排程重試同步。
+var errChatCounterGap = errors.New("chat: counter gap after sync")
+
 // validateFriendRequestEnvelope 校验 SessionAccept/SessionReject 是否对应本地 requests 表中的同一条好友请求，
 // 且 from_peer_id 必须是该请求中的「对端」peer（防止伪造 request_id 建会话或改状态）。
 func (s *Service) validateFriendRequestEnvelope(requestID, fromPeerID string) (Request, error) {
@@ -1959,7 +1963,11 @@ func (s *Service) serveMessageStream(str network.Stream) {
 	}
 	remotePeer := str.Conn().RemotePeer().String()
 	if err := s.processDirectEnvelope(env, remotePeer); err != nil {
-		log.Printf("[chat] process direct envelope failed: %v", err)
+		if errors.Is(err, errChatCounterGap) {
+			log.Printf("[chat] counter gap unresolved (sync will retry): %v", err)
+		} else {
+			log.Printf("[chat] process direct envelope failed: %v", err)
+		}
 	}
 }
 
@@ -2051,7 +2059,11 @@ func (s *Service) serveRelayE2EStreamWithHeader(str network.Stream, header tunne
 				return
 			}
 			if err := s.processEnvelopeBytes(plain); err != nil {
-				log.Printf("[chat] relay envelope processing failed: %v", err)
+				if errors.Is(err, errChatCounterGap) {
+					log.Printf("[chat] relay counter gap unresolved (sync will retry): %v", err)
+				} else {
+					log.Printf("[chat] relay envelope processing failed: %v", err)
+				}
 			}
 		case tunnel.FrameTypeClose:
 			return
@@ -2867,15 +2879,26 @@ func (s *Service) handleChatFileFetchResponse(resp ChatFileFetchResponse, stream
 }
 
 func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64) (bool, error) {
-	expected := sess.RecvCounter
-	switch {
-	case counter < expected:
-		return true, s.sendDeliveryAck(conv, msgID, conv.PeerID)
-	case counter > expected:
-		s.triggerConversationSync(conv.ConversationID, conv.PeerID, expected)
-		return false, fmt.Errorf("chat message counter gap: expected=%d got=%d", expected, counter)
-	default:
-		return false, nil
+	for {
+		expected := sess.RecvCounter
+		switch {
+		case counter < expected:
+			return true, s.sendDeliveryAck(conv, msgID, conv.PeerID)
+		case counter > expected:
+			// 先同步補齊中間序號，再重讀游標；若本條已在同步中入庫則改為重複並回 ack。
+			if err := s.syncConversationFromCounter(conv.ConversationID, conv.PeerID, expected); err != nil {
+				s.triggerConversationSync(conv.ConversationID, conv.PeerID, expected)
+				return false, fmt.Errorf("%w: expected=%d got=%d sync_err=%v", errChatCounterGap, expected, counter, err)
+			}
+			var err error
+			sess, err = s.store.GetSessionState(conv.ConversationID)
+			if err != nil {
+				return false, err
+			}
+			continue
+		default:
+			return false, nil
+		}
 	}
 }
 

@@ -266,6 +266,11 @@ func (s *Service) runOfflineStoreFetchLoop() {
 	}
 }
 
+// SyncOfflineStoresNow 立即拉取一次所有离线 store；用于登录/初始化完成后的首轮同步。
+func (s *Service) SyncOfflineStoresNow() {
+	s.pollOfflineStoresOnce()
+}
+
 // runOfflineStoreKeepConnectedLoop 启动后尽早连接各离线 store，并周期性重连 + Protect，复用底层连接、减少频繁建连。
 func (s *Service) runOfflineStoreKeepConnectedLoop() {
 	delay := time.Duration(2+rand.Intn(8)) * time.Second
@@ -301,6 +306,8 @@ func (s *Service) pollOfflineStoresOnce() {
 	if s == nil || s.host == nil || s.nodePriv == nil {
 		return
 	}
+	s.offlineStoreSyncMu.Lock()
+	defer s.offlineStoreSyncMu.Unlock()
 	nodes := s.mergeOfflineStoreNodes("")
 	if len(nodes) == 0 {
 		return

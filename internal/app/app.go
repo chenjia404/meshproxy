@@ -58,13 +58,13 @@ type App struct {
 
 	discovery *discovery.Manager
 
-	socks5     *client.Socks5Server
-	exitSocks5 *exit.Socks5Server
-	localAPI   *api.LocalAPI
-	ipfsEmb    *ipfsnode.EmbeddedIPFS
-	chat              *chat.Service
-	chatRelayV1Table  *relay.ChatRelayV1Table // 《聊天中继.md》V1 中繼轉發表（僅 relay 模式寫入）
-	meshServer        *meshserver.Manager
+	socks5           *client.Socks5Server
+	exitSocks5       *exit.Socks5Server
+	localAPI         *api.LocalAPI
+	ipfsEmb          *ipfsnode.EmbeddedIPFS
+	chat             *chat.Service
+	chatRelayV1Table *relay.ChatRelayV1Table // 《聊天中继.md》V1 中繼轉發表（僅 relay 模式寫入）
+	meshServer       *meshserver.Manager
 
 	circuitStore         *store.CircuitStore
 	pathSelector         *client.PathSelector
@@ -283,6 +283,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.chat = chatSvc
 	a.chatRelayV1Table = relay.NewChatRelayV1Table()
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
+	safe.Go("chat.offlineStoreInitialSync", func() { chatSvc.SyncOfflineStoresNow() })
 	if a.ipfsEmb != nil {
 		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
 	}
