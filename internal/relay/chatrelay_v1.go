@@ -37,8 +37,8 @@ type ChatRelayV1Table struct {
 	bySrc    map[string][]string // 每 src 的 session_id FIFO（便於按源淘汰）
 
 	lastPurge       time.Time
-	lastConnectAt   map[string]time.Time // src_id -> 上次允許的 connect 轉發
-	lastHeartbeatAt map[string]time.Time // src_id -> 上次允許的 heartbeat 轉發
+	lastConnectAt   map[string]time.Time // 入站 RemotePeer().String() -> 上次允許的 connect 轉發
+	lastHeartbeatAt map[string]time.Time // 入站 RemotePeer().String() -> 上次允許的 heartbeat 轉發
 }
 
 type chatRelayV1Reg struct {
@@ -126,33 +126,33 @@ func (t *ChatRelayV1Table) enforcePerSrcCapLocked(srcID string) {
 	}
 }
 
-// AllowConnectForward 建鏈轉發限流（每源最小間隔）。
-func (t *ChatRelayV1Table) AllowConnectForward(srcID string) bool {
-	if t == nil || srcID == "" {
+// AllowConnectForward 建鏈轉發限流（每入站連線最小間隔）。inboundPeerID 須為 str.Conn().RemotePeer().String()，不可使用 payload 內 src_id。
+func (t *ChatRelayV1Table) AllowConnectForward(inboundPeerID string) bool {
+	if t == nil || inboundPeerID == "" {
 		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
-	if last, ok := t.lastConnectAt[srcID]; ok && now.Sub(last) < chatRelayV1MinConnectGap {
+	if last, ok := t.lastConnectAt[inboundPeerID]; ok && now.Sub(last) < chatRelayV1MinConnectGap {
 		return false
 	}
-	t.lastConnectAt[srcID] = now
+	t.lastConnectAt[inboundPeerID] = now
 	return true
 }
 
-// AllowHeartbeatForward 心跳轉發限流（每源最小間隔）。
-func (t *ChatRelayV1Table) AllowHeartbeatForward(srcID string) bool {
-	if t == nil || srcID == "" {
+// AllowHeartbeatForward 心跳轉發限流（每入站連線最小間隔）。inboundPeerID 須為 str.Conn().RemotePeer().String()，不可使用 payload 內 src_id。
+func (t *ChatRelayV1Table) AllowHeartbeatForward(inboundPeerID string) bool {
+	if t == nil || inboundPeerID == "" {
 		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
-	if last, ok := t.lastHeartbeatAt[srcID]; ok && now.Sub(last) < chatRelayV1MinHeartbeatGap {
+	if last, ok := t.lastHeartbeatAt[inboundPeerID]; ok && now.Sub(last) < chatRelayV1MinHeartbeatGap {
 		return false
 	}
-	t.lastHeartbeatAt[srcID] = now
+	t.lastHeartbeatAt[inboundPeerID] = now
 	return true
 }
 
@@ -200,6 +200,22 @@ func relayV1RecordJSON(tr *traffic.Recorder, v any) {
 	tr.Add(0, uint64(len(b)))
 }
 
+// relayV1InboundSrcMatchesRemotePeer 校驗 JSON 聲明的 src_id 可解析為 peer.ID 且與實際入站連線一致（防偽造 src 繞過限流／污染轉發）。
+func relayV1InboundSrcMatchesRemotePeer(remote peer.ID, claimedSrcID string) bool {
+	if remote == "" || strings.TrimSpace(claimedSrcID) == "" {
+		return false
+	}
+	pid, err := peer.Decode(strings.TrimSpace(claimedSrcID))
+	if err != nil {
+		return false
+	}
+	return pid == remote
+}
+
+func relayV1SigBlockPresent(sig chatrelay.SignatureBlock) bool {
+	return strings.TrimSpace(sig.Algorithm) != "" && strings.TrimSpace(sig.Value) != ""
+}
+
 // ForwardRelayConnect 將 A 的 connect 轉發給 B 並把響應寫回 A；str 為 A→R 的流（首幀已讀入 req）。
 func ForwardRelayConnect(ctx context.Context, h host.Host, tbl *ChatRelayV1Table, tr *traffic.Recorder, str network.Stream, req *chatrelay.RelayConnectRequest) {
 	defer str.Close()
@@ -207,7 +223,12 @@ func ForwardRelayConnect(ctx context.Context, h host.Host, tbl *ChatRelayV1Table
 	if req == nil {
 		return
 	}
-	if tbl != nil && !tbl.AllowConnectForward(strings.TrimSpace(req.SrcID)) {
+	inbound := str.Conn().RemotePeer()
+	inboundStr := inbound.String()
+	if tbl != nil && !tbl.AllowConnectForward(inboundStr) {
+		return
+	}
+	if !relayV1InboundSrcMatchesRemotePeer(inbound, req.SrcID) || !relayV1SigBlockPresent(req.Signature) {
 		return
 	}
 	dstPID, err := peer.Decode(strings.TrimSpace(req.DstID))
@@ -251,6 +272,10 @@ func ForwardRelayHandshake(ctx context.Context, h host.Host, tr *traffic.Recorde
 	if req == nil {
 		return
 	}
+	inbound := str.Conn().RemotePeer()
+	if !relayV1InboundSrcMatchesRemotePeer(inbound, req.SrcID) || !relayV1SigBlockPresent(req.Signature) {
+		return
+	}
 	dstPID, err := peer.Decode(strings.TrimSpace(req.DstID))
 	if err != nil {
 		return
@@ -280,6 +305,10 @@ func ForwardRelayData(ctx context.Context, h host.Host, tbl *ChatRelayV1Table, t
 	defer str.Close()
 	_ = str.SetDeadline(time.Now().Add(45 * time.Second))
 	if frame == nil {
+		return
+	}
+	inbound := str.Conn().RemotePeer()
+	if !relayV1InboundSrcMatchesRemotePeer(inbound, frame.SrcID) {
 		return
 	}
 	now := time.Now().Unix()
@@ -322,7 +351,12 @@ func ForwardRelayHeartbeat(ctx context.Context, h host.Host, tbl *ChatRelayV1Tab
 	if ping == nil {
 		return
 	}
-	if tbl != nil && !tbl.AllowHeartbeatForward(strings.TrimSpace(ping.SrcID)) {
+	inbound := str.Conn().RemotePeer()
+	inboundStr := inbound.String()
+	if tbl != nil && !tbl.AllowHeartbeatForward(inboundStr) {
+		return
+	}
+	if !relayV1InboundSrcMatchesRemotePeer(inbound, ping.SrcID) || !relayV1SigBlockPresent(ping.Signature) {
 		return
 	}
 	now := time.Now().Unix()
