@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +25,11 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/binding"
 	"github.com/chenjia404/meshproxy/internal/discovery"
-	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
 )
 
 // ipfsAvatarPinner 可選：將頭像／聊天附件寫入嵌入式 IPFS 並取得 CID（由 app 注入）。
@@ -166,11 +168,16 @@ func (s *Service) keepRelaysConnected(max int) {
 		return
 	}
 
-	// Shuffle to avoid always dialing the same relays.
-	rand.Shuffle(len(relays), func(i, j int) { relays[i], relays[j] = relays[j], relays[i] })
+	descs := make([]*discovery.NodeDescriptor, 0, len(relays))
+	for _, d := range relays {
+		if d != nil {
+			descs = append(descs, d)
+		}
+	}
+	sortRelayDescriptorsByStartedAtThenShuffleTies(descs)
 
 	connected := 0
-	for _, relayDesc := range relays {
+	for _, relayDesc := range descs {
 		if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer {
 			continue
 		}
@@ -2143,6 +2150,40 @@ func (s *Service) sendViaRelay(peerID string, v any) error {
 	return errors.New("no relay path available")
 }
 
+// relaySortKeyUnix 升序：啟動越早越優先；未知（0）排最後。
+func relaySortKeyUnix(d *discovery.NodeDescriptor) int64 {
+	if d == nil || d.StartedAtUnix == 0 {
+		return math.MaxInt64
+	}
+	return d.StartedAtUnix
+}
+
+// sortRelayDescriptorsByStartedAtThenShuffleTies 依啟動時間排序，相同時間戳隨機打亂避免熱點。
+func sortRelayDescriptorsByStartedAtThenShuffleTies(descs []*discovery.NodeDescriptor) {
+	if len(descs) <= 1 {
+		return
+	}
+	sort.Slice(descs, func(i, j int) bool {
+		ki, kj := relaySortKeyUnix(descs[i]), relaySortKeyUnix(descs[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return descs[i].PeerID < descs[j].PeerID
+	})
+	i := 0
+	for i < len(descs) {
+		k := relaySortKeyUnix(descs[i])
+		j := i + 1
+		for j < len(descs) && relaySortKeyUnix(descs[j]) == k {
+			j++
+		}
+		if j-i > 1 {
+			rand.Shuffle(j-i, func(a, b int) { descs[i+a], descs[i+b] = descs[i+b], descs[i+a] })
+		}
+		i = j
+	}
+}
+
 func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID, error) {
 	if s.discovery == nil {
 		return nil, errors.New("discovery store not available")
@@ -2155,15 +2196,24 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 		limit = 1
 	}
 
-	// Shuffle relay list to randomize selection.
-	rand.Shuffle(len(all), func(i, j int) { all[i], all[j] = all[j], all[i] })
-
-	connected := make([]peer.ID, 0, min(limit, len(all)))
-	disconnected := make([]peer.ID, 0, min(limit, len(all)))
+	candidates := make([]*discovery.NodeDescriptor, 0, len(all))
 	for _, relayDesc := range all {
 		if relayDesc == nil || relayDesc.PeerID == "" || relayDesc.PeerID == s.localPeer || relayDesc.PeerID == targetPeerID {
 			continue
 		}
+		if _, err := peer.Decode(relayDesc.PeerID); err != nil {
+			continue
+		}
+		candidates = append(candidates, relayDesc)
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("no relay path available")
+	}
+	sortRelayDescriptorsByStartedAtThenShuffleTies(candidates)
+
+	connected := make([]peer.ID, 0, min(limit, len(candidates)))
+	disconnected := make([]peer.ID, 0, min(limit, len(candidates)))
+	for _, relayDesc := range candidates {
 		pid, err := peer.Decode(relayDesc.PeerID)
 		if err != nil {
 			continue

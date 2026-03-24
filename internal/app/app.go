@@ -64,19 +64,19 @@ type App struct {
 	chat       *chat.Service
 	meshServer *meshserver.Manager
 
-	circuitStore   *store.CircuitStore
-	pathSelector   *client.PathSelector
-	circuitManager *client.CircuitManager
-	streamMgr      *client.StreamManager
-	recentErrors   *api.RecentErrorsStore
-	relayCache     *relaycache.Cache
-	bootstrapCache *relaycache.Cache
-	selfDesc           *discovery.NodeDescriptor
+	circuitStore         *store.CircuitStore
+	pathSelector         *client.PathSelector
+	circuitManager       *client.CircuitManager
+	streamMgr            *client.StreamManager
+	recentErrors         *api.RecentErrorsStore
+	relayCache           *relaycache.Cache
+	bootstrapCache       *relaycache.Cache
+	selfDesc             *discovery.NodeDescriptor
 	selfPeerExchangeDesc *discovery.NodeDescriptor // same as selfDesc plus signed started_at_unix; used for /peer-exchange/1.0.1 only
-	updater            *update.Service
-	autoUpdateMu   sync.RWMutex
-	autoUpdate     bool
-	traffic        *traffic.Recorder
+	updater              *update.Service
+	autoUpdateMu         sync.RWMutex
+	autoUpdate           bool
+	traffic              *traffic.Recorder
 
 	peerExchangeOnce sync.Map
 	peerExchangeDial sync.Map
@@ -2096,6 +2096,13 @@ func (a *App) handlePeerExchangeStream(stream network.Stream) {
 func (a *App) applyPeerExchange(msg *discovery.PeerExchangeMessage) {
 	if msg == nil || a.discovery == nil {
 		return
+	}
+	// 持久化對端 Sender（含 version / started_at_unix，見 peer-exchange/1.0.1），供 discovery 與聊天中繼排序使用。
+	if msg.Sender != nil && msg.Sender.PeerID != "" && msg.Sender.PeerID != a.PeerID() {
+		if ok, err := discovery.VerifyDescriptor(msg.Sender); err == nil && ok {
+			senderCopy := *msg.Sender
+			a.discovery.Store().Upsert(&senderCopy)
+		}
 	}
 	for _, entry := range msg.Entries {
 		desc := entry.Descriptor
