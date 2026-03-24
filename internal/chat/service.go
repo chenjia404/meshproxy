@@ -54,6 +54,17 @@ type Service struct {
 
 	offlineStoreNodes []offlinestore.OfflineStoreNode
 
+	// ChatRelay V1（《聊天中继.md》）：按目標 peer 復用會話。
+	relayV1SessionsMu     sync.Mutex // 僅保護 relayV1Sessions map 本身；單會話狀態用 relayV1PeerSession.mu。
+	relayV1Sessions       map[string]*relayV1PeerSession
+	relayV1BMu            sync.Mutex
+	relayV1BConnect       map[string]relayV1BConnReg // session_id -> 已接受的 connect
+	relayV1BKeys          map[string]relayV1KeyEntry // "session_id\x00src_id" -> 密鑰
+	relayV1BBySrc         map[string][]string        // 每 src 的 session_id FIFO（按源淘汰）
+	relayV1BLastPurge     time.Time
+	relayV1BLastConnectAt map[string]time.Time
+	relayV1BLastHbAt      map[string]time.Time
+
 	autoConnectSeen      sync.Map
 	profileSyncSeen      sync.Map
 	avatarFetchSeen      sync.Map
@@ -1780,12 +1791,12 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 		}
 		if sendAck {
 			ackWire := SessionAcceptAck{
-				Type:             MessageTypeSessionAcceptAck,
-				RequestID:        accept.RequestID,
+				Type:           MessageTypeSessionAcceptAck,
+				RequestID:      accept.RequestID,
 				ConversationID: targetConvID,
-				FromPeerID:       s.localPeer,
-				ToPeerID:         accept.FromPeerID,
-				SentAtUnix:       time.Now().UTC().UnixMilli(),
+				FromPeerID:     s.localPeer,
+				ToPeerID:       accept.FromPeerID,
+				SentAtUnix:     time.Now().UTC().UnixMilli(),
 			}
 			_ = s.sendFriendControlEnvelope(accept.FromPeerID, ackWire, MessageTypeSessionAcceptAck, accept.RequestID)
 		}
@@ -1855,12 +1866,12 @@ func (s *Service) handleIncomingSessionAcceptEnvelope(accept SessionAccept, publ
 	}
 	if sendAck {
 		ackWire := SessionAcceptAck{
-			Type:             MessageTypeSessionAcceptAck,
-			RequestID:        accept.RequestID,
+			Type:           MessageTypeSessionAcceptAck,
+			RequestID:      accept.RequestID,
 			ConversationID: convID,
-			FromPeerID:       s.localPeer,
-			ToPeerID:         accept.FromPeerID,
-			SentAtUnix:       time.Now().UTC().UnixMilli(),
+			FromPeerID:     s.localPeer,
+			ToPeerID:       accept.FromPeerID,
+			SentAtUnix:     time.Now().UTC().UnixMilli(),
 		}
 		_ = s.sendFriendControlEnvelope(accept.FromPeerID, ackWire, MessageTypeSessionAcceptAck, accept.RequestID)
 	}
@@ -2113,7 +2124,7 @@ func isAvatarEnvelope(v any) bool {
 
 func (s *Service) sendViaRelay(peerID string, v any) error {
 	const relayAttemptLimit = 5
-	relays, err := s.pickRelayCandidates(peerID, relayAttemptLimit)
+	relays, err := s.relayV1RelayCandidatesWithPreferred(peerID, relayAttemptLimit)
 	if err != nil {
 		return err
 	}
@@ -2128,53 +2139,11 @@ func (s *Service) sendViaRelay(peerID string, v any) error {
 
 	var lastErr error
 	for _, relayPID := range relays {
-		path := []string{relayPID.String(), peerID}
-		tunnelID := uuid.NewString()
-
-		ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
-		str, openErr := s.host.NewStream(ctx, relayPID, p2p.ProtocolChatRelayE2E)
-		cancel()
-		if openErr != nil {
-			lastErr = openErr
+		if err := s.sendViaRelayV1(relayPID, peerID, payload); err != nil {
+			lastErr = err
 			continue
 		}
-
-		func() {
-			defer str.Close()
-			header := tunnel.RouteHeader{
-				Version:    1,
-				TunnelID:   tunnelID,
-				Path:       path,
-				HopIndex:   0,
-				TargetExit: peerID,
-			}
-			if err := tunnel.WriteJSONFrame(str, header); err != nil {
-				lastErr = err
-				return
-			}
-			sess, err := tunnel.ClientHandshake(str, tunnelID)
-			if err != nil {
-				lastErr = err
-				return
-			}
-			frame, err := sess.Seal(tunnel.FrameTypeData, payload)
-			if err != nil {
-				lastErr = err
-				return
-			}
-			if err := tunnel.WriteJSONFrame(str, frame); err != nil {
-				lastErr = err
-				return
-			}
-			if closeFrame, err := sess.Seal(tunnel.FrameTypeClose, nil); err == nil {
-				_ = tunnel.WriteJSONFrame(str, closeFrame)
-			}
-			lastErr = nil
-		}()
-
-		if lastErr == nil {
-			return nil
-		}
+		return nil
 	}
 	if lastErr != nil {
 		return lastErr

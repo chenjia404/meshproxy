@@ -23,6 +23,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/api"
 	"github.com/chenjia404/meshproxy/internal/chat"
+	"github.com/chenjia404/meshproxy/internal/chatrelay"
 	"github.com/chenjia404/meshproxy/internal/client"
 	"github.com/chenjia404/meshproxy/internal/config"
 	"github.com/chenjia404/meshproxy/internal/discovery"
@@ -61,8 +62,9 @@ type App struct {
 	exitSocks5 *exit.Socks5Server
 	localAPI   *api.LocalAPI
 	ipfsEmb    *ipfsnode.EmbeddedIPFS
-	chat       *chat.Service
-	meshServer *meshserver.Manager
+	chat              *chat.Service
+	chatRelayV1Table  *relay.ChatRelayV1Table // 《聊天中继.md》V1 中繼轉發表（僅 relay 模式寫入）
+	meshServer        *meshserver.Manager
 
 	circuitStore         *store.CircuitStore
 	pathSelector         *client.PathSelector
@@ -279,6 +281,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	a.chatRelayV1Table = relay.NewChatRelayV1Table()
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	if a.ipfsEmb != nil {
 		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
@@ -415,6 +418,22 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 				return
 			}
 			chatSvc.HandleRelayE2EStreamWithHeader(str, header)
+		})
+	}
+
+	// ChatRelay V1（《聊天中继.md》）：connect / handshake / data / heartbeat
+	if chatSvc != nil {
+		a.Host().SetStreamHandler(chatrelay.ProtocolRelayConnect, func(str network.Stream) {
+			a.dispatchRelayV1Connect(str)
+		})
+		a.Host().SetStreamHandler(chatrelay.ProtocolRelayHandshake, func(str network.Stream) {
+			a.dispatchRelayV1Handshake(str)
+		})
+		a.Host().SetStreamHandler(chatrelay.ProtocolRelayData, func(str network.Stream) {
+			a.dispatchRelayV1Data(str)
+		})
+		a.Host().SetStreamHandler(chatrelay.ProtocolRelayHeartbeat, func(str network.Stream) {
+			a.dispatchRelayV1Heartbeat(str)
 		})
 	}
 
