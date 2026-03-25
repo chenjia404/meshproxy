@@ -254,8 +254,9 @@
 
 语义：
 
-- 只返回本地已知且 `sync.subscribed=true` 的频道
-- 当前按 `public_channel_sync_state.updated_at DESC, public_channels.id DESC` 排序
+- 返回本地已知且 `sync.subscribed=true` 的频道
+- 同时也返回当前节点自己创建的公开频道，即使该频道当前未处于 `subscribed=true`
+- 当前优先按订阅更新时间排序；如果是当前节点自己创建但未订阅的频道，则回退按频道自身 `updated_at` 排序，最后再按 `public_channels.id DESC`
 - 返回 `ChannelSummary[]`
 
 ### 5.4 获取频道详情

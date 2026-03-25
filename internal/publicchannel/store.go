@@ -988,14 +988,17 @@ func (s *Store) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, error
 	return out, nil
 }
 
-func (s *Store) ListSubscribedChannels() ([]ChannelSummary, error) {
+func (s *Store) ListSubscribedChannels(localOwnerPeerID string) ([]ChannelSummary, error) {
 	rows, err := s.db.Query(`
 		SELECT c.channel_id
 		FROM public_channels c
-		JOIN public_channel_sync_state s ON s.channel_db_id = c.id
-		WHERE s.subscribed = 1
-		ORDER BY s.updated_at DESC, c.id DESC
-	`)
+		LEFT JOIN public_channel_sync_state s ON s.channel_db_id = c.id
+		WHERE COALESCE(s.subscribed, 0) = 1 OR c.owner_peer_id = ?
+		ORDER BY CASE
+			WHEN COALESCE(s.subscribed, 0) = 1 THEN s.updated_at
+			ELSE c.updated_at
+		END DESC, c.id DESC
+	`, stringsTrim(localOwnerPeerID))
 	if err != nil {
 		return nil, err
 	}

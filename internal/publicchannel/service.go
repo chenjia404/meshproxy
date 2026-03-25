@@ -168,7 +168,7 @@ func (s *Service) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, err
 }
 
 func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
-	return s.store.ListSubscribedChannels()
+	return s.store.ListSubscribedChannels(s.localPeer)
 }
 
 func (s *Service) ListProviders(channelID string) ([]ChannelProvider, error) {

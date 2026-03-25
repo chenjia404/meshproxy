@@ -594,14 +594,17 @@ func TestListSubscribedChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("want 2 subscribed channels, got %d", len(items))
+	if len(items) != 3 {
+		t.Fatalf("want 3 channels including owned unsubscribed one, got %d", len(items))
 	}
 	if items[0].Profile.ChannelID != first.Profile.ChannelID {
 		t.Fatalf("want first subscribed channel %q, got %q", first.Profile.ChannelID, items[0].Profile.ChannelID)
 	}
 	if items[1].Profile.ChannelID != third.Profile.ChannelID {
-		t.Fatalf("want second subscribed channel %q, got %q", third.Profile.ChannelID, items[1].Profile.ChannelID)
+		t.Fatalf("want second channel %q, got %q", third.Profile.ChannelID, items[1].Profile.ChannelID)
+	}
+	if items[2].Profile.ChannelID != second.Profile.ChannelID {
+		t.Fatalf("want owned unsubscribed channel %q, got %q", second.Profile.ChannelID, items[2].Profile.ChannelID)
 	}
 }
 
