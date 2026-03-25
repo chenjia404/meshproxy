@@ -27,8 +27,8 @@ import (
 	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	"github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
-	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/update"
 )
@@ -38,7 +38,7 @@ import (
 var consoleFS embed.FS
 
 // ChatPageCID 是 /chat 前端的 IPFS CID。請直接在程式碼中更新這個常量。
-const ChatPageCID = "QmQNFDvyviobckokk2tQANtB4GUpXJVmZB1PjdJgJFxN6k"
+const ChatPageCID = "QmZyE9d7Th3Eae4P3qK2p6zyGMS7c4aBPG6c7yq1172pp7"
 
 // StatusProvider defines the subset of application state required by the local API.
 type StatusProvider interface {
