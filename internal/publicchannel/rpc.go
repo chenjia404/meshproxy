@@ -53,7 +53,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.GetChannelHead(body.ChannelID)
-	case "get_channel_messages", "list_channel_messages":
+	case "get_channel_messages":
 		var body struct {
 			ChannelID       string `json:"channel_id"`
 			BeforeMessageID int64  `json:"before_message_id,omitempty"`
