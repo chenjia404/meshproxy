@@ -187,6 +187,7 @@ type LocalAPIOpts struct {
 	MeshServer     MeshServerProvider
 	UpdateService  UpdateProvider
 	UpdateSettings UpdateSettingsProvider
+	Identity       IdentityProvider
 	// IPFS 嵌入式閘道與 API（可選）；非空且設定啟用時註冊 /ipfs/ 與 /api/ipfs/*。
 	IPFS *ipfsnode.EmbeddedIPFS
 }
@@ -199,6 +200,11 @@ type UpdateProvider interface {
 type UpdateSettingsProvider interface {
 	GetAutoUpdate() bool
 	SetAutoUpdate(enabled bool) error
+}
+
+type IdentityProvider interface {
+	ExportIdentityPrivateKeyBase58() (privateKeyBase58 string, peerID string, err error)
+	ImportIdentityPrivateKeyBase58(encoded string) (peerID string, err error)
 }
 
 // MeshServerProvider exposes centralized server chat APIs.
@@ -407,6 +413,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/ws", api.handleChatWebSocket)
 	mux.HandleFunc("/api/v1/chat/network/status", api.handleChatNetworkStatus)
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
+	mux.HandleFunc("/api/v1/identity/private-key/export", api.handleIdentityPrivateKeyExport)
+	mux.HandleFunc("/api/v1/identity/private-key/import", api.handleIdentityPrivateKeyImport)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
 	mux.HandleFunc("/api/v1/public-channels", api.handlePublicChannels)
@@ -1082,6 +1090,57 @@ func (a *LocalAPI) handleChatMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, profile)
+}
+
+func (a *LocalAPI) handleIdentityPrivateKeyExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.Identity == nil {
+		http.Error(w, "identity service not available", http.StatusNotFound)
+		return
+	}
+	privateKeyBase58, peerID, err := a.opts.Identity.ExportIdentityPrivateKeyBase58()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"encoding":            "base58",
+		"peer_id":             peerID,
+		"private_key_base58":  privateKeyBase58,
+		"requires_restart":    false,
+	})
+}
+
+func (a *LocalAPI) handleIdentityPrivateKeyImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.Identity == nil {
+		http.Error(w, "identity service not available", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		PrivateKeyBase58 string `json:"private_key_base58"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	peerID, err := a.opts.Identity.ImportIdentityPrivateKeyBase58(strings.TrimSpace(body.PrivateKeyBase58))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"ok":                true,
+		"encoding":          "base58",
+		"peer_id":           peerID,
+		"requires_restart":  true,
+	})
 }
 
 func (a *LocalAPI) handleChatProfile(w http.ResponseWriter, r *http.Request) {

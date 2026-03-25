@@ -479,6 +479,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			MeshServer:          &meshServerAPIAdapter{app: a},
 			UpdateService:       a,
 			UpdateSettings:      a,
+			Identity:            a,
 			IPFS:                a.ipfsEmb,
 		}
 		localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, apiOpts)
@@ -565,6 +566,24 @@ func (a *App) PeerID() string {
 		return ""
 	}
 	return id.String()
+}
+
+func (a *App) ExportIdentityPrivateKeyBase58() (string, string, error) {
+	if a == nil || a.idMgr == nil {
+		return "", "", fmt.Errorf("identity not available")
+	}
+	key, err := a.idMgr.ExportPrivateKeyBase58()
+	if err != nil {
+		return "", "", err
+	}
+	return key, a.PeerID(), nil
+}
+
+func (a *App) ImportIdentityPrivateKeyBase58(encoded string) (string, error) {
+	if a == nil || a.idMgr == nil {
+		return "", fmt.Errorf("identity not available")
+	}
+	return a.idMgr.ImportPrivateKeyBase58(encoded)
 }
 
 // Mode returns the configured node mode.
