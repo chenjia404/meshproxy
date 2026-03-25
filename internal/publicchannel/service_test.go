@@ -281,6 +281,119 @@ func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 	}
 }
 
+func TestSyncAfterFallsBackFromStaleProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	stalePriv, stalePeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12015")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12016")
+	addr3 := mustMultiaddr(t, "/ip6/::1/tcp/12017")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleHost, err := mn.AddPeer(stalePriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), staleHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(staleHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePS, err := pubsub.NewGossipSub(ctx, staleHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-sync-fallback.db"))
+	staleSvc := mustTestService(t, ctx, staleHost, stalePS, stalePriv, filepath.Join(t.TempDir(), "stale-sync-fallback.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-sync-fallback.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "sync-fallback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	for i := 1; i <= 20; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("sync-%02d", i)}); err != nil {
+			t.Fatalf("create initial message %d: %v", i, err)
+		}
+	}
+
+	if _, err := staleSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatalf("stale subscribe: %v", err)
+	}
+	if err := staleSvc.UnsubscribeChannel(channelID); err != nil {
+		t.Fatalf("stale unsubscribe: %v", err)
+	}
+
+	for i := 21; i <= 40; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("sync-%02d", i)}); err != nil {
+			t.Fatalf("create newer message %d: %v", i, err)
+		}
+	}
+
+	if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{stalePeerID}, 0); err != nil {
+		t.Fatalf("reader subscribe from stale provider: %v", err)
+	}
+	now := time.Now().Unix()
+	if err := readerSvc.store.UpsertProvider(channelID, stalePeerID, "seed", now); err != nil {
+		t.Fatalf("upsert stale provider: %v", err)
+	}
+	if err := readerSvc.store.UpsertProvider(channelID, ownerPeerID, "seed", now-1); err != nil {
+		t.Fatalf("upsert owner provider: %v", err)
+	}
+
+	if err := readerSvc.SyncChannel(ctx, channelID); err != nil {
+		t.Fatal(err)
+	}
+
+	msg40, err := readerSvc.GetChannelMessage(channelID, 40)
+	if err != nil {
+		t.Fatalf("reader should fetch newer message from owner after stale provider: %v", err)
+	}
+	if msg40.MessageID != 40 {
+		t.Fatalf("want message 40, got %d", msg40.MessageID)
+	}
+	state, err := readerSvc.store.GetChannelSyncState(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LastSyncedSeq != 40 {
+		t.Fatalf("want last_synced_seq 40, got %d", state.LastSyncedSeq)
+	}
+}
+
 func TestLoadMessagesFromProvidersFallsBackToNextProvider(t *testing.T) {
 	t.Parallel()
 

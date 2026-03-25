@@ -736,18 +736,29 @@ func (s *Service) syncAfter(ctx context.Context, channelID string, afterSeq int6
 	if len(peers) == 0 {
 		return nil
 	}
-	var lastErr error
+	var (
+		lastErr    error
+		hadSuccess bool
+	)
 	for _, peerID := range peers {
-		if err := s.syncAfterWithPeer(ctx, peerID, channelID, afterSeq); err != nil {
+		advanced, err := s.syncAfterWithPeer(ctx, peerID, channelID, afterSeq)
+		if err != nil {
 			lastErr = err
 			continue
 		}
+		hadSuccess = true
+		// provider 成功响应并不代表已经补到新 change；遇到滞后副本时要继续尝试后续 provider。
+		if advanced {
+			return nil
+		}
+	}
+	if hadSuccess {
 		return nil
 	}
 	return lastErr
 }
 
-func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID string, afterSeq int64) error {
+func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID string, afterSeq int64) (bool, error) {
 	nextAfter := afterSeq
 	currentLastSeq := afterSeq
 	for {
@@ -758,10 +769,10 @@ func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID
 		}{ChannelID: channelID, AfterSeq: nextAfter, Limit: DefaultChangesLimit}
 		var resp GetChangesResponse
 		if err := s.rpcCall(ctx, sourcePeerID, "get_channel_changes", body, &resp); err != nil {
-			return err
+			return false, err
 		}
 		if err := s.applyChanges(ctx, sourcePeerID, channelID, resp); err != nil {
-			return err
+			return false, err
 		}
 		if resp.CurrentLastSeq > currentLastSeq {
 			currentLastSeq = resp.CurrentLastSeq
@@ -774,7 +785,10 @@ func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID
 	now := time.Now().Unix()
 	// 只有整段 change 分页补齐后，才能推进 last_seen_seq / last_synced_seq，
 	// 否则会把尚未拉到的中间页永久跳过去。
-	return s.store.UpdateSyncState(channelID, currentLastSeq, currentLastSeq, true, now)
+	if err := s.store.UpdateSyncState(channelID, currentLastSeq, currentLastSeq, true, now); err != nil {
+		return false, err
+	}
+	return currentLastSeq > afterSeq, nil
 }
 
 func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID string, resp GetChangesResponse) error {
