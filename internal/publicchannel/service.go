@@ -516,15 +516,22 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 	if err := s.store.UpdateLoadedRange(channelID, remoteMessages, now); err != nil {
 		return SubscribeResult{}, err
 	}
-	if err := s.store.UpdateSyncState(channelID, maxInt64(lastSeenSeq, remoteHead.LastSeq), remoteHead.LastSeq, true, now); err != nil {
-		return SubscribeResult{}, err
-	}
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
 	s.ensureProvided(channelID)
-	if err := s.syncAfter(ctx, channelID, remoteHead.LastSeq); err != nil {
-		log.Printf("[publicchannel] post-subscribe sync %s: %v", channelID, err)
+	resumeFrom := clampInt64(lastSeenSeq, 0, remoteHead.LastSeq)
+	if resumeFrom <= 0 {
+		if err := s.store.UpdateSyncState(channelID, remoteHead.LastSeq, remoteHead.LastSeq, true, now); err != nil {
+			return SubscribeResult{}, err
+		}
+	} else {
+		if err := s.store.UpdateSyncState(channelID, resumeFrom, resumeFrom, true, now); err != nil {
+			return SubscribeResult{}, err
+		}
+		if err := s.syncAfter(ctx, channelID, resumeFrom); err != nil {
+			log.Printf("[publicchannel] post-subscribe resume sync %s from %d: %v", channelID, resumeFrom, err)
+		}
 	}
 	return SubscribeResult{
 		Profile:   remoteProfile,
@@ -704,25 +711,43 @@ func (s *Service) syncAfter(ctx context.Context, channelID string, afterSeq int6
 	if len(peers) == 0 {
 		return nil
 	}
-	body := struct {
-		ChannelID string `json:"channel_id"`
-		AfterSeq  int64  `json:"after_seq"`
-		Limit     int    `json:"limit"`
-	}{ChannelID: channelID, AfterSeq: afterSeq, Limit: DefaultChangesLimit}
 	var lastErr error
 	for _, peerID := range peers {
-		var resp GetChangesResponse
-		if err := s.rpcCall(ctx, peerID, "get_channel_changes", body, &resp); err != nil {
-			lastErr = err
-			continue
-		}
-		if err := s.applyChanges(ctx, peerID, channelID, resp); err != nil {
+		if err := s.syncAfterWithPeer(ctx, peerID, channelID, afterSeq); err != nil {
 			lastErr = err
 			continue
 		}
 		return nil
 	}
 	return lastErr
+}
+
+func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID string, afterSeq int64) error {
+	nextAfter := afterSeq
+	currentLastSeq := afterSeq
+	for {
+		body := struct {
+			ChannelID string `json:"channel_id"`
+			AfterSeq  int64  `json:"after_seq"`
+			Limit     int    `json:"limit"`
+		}{ChannelID: channelID, AfterSeq: nextAfter, Limit: DefaultChangesLimit}
+		var resp GetChangesResponse
+		if err := s.rpcCall(ctx, sourcePeerID, "get_channel_changes", body, &resp); err != nil {
+			return err
+		}
+		if err := s.applyChanges(ctx, sourcePeerID, channelID, resp); err != nil {
+			return err
+		}
+		if resp.CurrentLastSeq > currentLastSeq {
+			currentLastSeq = resp.CurrentLastSeq
+		}
+		if !resp.HasMore || resp.NextAfterSeq <= nextAfter {
+			break
+		}
+		nextAfter = resp.NextAfterSeq
+	}
+	now := time.Now().Unix()
+	return s.store.UpdateSyncState(channelID, currentLastSeq, currentLastSeq, true, now)
 }
 
 func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID string, resp GetChangesResponse) error {
@@ -780,7 +805,6 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 	}{ChannelID: channelID}, &head); err == nil {
 		if err := verifyHead(head); err == nil {
 			_ = s.store.ApplyHead(head)
-			_ = s.store.UpdateSyncState(channelID, head.LastSeq, resp.NextAfterSeq, true, time.Now().Unix())
 		}
 	}
 	return nil
@@ -988,11 +1012,14 @@ func ptrInt64(v int64) *int64 { return &v }
 
 func ptrBool(v bool) *bool { return &v }
 
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
+func clampInt64(v, minV, maxV int64) int64 {
+	if v < minV {
+		return minV
 	}
-	return b
+	if v > maxV {
+		return maxV
+	}
+	return v
 }
 
 func firstNonEmptyString(v, fallback string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -160,6 +161,124 @@ func TestSubscribeReceivesPubSubAndSyncsChanges(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	t.Fatal("reader did not receive second message via pubsub+sync")
+}
+
+func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12011")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12012")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-resume.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-resume.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "resume-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	for i := 1; i <= 140; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("msg-%03d", i)}); err != nil {
+			t.Fatalf("create message %d: %v", i, err)
+		}
+	}
+
+	var remoteProfile ChannelProfile
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_profile", struct {
+		ChannelID string `json:"channel_id"`
+	}{ChannelID: channelID}, &remoteProfile); err != nil {
+		t.Fatalf("rpc profile: %v", err)
+	}
+	if err := verifyProfile(remoteProfile); err != nil {
+		t.Fatalf("verify profile: %v", err)
+	}
+	var remoteHead ChannelHead
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_head", struct {
+		ChannelID string `json:"channel_id"`
+	}{ChannelID: channelID}, &remoteHead); err != nil {
+		t.Fatalf("rpc head: %v", err)
+	}
+	if err := verifyHead(remoteHead); err != nil {
+		t.Fatalf("verify head: %v", err)
+	}
+	var remoteMsgs GetMessagesResponse
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_messages", struct {
+		ChannelID string `json:"channel_id"`
+		Limit     int    `json:"limit"`
+	}{ChannelID: channelID, Limit: DefaultPageLimit}, &remoteMsgs); err != nil {
+		t.Fatalf("rpc messages: %v", err)
+	}
+	for _, item := range remoteMsgs.Items {
+		if err := readerSvc.verifyMessageAgainstProfile(remoteProfile, item); err != nil {
+			t.Fatalf("verify message %d: %v", item.MessageID, err)
+		}
+	}
+
+	result, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Head.LastSeq != 140 {
+		t.Fatalf("want remote last seq 140, got %d", result.Head.LastSeq)
+	}
+
+	msg11, err := readerSvc.GetChannelMessage(channelID, 11)
+	if err != nil {
+		t.Fatalf("message 11 should be resumed from changes: %v", err)
+	}
+	if msg11.MessageID != 11 {
+		t.Fatalf("want message 11, got %d", msg11.MessageID)
+	}
+	msg115, err := readerSvc.GetChannelMessage(channelID, 115)
+	if err != nil {
+		t.Fatalf("message 115 should be resumed across paginated changes: %v", err)
+	}
+	if msg115.MessageID != 115 {
+		t.Fatalf("want message 115, got %d", msg115.MessageID)
+	}
+
+	state, err := readerSvc.store.GetChannelSyncState(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LastSeenSeq != 140 {
+		t.Fatalf("want last_seen_seq 140, got %d", state.LastSeenSeq)
+	}
+	if state.LastSyncedSeq != 140 {
+		t.Fatalf("want last_synced_seq 140, got %d", state.LastSyncedSeq)
+	}
 }
 
 func TestCreateChannelFileMessagePinsToIPFS(t *testing.T) {

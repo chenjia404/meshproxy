@@ -60,6 +60,7 @@ func (s *Store) migrate() error {
 			last_seq INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
+			head_updated_at INTEGER NOT NULL DEFAULT 0,
 			profile_signature TEXT NOT NULL,
 			head_signature TEXT NOT NULL DEFAULT ''
 		)`,
@@ -119,6 +120,12 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate public channel db: %w", err)
 		}
 	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channels ADD COLUMN head_updated_at INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add head_updated_at: %w", err)
+	}
+	if _, err := s.db.Exec(`UPDATE public_channels SET head_updated_at=updated_at WHERE head_updated_at=0`); err != nil {
+		return fmt.Errorf("migrate public channel db backfill head_updated_at: %w", err)
+	}
 	return nil
 }
 
@@ -170,7 +177,7 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 	)
 	err := tx.QueryRow(`
 		SELECT id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
-		       last_message_id, last_seq, created_at, updated_at, profile_signature, head_signature
+		       last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
 		FROM public_channels WHERE channel_id=?
 	`, channelID).Scan(
 		&id,
@@ -184,6 +191,7 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 		&head.LastSeq,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
+		&head.UpdatedAt,
 		&profileSig,
 		&headSig,
 	)
@@ -197,7 +205,6 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 	head.OwnerPeerID = profile.OwnerPeerID
 	head.OwnerVersion = profile.OwnerVersion
 	head.ProfileVersion = profile.ProfileVersion
-	head.UpdatedAt = profile.UpdatedAt
 	head.Signature = headSig
 	return id, profile, head, nil
 }
@@ -222,10 +229,10 @@ func (s *Store) CreateOwnedChannel(profile ChannelProfile, head ChannelHead, now
 	res, err := tx.Exec(`
 		INSERT INTO public_channels(
 			channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
-			last_message_id, last_seq, created_at, updated_at, profile_signature, head_signature
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+			last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, profile.ChannelID, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio,
-		profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, profile.Signature, head.Signature)
+		profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
 	if err != nil {
 		return err
 	}
@@ -279,10 +286,10 @@ func (s *Store) CommitOwnedProfileChange(profile ChannelProfile, head ChannelHea
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channels
-		SET owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, last_message_id=?, last_seq=?, created_at=?, updated_at=?, profile_signature=?, head_signature=?
+		SET owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, last_message_id=?, last_seq=?, created_at=?, updated_at=?, head_updated_at=?, profile_signature=?, head_signature=?
 		WHERE id=?
 	`, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.ProfileVersion,
-		head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, profile.Signature, head.Signature, channelDBID); err != nil {
+		head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature, channelDBID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`
@@ -357,7 +364,7 @@ func (s *Store) CommitOwnedMessageChange(message ChannelMessage, head ChannelHea
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channels
-		SET owner_version=?, profile_version=?, last_message_id=?, last_seq=?, updated_at=?, head_signature=?
+		SET owner_version=?, profile_version=?, last_message_id=?, last_seq=?, head_updated_at=?, head_signature=?
 		WHERE id=?
 	`, head.OwnerVersion, head.ProfileVersion, head.LastMessageID, head.LastSeq, head.UpdatedAt, head.Signature, channelDBID); err != nil {
 		return err
@@ -418,10 +425,10 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 		res, err := tx.Exec(`
 			INSERT INTO public_channels(
 				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
-				last_message_id, last_seq, created_at, updated_at, profile_signature, head_signature
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+				last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`, profile.ChannelID, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio,
-			profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, profile.Signature, head.Signature)
+			profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
 		if err != nil {
 			return err
 		}
@@ -486,7 +493,7 @@ func (s *Store) ApplyHead(head ChannelHead) error {
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channels
-		SET owner_version=?, last_message_id=?, profile_version=?, last_seq=?, updated_at=?, head_signature=?
+		SET owner_version=?, last_message_id=?, profile_version=?, last_seq=?, head_updated_at=?, head_signature=?
 		WHERE id=?
 	`, head.OwnerVersion, head.LastMessageID, head.ProfileVersion, head.LastSeq, head.UpdatedAt, head.Signature, id); err != nil {
 		return err
@@ -568,7 +575,7 @@ func (s *Store) ApplyMessage(message ChannelMessage) error {
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channels
-		SET last_message_id=?, last_seq=?, updated_at=CASE WHEN updated_at < ? THEN ? ELSE updated_at END
+		SET last_message_id=?, last_seq=?, head_updated_at=CASE WHEN head_updated_at < ? THEN ? ELSE head_updated_at END
 		WHERE id=?
 	`, lastMessageID, lastSeq, message.UpdatedAt, message.UpdatedAt, channelDBID); err != nil {
 		return err
@@ -697,7 +704,7 @@ func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
 func (s *Store) GetChannelHead(channelID string) (ChannelHead, error) {
 	var head ChannelHead
 	err := s.db.QueryRow(`
-		SELECT owner_peer_id, owner_version, last_message_id, profile_version, last_seq, updated_at, head_signature
+		SELECT owner_peer_id, owner_version, last_message_id, profile_version, last_seq, head_updated_at, head_signature
 		FROM public_channels WHERE channel_id=?
 	`, channelID).Scan(
 		&head.OwnerPeerID,
