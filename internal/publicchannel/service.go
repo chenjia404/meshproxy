@@ -260,9 +260,12 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	if profile.OwnerPeerID != s.localPeer {
 		return ChannelSummary{}, errors.New("channel is not owned by local peer")
 	}
-	input.MessageRetentionMinutes = NormalizeRetentionMinutes(input.MessageRetentionMinutes)
-	if err := ValidateRetentionMinutes(input.MessageRetentionMinutes); err != nil {
-		return ChannelSummary{}, err
+	retentionMinutes := profile.MessageRetentionMinutes
+	if input.MessageRetentionMinutes != nil {
+		retentionMinutes = NormalizeRetentionMinutes(*input.MessageRetentionMinutes)
+		if err := ValidateRetentionMinutes(retentionMinutes); err != nil {
+			return ChannelSummary{}, err
+		}
 	}
 	now := time.Now().Unix()
 	profile.Name = strings.TrimSpace(input.Name)
@@ -271,7 +274,7 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	}
 	profile.Bio = strings.TrimSpace(input.Bio)
 	profile.Avatar = input.Avatar
-	profile.MessageRetentionMinutes = input.MessageRetentionMinutes
+	profile.MessageRetentionMinutes = retentionMinutes
 	profile.ProfileVersion++
 	profile.UpdatedAt = now
 	if err := signProfile(s.nodePriv, &profile); err != nil {
@@ -314,7 +317,7 @@ func (s *Service) UpdateChannelProfileWithAvatar(channelID, name, bio string, me
 		Name:                    firstNonEmptyString(name, profile.Name),
 		Bio:                     bio,
 		Avatar:                  avatar,
-		MessageRetentionMinutes: messageRetentionMinutes,
+		MessageRetentionMinutes: ptrInt(messageRetentionMinutes),
 	})
 }
 
@@ -1245,6 +1248,8 @@ func changeFromMessage(message ChannelMessage, providerPeerID string) ChannelCha
 func ptrInt64(v int64) *int64 { return &v }
 
 func ptrBool(v bool) *bool { return &v }
+
+func ptrInt(v int) *int { return &v }
 
 func clampInt64(v, minV, maxV int64) int64 {
 	if v < minV {

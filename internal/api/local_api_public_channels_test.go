@@ -102,8 +102,35 @@ func TestUpdatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 	if profile["message_retention_minutes"] != float64(120) {
 		t.Fatalf("want profile.message_retention_minutes 120, got %#v", profile["message_retention_minutes"])
 	}
-	if provider.updateChannelInput.MessageRetentionMinutes != 120 {
-		t.Fatalf("want update input retention 120, got %d", provider.updateChannelInput.MessageRetentionMinutes)
+	if provider.updateChannelInput.MessageRetentionMinutes == nil || *provider.updateChannelInput.MessageRetentionMinutes != 120 {
+		t.Fatalf("want update input retention 120, got %#v", provider.updateChannelInput.MessageRetentionMinutes)
+	}
+}
+
+func TestUpdatePublicChannelWithoutRetentionKeepsExistingSetting(t *testing.T) {
+	t.Parallel()
+
+	summary := publicchannel.ChannelSummary{
+		Profile: publicchannel.ChannelProfile{
+			ChannelID:               "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e125",
+			OwnerPeerID:             "12D3KooWTestOwner",
+			Name:                    "updated",
+			MessageRetentionMinutes: 120,
+		},
+	}
+	provider := &stubPublicChannelProvider{updateChannelResult: summary}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{PublicChannels: provider})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/public-channels/"+summary.Profile.ChannelID, bytes.NewBufferString(`{"name":"updated"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if provider.updateChannelInput.MessageRetentionMinutes != nil {
+		t.Fatalf("want omitted retention to stay nil, got %#v", provider.updateChannelInput.MessageRetentionMinutes)
 	}
 }
 

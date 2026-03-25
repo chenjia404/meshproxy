@@ -171,7 +171,7 @@ type UpdateChannelProfileInput struct {
 	Name                    string `json:"name"`
 	Bio                     string `json:"bio"`
 	Avatar                  Avatar `json:"avatar"`
-	MessageRetentionMinutes int    `json:"message_retention_minutes"`
+	MessageRetentionMinutes *int   `json:"message_retention_minutes,omitempty"`
 }
 
 type UpsertMessageInput struct {
