@@ -530,10 +530,14 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 	if err := s.applyInitialSnapshot(ctx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now); err != nil {
 		return SubscribeResult{}, err
 	}
+	filteredMessages, err := s.filterExpiredMessages(remoteProfile, remoteMessages)
+	if err != nil {
+		return SubscribeResult{}, err
+	}
 	return SubscribeResult{
 		Profile:   remoteProfile,
 		Head:      remoteHead,
-		Messages:  remoteMessages,
+		Messages:  filteredMessages,
 		Providers: providers,
 	}, nil
 }
@@ -567,17 +571,13 @@ func (s *Service) applyInitialSnapshot(ctx context.Context, channelID string, re
 	if err := s.store.ApplyHead(remoteHead); err != nil {
 		return err
 	}
-	appliedMessages := make([]ChannelMessage, 0, len(remoteMessages))
+	appliedMessages, err := s.filterExpiredMessages(remoteProfile, remoteMessages)
+	if err != nil {
+		return err
+	}
 	for _, item := range remoteMessages {
 		if err := s.applyVerifiedMessage(item); err != nil {
 			return err
-		}
-		expired, err := s.isMessageExpired(remoteProfile, item)
-		if err != nil {
-			return err
-		}
-		if !expired {
-			appliedMessages = append(appliedMessages, item)
 		}
 	}
 	if err := s.store.UpdateLoadedRange(channelID, appliedMessages, now); err != nil {
@@ -1040,6 +1040,20 @@ func (s *Service) isMessageExpired(profile ChannelProfile, message ChannelMessag
 	}
 	cutoff := time.Now().Unix() - int64(minutes)*60
 	return messageTime <= cutoff, nil
+}
+
+func (s *Service) filterExpiredMessages(profile ChannelProfile, messages []ChannelMessage) ([]ChannelMessage, error) {
+	filtered := make([]ChannelMessage, 0, len(messages))
+	for _, item := range messages {
+		expired, err := s.isMessageExpired(profile, item)
+		if err != nil {
+			return nil, err
+		}
+		if !expired {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 func (s *Service) ensureTopic(channelID string, subscribe bool) (*pubsub.Topic, error) {

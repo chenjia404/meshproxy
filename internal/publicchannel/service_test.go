@@ -331,6 +331,98 @@ func TestSubscribeReceivesPubSubAndSyncsChanges(t *testing.T) {
 	t.Fatal("reader did not receive second message via pubsub+sync")
 }
 
+func TestSubscribeChannelFiltersExpiredMessagesInResponse(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12005")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12006")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-subscribe-filter.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-subscribe-filter.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "retention-subscribe", MessageRetentionMinutes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+	profile, err := ownerSvc.store.GetChannelProfile(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := ownerSvc.store.GetChannelHead(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredAt := time.Now().Add(-2 * time.Minute).Unix()
+	expiredMsg := ChannelMessage{
+		ChannelID:     channelID,
+		MessageID:     1,
+		Version:       1,
+		Seq:           1,
+		OwnerVersion:  profile.OwnerVersion,
+		CreatorPeerID: ownerPeerID,
+		AuthorPeerID:  ownerPeerID,
+		CreatedAt:     expiredAt,
+		UpdatedAt:     time.Now().Unix(),
+		Content:       NormalizeMessageContent("expired", nil),
+		MessageType:   MessageTypeText,
+	}
+	if err := signMessage(ownerPriv, &expiredMsg); err != nil {
+		t.Fatal(err)
+	}
+	head.LastMessageID = expiredMsg.MessageID
+	head.LastSeq = expiredMsg.Seq
+	head.UpdatedAt = expiredMsg.UpdatedAt
+	if err := signHead(ownerPriv, &head); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerSvc.store.CommitOwnedMessageChange(expiredMsg, head, changeFromMessage(expiredMsg, ownerPeerID)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Messages) != 0 {
+		t.Fatalf("want expired snapshot messages to be filtered from subscribe response, got %d", len(result.Messages))
+	}
+	if _, err := readerSvc.store.GetChannelMessage(channelID, 1); err != sql.ErrNoRows {
+		t.Fatalf("want expired message filtered from local store too, got err=%v", err)
+	}
+}
+
 func TestSubscribeChannelRecordsPlaceholderBeforeSnapshot(t *testing.T) {
 	t.Parallel()
 
