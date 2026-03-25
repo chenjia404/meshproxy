@@ -159,7 +159,7 @@ func TestCleanupExpiredMessagesDeletesExpiredRows(t *testing.T) {
 		CreatorPeerID: localPeerID,
 		AuthorPeerID:  localPeerID,
 		CreatedAt:     expiredAt,
-		UpdatedAt:     expiredAt,
+		UpdatedAt:     now,
 		Content:       NormalizeMessageContent("expired", nil),
 		MessageType:   MessageTypeText,
 	}
@@ -230,6 +230,24 @@ func TestCleanupExpiredMessagesDeletesExpiredRows(t *testing.T) {
 	}
 	if state.LatestLoadedMessageID != 2 || state.OldestLoadedMessageID != 2 {
 		t.Fatalf("want loaded range reset to message 2, got latest=%d oldest=%d", state.LatestLoadedMessageID, state.OldestLoadedMessageID)
+	}
+}
+
+func TestIsMessageExpiredUsesCreatedAt(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	profile := ChannelProfile{MessageRetentionMinutes: 1}
+	message := ChannelMessage{
+		CreatedAt: time.Now().Add(-2 * time.Minute).Unix(),
+		UpdatedAt: time.Now().Unix(),
+	}
+	expired, err := svc.isMessageExpired(profile, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expired {
+		t.Fatal("expected message to expire based on created_at even if updated_at is newer")
 	}
 }
 

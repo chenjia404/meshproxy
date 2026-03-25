@@ -769,14 +769,14 @@ func (s *Store) cleanupExpiredChannelMessages(channelDBID, cutoffUnix, nowUnix i
 		WHERE channel_db_id=? AND message_id IN (
 			SELECT message_id
 			FROM public_channel_messages
-			WHERE channel_db_id=? AND updated_at<=?
+			WHERE channel_db_id=? AND created_at<=?
 		)
 	`, channelDBID, channelDBID, cutoffUnix); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`
 		DELETE FROM public_channel_messages
-		WHERE channel_db_id=? AND updated_at<=?
+		WHERE channel_db_id=? AND created_at<=?
 	`, channelDBID, cutoffUnix); err != nil {
 		return err
 	}

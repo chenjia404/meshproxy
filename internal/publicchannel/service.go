@@ -1034,10 +1034,7 @@ func (s *Service) isMessageExpired(profile ChannelProfile, message ChannelMessag
 	if minutes == 0 {
 		return false, nil
 	}
-	messageTime := message.UpdatedAt
-	if messageTime <= 0 {
-		messageTime = message.CreatedAt
-	}
+	messageTime := message.CreatedAt
 	if messageTime <= 0 {
 		return false, nil
 	}
