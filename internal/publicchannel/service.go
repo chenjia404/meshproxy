@@ -747,6 +747,8 @@ func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID
 		nextAfter = resp.NextAfterSeq
 	}
 	now := time.Now().Unix()
+	// 只有整段 change 分页补齐后，才能推进 last_seen_seq / last_synced_seq，
+	// 否则会把尚未拉到的中间页永久跳过去。
 	return s.store.UpdateSyncState(channelID, currentLastSeq, currentLastSeq, true, now)
 }
 
