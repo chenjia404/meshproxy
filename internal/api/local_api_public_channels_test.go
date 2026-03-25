@@ -139,6 +139,29 @@ func TestListSubscribedPublicChannels(t *testing.T) {
 	}
 }
 
+func TestListSubscribedPublicChannelsReturnsEmptyArray(t *testing.T) {
+	t.Parallel()
+
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: stubPublicChannelProvider{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/public-channels/subscriptions", nil)
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body []any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("want empty array, got %d items", len(body))
+	}
+}
+
 func TestGetPublicChannelMessagesReturnsLocalDataAndLoadsAsync(t *testing.T) {
 	t.Parallel()
 

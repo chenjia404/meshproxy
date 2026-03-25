@@ -2033,6 +2033,9 @@ func (a *LocalAPI) handlePublicChannelSubscriptions(w http.ResponseWriter, r *ht
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if items == nil {
+		items = []publicchannel.ChannelSummary{}
+	}
 	writeJSON(w, items)
 }
 
