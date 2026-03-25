@@ -549,6 +549,43 @@ func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
 	}
 }
 
+func TestCreateChannelDefaultsToSubscribed(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13007")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "default-subscribed.db"))
+
+	summary, err := svc.CreateChannel(CreateChannelInput{Name: "default-subscribed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.Sync.Subscribed {
+		t.Fatal("created channel should default to subscribed")
+	}
+	state, err := svc.store.GetChannelSyncState(summary.Profile.ChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Subscribed {
+		t.Fatal("stored sync state should mark created channel as subscribed")
+	}
+}
+
 func TestListSubscribedChannels(t *testing.T) {
 	t.Parallel()
 

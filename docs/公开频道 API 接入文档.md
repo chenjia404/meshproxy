@@ -204,6 +204,7 @@
 
 - `ChannelSummary`
 - 另外会额外在响应顶层返回 `channel_id`，方便前端在创建成功后直接跳转或继续请求
+- 当前节点自己创建的频道会默认进入已订阅状态
 
 #### multipart 创建（推荐：创建时直接上传头像）
 
@@ -256,6 +257,7 @@
 
 - 返回本地已知且 `sync.subscribed=true` 的频道
 - 同时也返回当前节点自己创建的公开频道，即使该频道当前未处于 `subscribed=true`
+- 新创建的自有频道默认就是 `sync.subscribed=true`
 - 当前优先按订阅更新时间排序；如果是当前节点自己创建但未订阅的频道，则回退按频道自身 `updated_at` 排序，最后再按 `public_channels.id DESC`
 - 返回 `ChannelSummary[]`
 
