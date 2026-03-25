@@ -203,6 +203,7 @@
 返回：
 
 - `ChannelSummary`
+- 另外会额外在响应顶层返回 `channel_id`，方便前端在创建成功后直接跳转或继续请求
 
 #### multipart 创建（推荐：创建时直接上传头像）
 
@@ -220,6 +221,7 @@
 返回：
 
 - `ChannelSummary`
+- 另外会额外在响应顶层返回 `channel_id`
 
 说明：
 

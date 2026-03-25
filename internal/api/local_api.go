@@ -1924,6 +1924,18 @@ func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type publicChannelSummaryResponse struct {
+	ChannelID string `json:"channel_id"`
+	publicchannel.ChannelSummary
+}
+
+func newPublicChannelSummaryResponse(summary publicchannel.ChannelSummary) publicChannelSummaryResponse {
+	return publicChannelSummaryResponse{
+		ChannelID:      summary.Profile.ChannelID,
+		ChannelSummary: summary,
+	}
+}
+
 func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) {
 	if a.opts == nil || a.opts.PublicChannels == nil {
 		http.Error(w, "public channel service not available", http.StatusNotFound)
@@ -1973,7 +1985,7 @@ func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) 
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, item)
+			writeJSON(w, newPublicChannelSummaryResponse(item))
 			return
 		}
 		var body publicchannel.CreateChannelInput
@@ -1986,7 +1998,7 @@ func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, item)
+		writeJSON(w, newPublicChannelSummaryResponse(item))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
