@@ -22,4 +22,5 @@ const (
 	ProtocolGroupControl protocol.ID = "/meshproxy/group/control/1.0.0"
 	ProtocolGroupMsg     protocol.ID = "/meshproxy/group/msg/1.0.0"
 	ProtocolGroupSync    protocol.ID = "/meshproxy/group/sync/1.0.0"
+	ProtocolPublicChannelRPC protocol.ID = "/meshchat/public-channel/rpc/1.0.0"
 )

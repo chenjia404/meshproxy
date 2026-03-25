@@ -5,3 +5,5 @@ dist/
 .gomodcache/
 shell.sh
 node.exe
+.gocache_review/
+.gomodcache_review/

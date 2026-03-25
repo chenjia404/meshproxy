@@ -27,6 +27,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	"github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
+	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/update"
@@ -182,6 +183,7 @@ type LocalAPIOpts struct {
 	ExitService *exit.Service
 	// ChatService provides first-stage direct chat APIs.
 	ChatService    ChatProvider
+	PublicChannels PublicChannelProvider
 	MeshServer     MeshServerProvider
 	UpdateService  UpdateProvider
 	UpdateSettings UpdateSettingsProvider
@@ -307,6 +309,28 @@ type ChatProvider interface {
 	Close() error
 }
 
+type PublicChannelProvider interface {
+	CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error)
+	CreateChannelWithAvatar(name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
+	UpdateChannelProfile(channelID string, input publicchannel.UpdateChannelProfileInput) (publicchannel.ChannelSummary, error)
+	UpdateChannelProfileWithAvatar(channelID, name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
+	CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
+	CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error)
+	UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
+	DeleteChannelMessage(ctx context.Context, channelID string, messageID int64) (publicchannel.ChannelMessage, error)
+	GetChannelSummary(channelID string) (publicchannel.ChannelSummary, error)
+	GetChannelHead(channelID string) (publicchannel.ChannelHead, error)
+	GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error)
+	GetChannelMessage(channelID string, messageID int64) (publicchannel.ChannelMessage, error)
+	GetChannelChanges(channelID string, afterSeq int64, limit int) (publicchannel.GetChangesResponse, error)
+	ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error)
+	ListProviders(channelID string) ([]publicchannel.ChannelProvider, error)
+	SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
+	UnsubscribeChannel(channelID string) error
+	SyncChannel(ctx context.Context, channelID string) error
+	LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error)
+}
+
 // PoolStatusProvider returns current circuit pool status.
 type PoolStatusProvider interface {
 	GetPoolStatus() *PoolStatusResponse
@@ -383,6 +407,8 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
+	mux.HandleFunc("/api/v1/public-channels", api.handlePublicChannels)
+	mux.HandleFunc("/api/v1/public-channels/", api.handlePublicChannelItem)
 	mux.HandleFunc("/api/v1/meshserver/spaces", api.handleMeshServerServers)
 	mux.HandleFunc("/api/v1/meshserver/spaces/", api.handleMeshServerServerItem)
 	mux.HandleFunc("/api/v1/meshserver/servers", api.handleMeshServerConnectedServers)
@@ -1893,6 +1919,340 @@ func (a *LocalAPI) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 			"group_id":     groupID,
 			"from_peer_id": body.FromPeerID,
 		})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.PublicChannels == nil {
+		http.Error(w, "public channel service not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		ownerPeerID := strings.TrimSpace(r.URL.Query().Get("owner_peer_id"))
+		if ownerPeerID == "" {
+			ownerPeerID = strings.TrimSpace(r.URL.Query().Get("owner"))
+		}
+		items, err := a.opts.PublicChannels.ListChannelsByOwner(ownerPeerID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, items)
+	case http.MethodPost:
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+			if err := r.ParseMultipartForm(chat.MaxProfileAvatarBytes + (1 << 20)); err != nil {
+				http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("avatar")
+			if err != nil {
+				http.Error(w, "missing avatar: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			data, err := chat.ValidateChatFileData(file)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mimeType := strings.TrimSpace(r.FormValue("mime_type"))
+			if mimeType == "" {
+				mimeType = http.DetectContentType(data)
+			}
+			item, err := a.opts.PublicChannels.CreateChannelWithAvatar(
+				r.FormValue("name"),
+				r.FormValue("bio"),
+				header.Filename,
+				mimeType,
+				data,
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, item)
+			return
+		}
+		var body publicchannel.CreateChannelInput
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		item, err := a.opts.PublicChannels.CreateChannel(body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, item)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.PublicChannels == nil {
+		http.Error(w, "public channel service not available", http.StatusNotFound)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/public-channels/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	channelID := parts[0]
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			item, err := a.opts.PublicChannels.GetChannelSummary(channelID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, item)
+		case http.MethodPut:
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))), "multipart/form-data") {
+				if err := r.ParseMultipartForm(chat.MaxProfileAvatarBytes + (1 << 20)); err != nil {
+					http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				file, header, err := r.FormFile("avatar")
+				if err != nil {
+					http.Error(w, "missing avatar: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer file.Close()
+				data, err := chat.ValidateChatFileData(file)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				mimeType := strings.TrimSpace(r.FormValue("mime_type"))
+				if mimeType == "" {
+					mimeType = http.DetectContentType(data)
+				}
+				item, err := a.opts.PublicChannels.UpdateChannelProfileWithAvatar(
+					channelID,
+					r.FormValue("name"),
+					r.FormValue("bio"),
+					header.Filename,
+					mimeType,
+					data,
+				)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, item)
+				return
+			}
+			var body publicchannel.UpdateChannelProfileInput
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			item, err := a.opts.PublicChannels.UpdateChannelProfile(channelID, body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, item)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+	switch parts[1] {
+	case "head":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		item, err := a.opts.PublicChannels.GetChannelHead(channelID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, item)
+	case "subscribe":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			PeerID      string   `json:"peer_id"`
+			PeerIDs     []string `json:"peer_ids"`
+			LastSeenSeq int64    `json:"last_seen_seq"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(body.PeerID) != "" {
+			body.PeerIDs = append(body.PeerIDs, strings.TrimSpace(body.PeerID))
+		}
+		item, err := a.opts.PublicChannels.SubscribeChannel(r.Context(), channelID, body.PeerIDs, body.LastSeenSeq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, item)
+	case "unsubscribe":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := a.opts.PublicChannels.UnsubscribeChannel(channelID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "channel_id": channelID})
+	case "sync":
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		afterSeq, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("after_seq")), 10, 64)
+		limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+		if r.Method == http.MethodPost {
+			if err := a.opts.PublicChannels.SyncChannel(r.Context(), channelID); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		item, err := a.opts.PublicChannels.GetChannelChanges(channelID, afterSeq, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, item)
+	case "providers":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := a.opts.PublicChannels.ListProviders(channelID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, items)
+	case "messages":
+		if len(parts) == 2 {
+			switch r.Method {
+			case http.MethodGet:
+				beforeMessageID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("before_message_id")), 10, 64)
+				limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+				var (
+					items []publicchannel.ChannelMessage
+					err   error
+				)
+				if beforeMessageID > 0 {
+					items, err = a.opts.PublicChannels.LoadMessagesFromProviders(r.Context(), channelID, beforeMessageID, limit)
+				} else {
+					items, err = a.opts.PublicChannels.GetChannelMessages(channelID, beforeMessageID, limit)
+					if err == nil && len(items) == 0 {
+						items, err = a.opts.PublicChannels.LoadMessagesFromProviders(r.Context(), channelID, beforeMessageID, limit)
+					}
+				}
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, map[string]any{"channel_id": channelID, "items": items})
+			case http.MethodPost:
+				var body publicchannel.UpsertMessageInput
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				item, err := a.opts.PublicChannels.CreateChannelMessage(channelID, body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, item)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		if len(parts) == 3 && parts[2] == "file" {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+				http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, "missing file: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+			data, err := chat.ValidateChatFileData(file)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			fileName := chat.NormalizeChatFileName(header.Filename)
+			mimeType := strings.TrimSpace(r.FormValue("mime_type"))
+			if mimeType == "" {
+				mimeType = http.DetectContentType(data)
+			}
+			text := r.FormValue("text")
+			item, err := a.opts.PublicChannels.CreateChannelFileMessage(channelID, text, fileName, mimeType, data)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, item)
+			return
+		}
+		if len(parts) == 3 {
+			messageID, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil {
+				http.Error(w, "invalid message_id", http.StatusBadRequest)
+				return
+			}
+			switch r.Method {
+			case http.MethodGet:
+				item, err := a.opts.PublicChannels.GetChannelMessage(channelID, messageID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, item)
+			case http.MethodPut:
+				var body publicchannel.UpsertMessageInput
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				item, err := a.opts.PublicChannels.UpdateChannelMessage(r.Context(), channelID, messageID, body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, item)
+			case http.MethodDelete:
+				item, err := a.opts.PublicChannels.DeleteChannelMessage(r.Context(), channelID, messageID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, item)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}

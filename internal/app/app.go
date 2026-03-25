@@ -34,6 +34,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/p2p"
+	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/relay"
 	"github.com/chenjia404/meshproxy/internal/relaycache"
@@ -63,6 +64,7 @@ type App struct {
 	localAPI         *api.LocalAPI
 	ipfsEmb          *ipfsnode.EmbeddedIPFS
 	chat             *chat.Service
+	publicChannels   *publicchannel.Service
 	chatRelayV1Table *relay.ChatRelayV1Table // 《聊天中继.md》V1 中繼轉發表（僅 relay 模式寫入）
 	meshServer       *meshserver.Manager
 
@@ -281,11 +283,18 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	publicChannelSvc, err := publicchannel.NewService(ctx, filepath.Join(cfg.DataDir, "public_channels.db"), a.Host(), h.Routing, gossipComp.PubSub())
+	if err != nil {
+		return nil, fmt.Errorf("init public channel service: %w", err)
+	}
+	a.publicChannels = publicChannelSvc
 	a.chatRelayV1Table = relay.NewChatRelayV1Table()
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
+	publicChannelSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	safe.Go("chat.offlineStoreInitialSync", func() { chatSvc.SyncOfflineStoresNow() })
 	if a.ipfsEmb != nil {
 		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
+		publicChannelSvc.SetIPFSFilePinner(newChatIPFSAvatarPinner(a.ipfsEmb))
 	}
 	connections := make([]meshserver.ConnectionConfig, 0, len(cfg.MeshServerConnections()))
 	for _, conn := range cfg.MeshServerConnections() {
@@ -466,6 +475,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			ConfigPath:          cfg.ConfigFilePath,
 			ExitService:         exitSvc,
 			ChatService:         chatSvc,
+			PublicChannels:      publicChannelSvc,
 			MeshServer:          &meshServerAPIAdapter{app: a},
 			UpdateService:       a,
 			UpdateSettings:      a,
@@ -513,6 +523,11 @@ func (a *App) Close() error {
 		}
 		if a.chat != nil {
 			if err := a.chat.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if a.publicChannels != nil {
+			if err := a.publicChannels.Close(); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
