@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ipfs/go-cid"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
+	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -492,6 +494,61 @@ func TestLoadMessagesFromProvidersFallsBackToNextProvider(t *testing.T) {
 	}
 }
 
+func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13005")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	routing := &blockingRouting{
+		provideStarted: make(chan struct{}, 1),
+		releaseProvide: make(chan struct{}),
+	}
+	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "create-fast.db"), h, routing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetNodePrivateKey(priv)
+	t.Cleanup(func() {
+		close(routing.releaseProvide)
+		_ = svc.Close()
+	})
+
+	done := make(chan struct {
+		summary ChannelSummary
+		err     error
+	}, 1)
+	go func() {
+		summary, err := svc.CreateChannel(CreateChannelInput{Name: "fast-create"})
+		done <- struct {
+			summary ChannelSummary
+			err     error
+		}{summary: summary, err: err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if res.summary.Profile.ChannelID == "" {
+			t.Fatal("create channel should return channel_id immediately")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("create channel should not wait for provide to finish")
+	}
+}
+
 func TestCreateChannelFileMessagePinsToIPFS(t *testing.T) {
 	t.Parallel()
 
@@ -677,4 +734,50 @@ func (f fakeIPFSPinner) PinAvatar(ctx context.Context, fileName string, data []b
 
 func (f fakeIPFSPinner) PinChatFile(ctx context.Context, fileName string, data []byte) (string, error) {
 	return f.cid, nil
+}
+
+type blockingRouting struct {
+	provideStarted chan struct{}
+	releaseProvide chan struct{}
+}
+
+func (r *blockingRouting) Provide(ctx context.Context, _ cid.Cid, _ bool) error {
+	select {
+	case r.provideStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-r.releaseProvide:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *blockingRouting) FindProvidersAsync(ctx context.Context, _ cid.Cid, _ int) <-chan peer.AddrInfo {
+	ch := make(chan peer.AddrInfo)
+	close(ch)
+	return ch
+}
+
+func (r *blockingRouting) FindPeer(context.Context, peer.ID) (peer.AddrInfo, error) {
+	return peer.AddrInfo{}, corerouting.ErrNotFound
+}
+
+func (r *blockingRouting) PutValue(context.Context, string, []byte, ...corerouting.Option) error {
+	return nil
+}
+
+func (r *blockingRouting) GetValue(context.Context, string, ...corerouting.Option) ([]byte, error) {
+	return nil, corerouting.ErrNotFound
+}
+
+func (r *blockingRouting) SearchValue(context.Context, string, ...corerouting.Option) (<-chan []byte, error) {
+	ch := make(chan []byte)
+	close(ch)
+	return ch, nil
+}
+
+func (r *blockingRouting) Bootstrap(context.Context) error {
+	return nil
 }

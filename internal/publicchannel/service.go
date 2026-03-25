@@ -213,11 +213,12 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 	if err := s.store.CreateOwnedChannel(profile, head, now, s.localPeer); err != nil {
 		return ChannelSummary{}, err
 	}
-	s.ensureProvided(profile.ChannelID)
-	if _, err := s.ensureTopic(profile.ChannelID, false); err != nil {
-		log.Printf("[publicchannel] ensure topic %s: %v", profile.ChannelID, err)
+	summary, err := s.store.GetChannelSummary(profile.ChannelID)
+	if err != nil {
+		return ChannelSummary{}, err
 	}
-	return s.store.GetChannelSummary(profile.ChannelID)
+	s.bootstrapOwnedChannelAsync(profile.ChannelID)
+	return summary, nil
 }
 
 func (s *Service) CreateChannelWithAvatar(name, bio, fileName, mimeType string, data []byte) (ChannelSummary, error) {
@@ -956,6 +957,15 @@ func (s *Service) publishChange(change ChannelChange) {
 	if err := topic.Publish(s.ctx, raw); err != nil {
 		log.Printf("[publicchannel] publish change %s: %v", change.ChannelID, err)
 	}
+}
+
+func (s *Service) bootstrapOwnedChannelAsync(channelID string) {
+	safe.Go("publicchannel.bootstrap."+channelID, func() {
+		s.ensureProvided(channelID)
+		if _, err := s.ensureTopic(channelID, false); err != nil {
+			log.Printf("[publicchannel] ensure topic %s: %v", channelID, err)
+		}
+	})
 }
 
 func (s *Service) ensureProvided(channelID string) {
