@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -55,6 +56,7 @@ func (s *Store) migrate() error {
 			name TEXT NOT NULL,
 			avatar_json TEXT NOT NULL DEFAULT '',
 			bio TEXT NOT NULL DEFAULT '',
+			message_retention_minutes INTEGER NOT NULL DEFAULT 0,
 			profile_version INTEGER NOT NULL,
 			last_message_id INTEGER NOT NULL DEFAULT 0,
 			last_seq INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +125,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`ALTER TABLE public_channels ADD COLUMN head_updated_at INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("migrate public channel db add head_updated_at: %w", err)
 	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channels ADD COLUMN message_retention_minutes INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add message_retention_minutes: %w", err)
+	}
 	if _, err := s.db.Exec(`UPDATE public_channels SET head_updated_at=updated_at WHERE head_updated_at=0`); err != nil {
 		return fmt.Errorf("migrate public channel db backfill head_updated_at: %w", err)
 	}
@@ -168,15 +173,15 @@ func (s *Store) ensureSyncStateTx(tx *sql.Tx, channelDBID int64, now int64) erro
 
 func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelProfile, ChannelHead, error) {
 	var (
-		id            int64
-		avatarJSON    string
-		profileSig    string
-		headSig       string
-		profile       ChannelProfile
-		head          ChannelHead
+		id         int64
+		avatarJSON string
+		profileSig string
+		headSig    string
+		profile    ChannelProfile
+		head       ChannelHead
 	)
 	err := tx.QueryRow(`
-		SELECT id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
+		SELECT id, owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version,
 		       last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
 		FROM public_channels WHERE channel_id=?
 	`, channelID).Scan(
@@ -186,6 +191,7 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 		&profile.Name,
 		&avatarJSON,
 		&profile.Bio,
+		&profile.MessageRetentionMinutes,
 		&profile.ProfileVersion,
 		&head.LastMessageID,
 		&head.LastSeq,
@@ -228,11 +234,11 @@ func (s *Store) CreateOwnedChannel(profile ChannelProfile, head ChannelHead, now
 	}()
 	res, err := tx.Exec(`
 		INSERT INTO public_channels(
-			channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
+			channel_id, owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version,
 			last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`, profile.ChannelID, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio,
-		profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
+		profile.MessageRetentionMinutes, profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
 	if err != nil {
 		return err
 	}
@@ -283,10 +289,10 @@ func (s *Store) EnsureSubscribedChannel(channelID string, lastSeenSeq, now int64
 	case err == sql.ErrNoRows:
 		res, err := tx.Exec(`
 			INSERT INTO public_channels(
-				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
+				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version,
 				last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		`, channelID, "", 0, "", "", "", 0, 0, 0, now, now, now, "", "")
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`, channelID, "", 0, "", "", "", 0, 0, 0, 0, now, now, now, "", "")
 		if err != nil {
 			return err
 		}
@@ -337,9 +343,9 @@ func (s *Store) CommitOwnedProfileChange(profile ChannelProfile, head ChannelHea
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channels
-		SET owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, last_message_id=?, last_seq=?, created_at=?, updated_at=?, head_updated_at=?, profile_signature=?, head_signature=?
+		SET owner_version=?, name=?, avatar_json=?, bio=?, message_retention_minutes=?, profile_version=?, last_message_id=?, last_seq=?, created_at=?, updated_at=?, head_updated_at=?, profile_signature=?, head_signature=?
 		WHERE id=?
-	`, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.ProfileVersion,
+	`, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.MessageRetentionMinutes, profile.ProfileVersion,
 		head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature, channelDBID); err != nil {
 		return err
 	}
@@ -475,11 +481,11 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 		}
 		res, err := tx.Exec(`
 			INSERT INTO public_channels(
-				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
+				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version,
 				last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`, profile.ChannelID, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio,
-			profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
+			profile.MessageRetentionMinutes, profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt, head.UpdatedAt, profile.Signature, head.Signature)
 		if err != nil {
 			return err
 		}
@@ -504,9 +510,9 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 		}
 		if _, err := tx.Exec(`
 			UPDATE public_channels
-			SET owner_peer_id=?, owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, created_at=?, updated_at=?, profile_signature=?, head_signature=CASE WHEN head_signature='' THEN ? ELSE head_signature END
+			SET owner_peer_id=?, owner_version=?, name=?, avatar_json=?, bio=?, message_retention_minutes=?, profile_version=?, created_at=?, updated_at=?, profile_signature=?, head_signature=CASE WHEN head_signature='' THEN ? ELSE head_signature END
 			WHERE id=?
-		`, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.ProfileVersion,
+		`, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.MessageRetentionMinutes, profile.ProfileVersion,
 			profile.CreatedAt, profile.UpdatedAt, profile.Signature, currentHead.Signature, id); err != nil {
 			return err
 		}
@@ -709,6 +715,102 @@ func (s *Store) UpdateLoadedRange(channelID string, messages []ChannelMessage, n
 	return nil
 }
 
+func (s *Store) CleanupExpiredMessages(now time.Time) error {
+	rows, err := s.db.Query(`
+		SELECT id, message_retention_minutes
+		FROM public_channels
+		WHERE message_retention_minutes > 0
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type cleanupTarget struct {
+		channelDBID int64
+		minutes     int
+	}
+	var targets []cleanupTarget
+	for rows.Next() {
+		var item cleanupTarget
+		if err := rows.Scan(&item.channelDBID, &item.minutes); err != nil {
+			return err
+		}
+		targets = append(targets, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	nowUnix := now.Unix()
+	for _, item := range targets {
+		cutoff := nowUnix - int64(item.minutes)*60
+		if cutoff <= 0 {
+			continue
+		}
+		if err := s.cleanupExpiredChannelMessages(item.channelDBID, cutoff, nowUnix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) cleanupExpiredChannelMessages(channelDBID, cutoffUnix, nowUnix int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`
+		DELETE FROM public_channel_changes
+		WHERE channel_db_id=? AND message_id IN (
+			SELECT message_id
+			FROM public_channel_messages
+			WHERE channel_db_id=? AND updated_at<=?
+		)
+	`, channelDBID, channelDBID, cutoffUnix); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM public_channel_messages
+		WHERE channel_db_id=? AND updated_at<=?
+	`, channelDBID, cutoffUnix); err != nil {
+		return err
+	}
+	if err := s.refreshLoadedRangeTx(tx, channelDBID, nowUnix); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) refreshLoadedRangeTx(tx *sql.Tx, channelDBID, nowUnix int64) error {
+	if err := s.ensureSyncStateTx(tx, channelDBID, nowUnix); err != nil {
+		return err
+	}
+	var latest int64
+	var oldest int64
+	if err := tx.QueryRow(`
+		SELECT COALESCE(MAX(message_id), 0), COALESCE(MIN(message_id), 0)
+		FROM public_channel_messages
+		WHERE channel_db_id=?
+	`, channelDBID).Scan(&latest, &oldest); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`
+		UPDATE public_channel_sync_state
+		SET latest_loaded_message_id=?, oldest_loaded_message_id=?, updated_at=?
+		WHERE channel_db_id=?
+	`, latest, oldest, nowUnix, channelDBID)
+	return err
+}
+
 func (s *Store) UpsertProvider(channelID, peerID, source string, now int64) error {
 	if stringsTrim(peerID) == "" {
 		return nil
@@ -731,7 +833,7 @@ func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
 		avatarJSON string
 	)
 	err := s.db.QueryRow(`
-		SELECT owner_peer_id, owner_version, name, avatar_json, bio, profile_version, created_at, updated_at, profile_signature
+		SELECT owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version, created_at, updated_at, profile_signature
 		FROM public_channels WHERE channel_id=?
 	`, channelID).Scan(
 		&profile.OwnerPeerID,
@@ -739,6 +841,7 @@ func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
 		&profile.Name,
 		&avatarJSON,
 		&profile.Bio,
+		&profile.MessageRetentionMinutes,
 		&profile.ProfileVersion,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
@@ -910,11 +1013,11 @@ func (s *Store) GetChannelChanges(channelID string, afterSeq int64, limit int) (
 	resp := GetChangesResponse{ChannelID: channelID, CurrentLastSeq: head.LastSeq}
 	for rows.Next() {
 		var (
-			item          ChannelChange
-			messageID     sql.NullInt64
-			version       sql.NullInt64
-			isDeleted     sql.NullInt64
-			profileVer    sql.NullInt64
+			item       ChannelChange
+			messageID  sql.NullInt64
+			version    sql.NullInt64
+			isDeleted  sql.NullInt64
+			profileVer sql.NullInt64
 		)
 		if err := rows.Scan(&item.Seq, &item.ChangeType, &messageID, &version, &isDeleted, &profileVer, &item.CreatedAt); err != nil {
 			return GetChangesResponse{}, err

@@ -3,8 +3,8 @@ package publicchannel
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"log"
 	"path/filepath"
@@ -14,11 +14,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	corerouting "github.com/libp2p/go-libp2p/core/routing"
-	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/multiformats/go-multihash"
 
 	"github.com/chenjia404/meshproxy/internal/chat"
@@ -71,6 +71,8 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 		subs:      make(map[string]*channelSubscription),
 	}
 	h.SetStreamHandler(p2p.ProtocolPublicChannelRPC, s.handleRPCStream)
+	s.runRetentionSweep(time.Now().UTC())
+	safe.Go("publicchannel.retentionLoop", func() { s.runRetentionLoop() })
 	return s, nil
 }
 
@@ -183,21 +185,26 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 	if name == "" {
 		return ChannelSummary{}, errors.New("channel name is required")
 	}
+	input.MessageRetentionMinutes = NormalizeRetentionMinutes(input.MessageRetentionMinutes)
+	if err := ValidateRetentionMinutes(input.MessageRetentionMinutes); err != nil {
+		return ChannelSummary{}, err
+	}
 	channelUUID, err := uuid.NewV7()
 	if err != nil {
 		return ChannelSummary{}, err
 	}
 	now := time.Now().Unix()
 	profile := ChannelProfile{
-		ChannelID:      channelUUID.String(),
-		OwnerPeerID:    s.localPeer,
-		OwnerVersion:   1,
-		Name:           name,
-		Avatar:         input.Avatar,
-		Bio:            strings.TrimSpace(input.Bio),
-		ProfileVersion: 1,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ChannelID:               channelUUID.String(),
+		OwnerPeerID:             s.localPeer,
+		OwnerVersion:            1,
+		Name:                    name,
+		Avatar:                  input.Avatar,
+		Bio:                     strings.TrimSpace(input.Bio),
+		MessageRetentionMinutes: input.MessageRetentionMinutes,
+		ProfileVersion:          1,
+		CreatedAt:               now,
+		UpdatedAt:               now,
 	}
 	if err := signProfile(s.nodePriv, &profile); err != nil {
 		return ChannelSummary{}, err
@@ -225,15 +232,16 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 	return summary, nil
 }
 
-func (s *Service) CreateChannelWithAvatar(name, bio, fileName, mimeType string, data []byte) (ChannelSummary, error) {
+func (s *Service) CreateChannelWithAvatar(name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (ChannelSummary, error) {
 	avatar, err := s.buildPinnedAvatar(fileName, mimeType, data)
 	if err != nil {
 		return ChannelSummary{}, err
 	}
 	return s.CreateChannel(CreateChannelInput{
-		Name:   name,
-		Bio:    bio,
-		Avatar: avatar,
+		Name:                    name,
+		Bio:                     bio,
+		Avatar:                  avatar,
+		MessageRetentionMinutes: messageRetentionMinutes,
 	})
 }
 
@@ -252,6 +260,10 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	if profile.OwnerPeerID != s.localPeer {
 		return ChannelSummary{}, errors.New("channel is not owned by local peer")
 	}
+	input.MessageRetentionMinutes = NormalizeRetentionMinutes(input.MessageRetentionMinutes)
+	if err := ValidateRetentionMinutes(input.MessageRetentionMinutes); err != nil {
+		return ChannelSummary{}, err
+	}
 	now := time.Now().Unix()
 	profile.Name = strings.TrimSpace(input.Name)
 	if profile.Name == "" {
@@ -259,6 +271,7 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	}
 	profile.Bio = strings.TrimSpace(input.Bio)
 	profile.Avatar = input.Avatar
+	profile.MessageRetentionMinutes = input.MessageRetentionMinutes
 	profile.ProfileVersion++
 	profile.UpdatedAt = now
 	if err := signProfile(s.nodePriv, &profile); err != nil {
@@ -282,12 +295,13 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	if err := s.store.CommitOwnedProfileChange(profile, head, change); err != nil {
 		return ChannelSummary{}, err
 	}
+	s.runRetentionSweep(time.Unix(now, 0).UTC())
 	s.ensureProvided(channelID)
 	s.publishChange(change)
 	return s.store.GetChannelSummary(channelID)
 }
 
-func (s *Service) UpdateChannelProfileWithAvatar(channelID, name, bio, fileName, mimeType string, data []byte) (ChannelSummary, error) {
+func (s *Service) UpdateChannelProfileWithAvatar(channelID, name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (ChannelSummary, error) {
 	profile, err := s.store.GetChannelProfile(channelID)
 	if err != nil {
 		return ChannelSummary{}, err
@@ -297,9 +311,10 @@ func (s *Service) UpdateChannelProfileWithAvatar(channelID, name, bio, fileName,
 		return ChannelSummary{}, err
 	}
 	return s.UpdateChannelProfile(channelID, UpdateChannelProfileInput{
-		Name:   firstNonEmptyString(name, profile.Name),
-		Bio:    bio,
-		Avatar: avatar,
+		Name:                    firstNonEmptyString(name, profile.Name),
+		Bio:                     bio,
+		Avatar:                  avatar,
+		MessageRetentionMinutes: messageRetentionMinutes,
 	})
 }
 
@@ -545,18 +560,27 @@ func (s *Service) applyInitialSnapshot(ctx context.Context, channelID string, re
 	if err := s.store.ApplyProfile(remoteProfile); err != nil {
 		return err
 	}
+	s.runRetentionSweep(time.Unix(now, 0).UTC())
 	for _, peerID := range seedPeerIDs {
 		_ = s.upsertProviderIfKnown(channelID, peerID, "seed", now)
 	}
 	if err := s.store.ApplyHead(remoteHead); err != nil {
 		return err
 	}
+	appliedMessages := make([]ChannelMessage, 0, len(remoteMessages))
 	for _, item := range remoteMessages {
 		if err := s.applyVerifiedMessage(item); err != nil {
 			return err
 		}
+		expired, err := s.isMessageExpired(remoteProfile, item)
+		if err != nil {
+			return err
+		}
+		if !expired {
+			appliedMessages = append(appliedMessages, item)
+		}
 	}
-	if err := s.store.UpdateLoadedRange(channelID, remoteMessages, now); err != nil {
+	if err := s.store.UpdateLoadedRange(channelID, appliedMessages, now); err != nil {
 		return err
 	}
 	s.ensureProvided(channelID)
@@ -677,17 +701,29 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	var resp GetMessagesResponse
 	var lastErr error
 	bestItems := localItems
+	profile, err := s.store.GetChannelProfile(channelID)
+	if err != nil {
+		return nil, err
+	}
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_messages", body, &resp); err != nil {
 			lastErr = err
 			continue
 		}
+		appliedItems := make([]ChannelMessage, 0, len(resp.Items))
 		for _, item := range resp.Items {
 			if err := s.applyVerifiedMessage(item); err != nil {
 				return nil, err
 			}
+			expired, err := s.isMessageExpired(profile, item)
+			if err != nil {
+				return nil, err
+			}
+			if !expired {
+				appliedItems = append(appliedItems, item)
+			}
 		}
-		_ = s.store.UpdateLoadedRange(channelID, resp.Items, time.Now().Unix())
+		_ = s.store.UpdateLoadedRange(channelID, appliedItems, time.Now().Unix())
 		items, err := s.store.GetChannelMessages(channelID, beforeMessageID, limit)
 		if err != nil {
 			return nil, err
@@ -736,7 +772,11 @@ func (s *Service) ensureMessageAvailable(ctx context.Context, channelID string, 
 		if err := s.rpcCall(ctx, peerID, "get_channel_message", body, &msg); err != nil {
 			continue
 		}
-		return s.applyVerifiedMessage(msg)
+		if err := s.applyVerifiedMessage(msg); err != nil {
+			return err
+		}
+		_, err := s.store.GetChannelMessage(channelID, messageID)
+		return err
 	}
 	return sql.ErrNoRows
 }
@@ -891,6 +931,7 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 			if err := s.store.ApplyProfile(remoteProfile); err != nil {
 				return err
 			}
+			s.runRetentionSweep(time.Now().UTC())
 			profile = remoteProfile
 		case ChangeTypeMessage:
 			if change.MessageID == nil {
@@ -911,6 +952,13 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 			}
 			if err := s.verifyMessageAgainstProfile(profile, remoteMsg); err != nil {
 				return err
+			}
+			expired, err := s.isMessageExpired(profile, remoteMsg)
+			if err != nil {
+				return err
+			}
+			if expired {
+				continue
 			}
 			if err := s.store.ApplyMessage(remoteMsg); err != nil {
 				return err
@@ -939,6 +987,13 @@ func (s *Service) applyVerifiedMessage(message ChannelMessage) error {
 	if err := s.verifyMessageAgainstProfile(profile, message); err != nil {
 		return err
 	}
+	expired, err := s.isMessageExpired(profile, message)
+	if err != nil {
+		return err
+	}
+	if expired {
+		return nil
+	}
 	return s.store.ApplyMessage(message)
 }
 
@@ -950,6 +1005,44 @@ func (s *Service) verifyMessageAgainstProfile(profile ChannelProfile, message Ch
 		return errors.New("message owner_version mismatch")
 	}
 	return verifyMessage(profile.OwnerPeerID, message)
+}
+
+func (s *Service) runRetentionLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.runRetentionSweep(now.UTC())
+		}
+	}
+}
+
+func (s *Service) runRetentionSweep(now time.Time) {
+	if err := s.store.CleanupExpiredMessages(now); err != nil {
+		log.Printf("[publicchannel] retention cleanup failed: %v", err)
+	}
+}
+
+func (s *Service) isMessageExpired(profile ChannelProfile, message ChannelMessage) (bool, error) {
+	minutes := NormalizeRetentionMinutes(profile.MessageRetentionMinutes)
+	if err := ValidateRetentionMinutes(minutes); err != nil {
+		return false, err
+	}
+	if minutes == 0 {
+		return false, nil
+	}
+	messageTime := message.UpdatedAt
+	if messageTime <= 0 {
+		messageTime = message.CreatedAt
+	}
+	if messageTime <= 0 {
+		return false, nil
+	}
+	cutoff := time.Now().Unix() - int64(minutes)*60
+	return messageTime <= cutoff, nil
 }
 
 func (s *Service) ensureTopic(channelID string, subscribe bool) (*pubsub.Topic, error) {

@@ -99,6 +99,7 @@
       "url": "/ipfs/bafy.../avatar.png"
     },
     "bio": "频道简介",
+    "message_retention_minutes": 1440,
     "profile_version": 2,
     "created_at": 1710010000,
     "updated_at": 1710010100,
@@ -195,6 +196,7 @@
 {
   "name": "我的频道",
   "bio": "频道简介",
+  "message_retention_minutes": 1440,
   "avatar": {
     "file_name": "avatar.png",
     "mime_type": "image/png",
@@ -222,6 +224,7 @@
 
 - `name`：频道名，必填
 - `bio`：频道简介，可选
+- `message_retention_minutes`：消息保留时长，单位分钟；`0` 表示不自动删除，其它值需在 `1..525600` 之间
 - `avatar`：头像文件，必填
 - `mime_type`：可选；不传时服务端自动检测
 
@@ -236,6 +239,7 @@
 - 返回中的 `profile.avatar.blob_id/url/sha256` 会被自动填充
 - `profile.avatar.blob_id` 就是该头像文件的 IPFS CID
 - 头像访问默认推荐使用当前节点本地 `/ipfs/{blob_id}/...` 路径
+- `message_retention_minutes` 会写入频道 profile，并参与 profile 签名
 
 ### 5.2 按 owner 列出频道
 
@@ -297,6 +301,7 @@
 {
   "name": "新的频道名",
   "bio": "新的简介",
+  "message_retention_minutes": 60,
   "avatar": {
     "file_name": "avatar.png",
     "mime_type": "image/png",
@@ -322,6 +327,7 @@
 
 - `name`：可选；为空时沿用原值
 - `bio`：可选
+- `message_retention_minutes`：可选，单位分钟；`0` 表示关闭自动删除
 - `avatar`：头像文件，必填
 - `mime_type`：可选
 
@@ -620,6 +626,13 @@
 3. 需要时调用 `GET /sync`
 4. 用户上滑时调用 `GET /messages?before_message_id=...`
 
+`message_retention_minutes` 说明：
+
+- 这是频道共享配置，跟随 `profile` 一起同步
+- 所有节点会按该值周期性清理本地已过期消息
+- 只删除消息和本地 `channel_changes` 里的消息变更记录，不删除频道
+- 过期判断当前按消息 `updated_at` 计算
+
 ### 9.2 创建频道
 
 推荐：
@@ -652,6 +665,7 @@
 - provider 发现
 - 频道头像 IPFS 落地
 - 附件 IPFS 落地
+- 频道级消息自动过期清理
 
 当前未实现：
 

@@ -16,15 +16,16 @@ const (
 )
 
 type canonicalProfile struct {
-	ChannelID      string `json:"channel_id"`
-	OwnerPeerID    string `json:"owner_peer_id"`
-	OwnerVersion   int64  `json:"owner_version"`
-	Name           string `json:"name"`
-	Avatar         Avatar `json:"avatar"`
-	Bio            string `json:"bio"`
-	ProfileVersion int64  `json:"profile_version"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
+	ChannelID               string `json:"channel_id"`
+	OwnerPeerID             string `json:"owner_peer_id"`
+	OwnerVersion            int64  `json:"owner_version"`
+	Name                    string `json:"name"`
+	Avatar                  Avatar `json:"avatar"`
+	Bio                     string `json:"bio"`
+	MessageRetentionMinutes int    `json:"message_retention_minutes"`
+	ProfileVersion          int64  `json:"profile_version"`
+	CreatedAt               int64  `json:"created_at"`
+	UpdatedAt               int64  `json:"updated_at"`
 }
 
 type canonicalHead struct {
@@ -57,15 +58,16 @@ func canonicalizeProfile(profile ChannelProfile) ([]byte, error) {
 		return nil, err
 	}
 	payload, err := json.Marshal(canonicalProfile{
-		ChannelID:      profile.ChannelID,
-		OwnerPeerID:    profile.OwnerPeerID,
-		OwnerVersion:   profile.OwnerVersion,
-		Name:           profile.Name,
-		Avatar:         profile.Avatar,
-		Bio:            profile.Bio,
-		ProfileVersion: profile.ProfileVersion,
-		CreatedAt:      profile.CreatedAt,
-		UpdatedAt:      profile.UpdatedAt,
+		ChannelID:               profile.ChannelID,
+		OwnerPeerID:             profile.OwnerPeerID,
+		OwnerVersion:            profile.OwnerVersion,
+		Name:                    profile.Name,
+		Avatar:                  profile.Avatar,
+		Bio:                     profile.Bio,
+		MessageRetentionMinutes: profile.MessageRetentionMinutes,
+		ProfileVersion:          profile.ProfileVersion,
+		CreatedAt:               profile.CreatedAt,
+		UpdatedAt:               profile.UpdatedAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal channel profile canonical: %w", err)

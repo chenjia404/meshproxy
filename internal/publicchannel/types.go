@@ -34,6 +34,8 @@ const (
 	DefaultPageLimit    = 20
 	DefaultChangesLimit = 100
 	DefaultProviderFind = 16
+	MinRetentionMinutes = 1
+	MaxRetentionMinutes = 60 * 24 * 365
 )
 
 var ErrNotImplemented = errors.New("not_implemented")
@@ -63,16 +65,17 @@ type MessageContent struct {
 }
 
 type ChannelProfile struct {
-	ChannelID      string `json:"channel_id"`
-	OwnerPeerID    string `json:"owner_peer_id"`
-	OwnerVersion   int64  `json:"owner_version"`
-	Name           string `json:"name"`
-	Avatar         Avatar `json:"avatar"`
-	Bio            string `json:"bio"`
-	ProfileVersion int64  `json:"profile_version"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
-	Signature      string `json:"signature"`
+	ChannelID               string `json:"channel_id"`
+	OwnerPeerID             string `json:"owner_peer_id"`
+	OwnerVersion            int64  `json:"owner_version"`
+	Name                    string `json:"name"`
+	Avatar                  Avatar `json:"avatar"`
+	Bio                     string `json:"bio"`
+	MessageRetentionMinutes int    `json:"message_retention_minutes"`
+	ProfileVersion          int64  `json:"profile_version"`
+	CreatedAt               int64  `json:"created_at"`
+	UpdatedAt               int64  `json:"updated_at"`
+	Signature               string `json:"signature"`
 }
 
 type ChannelHead struct {
@@ -115,13 +118,13 @@ type ChannelChange struct {
 }
 
 type ChannelSyncState struct {
-	ChannelID              string `json:"channel_id"`
-	LastSeenSeq            int64  `json:"last_seen_seq"`
-	LastSyncedSeq          int64  `json:"last_synced_seq"`
-	LatestLoadedMessageID  int64  `json:"latest_loaded_message_id"`
-	OldestLoadedMessageID  int64  `json:"oldest_loaded_message_id"`
-	Subscribed             bool   `json:"subscribed"`
-	UpdatedAt              int64  `json:"updated_at"`
+	ChannelID             string `json:"channel_id"`
+	LastSeenSeq           int64  `json:"last_seen_seq"`
+	LastSyncedSeq         int64  `json:"last_synced_seq"`
+	LatestLoadedMessageID int64  `json:"latest_loaded_message_id"`
+	OldestLoadedMessageID int64  `json:"oldest_loaded_message_id"`
+	Subscribed            bool   `json:"subscribed"`
+	UpdatedAt             int64  `json:"updated_at"`
 }
 
 type ChannelProvider struct {
@@ -151,22 +154,24 @@ type GetChangesResponse struct {
 }
 
 type SubscribeResult struct {
-	Profile   ChannelProfile   `json:"profile"`
-	Head      ChannelHead      `json:"head"`
-	Messages  []ChannelMessage `json:"messages"`
+	Profile   ChannelProfile    `json:"profile"`
+	Head      ChannelHead       `json:"head"`
+	Messages  []ChannelMessage  `json:"messages"`
 	Providers []ChannelProvider `json:"providers,omitempty"`
 }
 
 type CreateChannelInput struct {
-	Name   string `json:"name"`
-	Bio    string `json:"bio"`
-	Avatar Avatar `json:"avatar"`
+	Name                    string `json:"name"`
+	Bio                     string `json:"bio"`
+	Avatar                  Avatar `json:"avatar"`
+	MessageRetentionMinutes int    `json:"message_retention_minutes"`
 }
 
 type UpdateChannelProfileInput struct {
-	Name   string `json:"name"`
-	Bio    string `json:"bio"`
-	Avatar Avatar `json:"avatar"`
+	Name                    string `json:"name"`
+	Bio                     string `json:"bio"`
+	Avatar                  Avatar `json:"avatar"`
+	MessageRetentionMinutes int    `json:"message_retention_minutes"`
 }
 
 type UpsertMessageInput struct {
@@ -277,4 +282,19 @@ func DetermineMessageType(content MessageContent, requestedType string, deleted 
 	default:
 		return MessageTypeFile
 	}
+}
+
+func NormalizeRetentionMinutes(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+func ValidateRetentionMinutes(v int) error {
+	v = NormalizeRetentionMinutes(v)
+	if v != 0 && (v < MinRetentionMinutes || v > MaxRetentionMinutes) {
+		return fmt.Errorf("message_retention_minutes must be 0 or between %d and %d", MinRetentionMinutes, MaxRetentionMinutes)
+	}
+	return nil
 }

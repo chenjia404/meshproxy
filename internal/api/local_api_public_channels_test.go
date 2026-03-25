@@ -18,19 +18,19 @@ func TestCreatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 
 	summary := publicchannel.ChannelSummary{
 		Profile: publicchannel.ChannelProfile{
-			ChannelID:   "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
-			OwnerPeerID: "12D3KooWTestOwner",
-			Name:        "demo",
+			ChannelID:               "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+			OwnerPeerID:             "12D3KooWTestOwner",
+			Name:                    "demo",
+			MessageRetentionMinutes: 60,
 		},
 		Head: publicchannel.ChannelHead{
 			ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
 		},
 	}
-	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{createChannelResult: summary},
-	})
+	provider := &stubPublicChannelProvider{createChannelResult: summary}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{PublicChannels: provider})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels", bytes.NewBufferString(`{"name":"demo"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels", bytes.NewBufferString(`{"name":"demo","message_retention_minutes":60}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(rec, req)
@@ -51,6 +51,12 @@ func TestCreatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 	}
 	if profile["channel_id"] != summary.Profile.ChannelID {
 		t.Fatalf("want profile.channel_id %q, got %#v", summary.Profile.ChannelID, profile["channel_id"])
+	}
+	if profile["message_retention_minutes"] != float64(60) {
+		t.Fatalf("want profile.message_retention_minutes 60, got %#v", profile["message_retention_minutes"])
+	}
+	if provider.createChannelInput.MessageRetentionMinutes != 60 {
+		t.Fatalf("want create input retention 60, got %d", provider.createChannelInput.MessageRetentionMinutes)
 	}
 }
 
@@ -59,19 +65,19 @@ func TestUpdatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 
 	summary := publicchannel.ChannelSummary{
 		Profile: publicchannel.ChannelProfile{
-			ChannelID:   "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
-			OwnerPeerID: "12D3KooWTestOwner",
-			Name:        "updated",
+			ChannelID:               "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+			OwnerPeerID:             "12D3KooWTestOwner",
+			Name:                    "updated",
+			MessageRetentionMinutes: 120,
 		},
 		Head: publicchannel.ChannelHead{
 			ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
 		},
 	}
-	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{updateChannelResult: summary},
-	})
+	provider := &stubPublicChannelProvider{updateChannelResult: summary}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{PublicChannels: provider})
 
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/public-channels/"+summary.Profile.ChannelID, bytes.NewBufferString(`{"name":"updated"}`))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/public-channels/"+summary.Profile.ChannelID, bytes.NewBufferString(`{"name":"updated","message_retention_minutes":120}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	api.server.Handler.ServeHTTP(rec, req)
@@ -92,6 +98,12 @@ func TestUpdatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 	}
 	if profile["channel_id"] != summary.Profile.ChannelID {
 		t.Fatalf("want profile.channel_id %q, got %#v", summary.Profile.ChannelID, profile["channel_id"])
+	}
+	if profile["message_retention_minutes"] != float64(120) {
+		t.Fatalf("want profile.message_retention_minutes 120, got %#v", profile["message_retention_minutes"])
+	}
+	if provider.updateChannelInput.MessageRetentionMinutes != 120 {
+		t.Fatalf("want update input retention 120, got %d", provider.updateChannelInput.MessageRetentionMinutes)
 	}
 }
 
@@ -113,7 +125,7 @@ func TestListSubscribedPublicChannels(t *testing.T) {
 		},
 	}
 	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{listSubscribedChannelsResult: items},
+		PublicChannels: &stubPublicChannelProvider{listSubscribedChannelsResult: items},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/public-channels/subscriptions", nil)
@@ -143,7 +155,7 @@ func TestListSubscribedPublicChannelsReturnsEmptyArray(t *testing.T) {
 	t.Parallel()
 
 	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{},
+		PublicChannels: &stubPublicChannelProvider{},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/public-channels/subscriptions", nil)
@@ -167,7 +179,7 @@ func TestGetPublicChannelMessagesReturnsLocalDataAndLoadsAsync(t *testing.T) {
 
 	loadCalled := make(chan struct{}, 1)
 	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{
+		PublicChannels: &stubPublicChannelProvider{
 			getChannelMessagesErr: sql.ErrNoRows,
 			loadMessagesErr:       context.DeadlineExceeded,
 			loadMessagesCalled:    loadCalled,
@@ -207,7 +219,7 @@ func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) 
 		Head:    publicchannel.ChannelHead{ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123"},
 	}
 	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
-		PublicChannels: stubPublicChannelProvider{subscribeAsyncResult: result},
+		PublicChannels: &stubPublicChannelProvider{subscribeAsyncResult: result},
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels/"+result.Profile.ChannelID+"/subscribe", bytes.NewBufferString(`{"peer_ids":["12D3KooWSeedPeer"],"last_seen_seq":0}`))
@@ -233,7 +245,10 @@ func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) 
 
 type stubPublicChannelProvider struct {
 	createChannelResult          publicchannel.ChannelSummary
+	createChannelInput           publicchannel.CreateChannelInput
 	updateChannelResult          publicchannel.ChannelSummary
+	updateChannelInput           publicchannel.UpdateChannelProfileInput
+	getChannelSummaryResult      publicchannel.ChannelSummary
 	listSubscribedChannelsResult []publicchannel.ChannelSummary
 	getChannelMessagesResult     []publicchannel.ChannelMessage
 	getChannelMessagesErr        error
@@ -242,87 +257,89 @@ type stubPublicChannelProvider struct {
 	subscribeAsyncResult         publicchannel.SubscribeResult
 }
 
-func (s stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
+	s.createChannelInput = input
 	return s.createChannelResult, nil
 }
 
-func (s stubPublicChannelProvider) CreateChannelWithAvatar(name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) CreateChannelWithAvatar(name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error) {
 	return publicchannel.ChannelSummary{}, nil
 }
 
-func (s stubPublicChannelProvider) UpdateChannelProfile(channelID string, input publicchannel.UpdateChannelProfileInput) (publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) UpdateChannelProfile(channelID string, input publicchannel.UpdateChannelProfileInput) (publicchannel.ChannelSummary, error) {
+	s.updateChannelInput = input
 	return s.updateChannelResult, nil
 }
 
-func (s stubPublicChannelProvider) UpdateChannelProfileWithAvatar(channelID, name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) UpdateChannelProfileWithAvatar(channelID, name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error) {
 	return s.updateChannelResult, nil
 }
 
-func (s stubPublicChannelProvider) CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
 }
 
-func (s stubPublicChannelProvider) CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
 }
 
-func (s stubPublicChannelProvider) UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
 }
 
-func (s stubPublicChannelProvider) DeleteChannelMessage(ctx context.Context, channelID string, messageID int64) (publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) DeleteChannelMessage(ctx context.Context, channelID string, messageID int64) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
 }
 
-func (s stubPublicChannelProvider) GetChannelSummary(channelID string) (publicchannel.ChannelSummary, error) {
-	return publicchannel.ChannelSummary{}, nil
+func (s *stubPublicChannelProvider) GetChannelSummary(channelID string) (publicchannel.ChannelSummary, error) {
+	return s.getChannelSummaryResult, nil
 }
 
-func (s stubPublicChannelProvider) GetChannelHead(channelID string) (publicchannel.ChannelHead, error) {
+func (s *stubPublicChannelProvider) GetChannelHead(channelID string) (publicchannel.ChannelHead, error) {
 	return publicchannel.ChannelHead{}, nil
 }
 
-func (s stubPublicChannelProvider) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
 	return s.getChannelMessagesResult, s.getChannelMessagesErr
 }
 
-func (s stubPublicChannelProvider) GetChannelMessage(channelID string, messageID int64) (publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) GetChannelMessage(channelID string, messageID int64) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
 }
 
-func (s stubPublicChannelProvider) GetChannelChanges(channelID string, afterSeq int64, limit int) (publicchannel.GetChangesResponse, error) {
+func (s *stubPublicChannelProvider) GetChannelChanges(channelID string, afterSeq int64, limit int) (publicchannel.GetChangesResponse, error) {
 	return publicchannel.GetChangesResponse{}, nil
 }
 
-func (s stubPublicChannelProvider) ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error) {
 	return nil, nil
 }
 
-func (s stubPublicChannelProvider) ListSubscribedChannels() ([]publicchannel.ChannelSummary, error) {
+func (s *stubPublicChannelProvider) ListSubscribedChannels() ([]publicchannel.ChannelSummary, error) {
 	return s.listSubscribedChannelsResult, nil
 }
 
-func (s stubPublicChannelProvider) ListProviders(channelID string) ([]publicchannel.ChannelProvider, error) {
+func (s *stubPublicChannelProvider) ListProviders(channelID string) ([]publicchannel.ChannelProvider, error) {
 	return nil, nil
 }
 
-func (s stubPublicChannelProvider) SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
+func (s *stubPublicChannelProvider) SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
 	return publicchannel.SubscribeResult{}, nil
 }
 
-func (s stubPublicChannelProvider) SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
+func (s *stubPublicChannelProvider) SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
 	return s.subscribeAsyncResult, nil
 }
 
-func (s stubPublicChannelProvider) UnsubscribeChannel(channelID string) error {
+func (s *stubPublicChannelProvider) UnsubscribeChannel(channelID string) error {
 	return nil
 }
 
-func (s stubPublicChannelProvider) SyncChannel(ctx context.Context, channelID string) error {
+func (s *stubPublicChannelProvider) SyncChannel(ctx context.Context, channelID string) error {
 	return nil
 }
 
-func (s stubPublicChannelProvider) LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
+func (s *stubPublicChannelProvider) LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
 	if s.loadMessagesCalled != nil {
 		select {
 		case s.loadMessagesCalled <- struct{}{}:

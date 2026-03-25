@@ -3,6 +3,7 @@ package publicchannel
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
@@ -82,6 +83,153 @@ func TestApplyMessageRejectsSameVersionDifferentSignature(t *testing.T) {
 	}
 	if err := store.ApplyMessage(conflict); err == nil {
 		t.Fatal("expected same-version conflicting signature to be rejected")
+	}
+}
+
+func TestVerifyProfileRejectsChangedRetentionMinutes(t *testing.T) {
+	t.Parallel()
+
+	priv, localPeerID := mustTestIdentity(t)
+	now := time.Now().Unix()
+	profile := ChannelProfile{
+		ChannelID:               mustUUIDv7(t),
+		OwnerPeerID:             localPeerID,
+		OwnerVersion:            1,
+		Name:                    "retention-signature",
+		MessageRetentionMinutes: 60,
+		ProfileVersion:          1,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+	if err := signProfile(priv, &profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyProfile(profile); err != nil {
+		t.Fatalf("verify signed profile: %v", err)
+	}
+	profile.MessageRetentionMinutes = 30
+	if err := verifyProfile(profile); err == nil {
+		t.Fatal("expected verifyProfile to reject changed message_retention_minutes")
+	}
+}
+
+func TestCleanupExpiredMessagesDeletesExpiredRows(t *testing.T) {
+	t.Parallel()
+
+	priv, localPeerID := mustTestIdentity(t)
+	store := mustTestStore(t)
+	now := time.Now().Unix()
+
+	profile := ChannelProfile{
+		ChannelID:               mustUUIDv7(t),
+		OwnerPeerID:             localPeerID,
+		OwnerVersion:            1,
+		Name:                    "retention-cleanup",
+		MessageRetentionMinutes: 1,
+		ProfileVersion:          1,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+	if err := signProfile(priv, &profile); err != nil {
+		t.Fatal(err)
+	}
+	head := ChannelHead{
+		ChannelID:      profile.ChannelID,
+		OwnerPeerID:    localPeerID,
+		OwnerVersion:   1,
+		LastMessageID:  0,
+		ProfileVersion: 1,
+		LastSeq:        0,
+		UpdatedAt:      now,
+	}
+	if err := signHead(priv, &head); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateOwnedChannel(profile, head, now, localPeerID); err != nil {
+		t.Fatal(err)
+	}
+
+	expiredAt := now - 120
+	expiredMsg := ChannelMessage{
+		ChannelID:     profile.ChannelID,
+		MessageID:     1,
+		Version:       1,
+		Seq:           1,
+		OwnerVersion:  1,
+		CreatorPeerID: localPeerID,
+		AuthorPeerID:  localPeerID,
+		CreatedAt:     expiredAt,
+		UpdatedAt:     expiredAt,
+		Content:       NormalizeMessageContent("expired", nil),
+		MessageType:   MessageTypeText,
+	}
+	if err := signMessage(priv, &expiredMsg); err != nil {
+		t.Fatal(err)
+	}
+	head.LastMessageID = 1
+	head.LastSeq = 1
+	head.UpdatedAt = expiredAt
+	if err := signHead(priv, &head); err != nil {
+		t.Fatal(err)
+	}
+	change1 := changeFromMessage(expiredMsg, localPeerID)
+	if err := store.CommitOwnedMessageChange(expiredMsg, head, change1); err != nil {
+		t.Fatal(err)
+	}
+
+	freshMsg := ChannelMessage{
+		ChannelID:     profile.ChannelID,
+		MessageID:     2,
+		Version:       1,
+		Seq:           2,
+		OwnerVersion:  1,
+		CreatorPeerID: localPeerID,
+		AuthorPeerID:  localPeerID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Content:       NormalizeMessageContent("fresh", nil),
+		MessageType:   MessageTypeText,
+	}
+	if err := signMessage(priv, &freshMsg); err != nil {
+		t.Fatal(err)
+	}
+	head.LastMessageID = 2
+	head.LastSeq = 2
+	head.UpdatedAt = now
+	if err := signHead(priv, &head); err != nil {
+		t.Fatal(err)
+	}
+	change2 := changeFromMessage(freshMsg, localPeerID)
+	if err := store.CommitOwnedMessageChange(freshMsg, head, change2); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CleanupExpiredMessages(time.Unix(now, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetChannelMessage(profile.ChannelID, 1); err != sql.ErrNoRows {
+		t.Fatalf("want expired message deleted, got err=%v", err)
+	}
+	msg2, err := store.GetChannelMessage(profile.ChannelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg2.MessageID != 2 {
+		t.Fatalf("want fresh message 2, got %d", msg2.MessageID)
+	}
+	changes, err := store.GetChannelChanges(profile.ChannelID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes.Items) != 1 || changes.Items[0].MessageID == nil || *changes.Items[0].MessageID != 2 {
+		t.Fatalf("want only fresh change after cleanup, got %#v", changes.Items)
+	}
+	state, err := store.GetChannelSyncState(profile.ChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LatestLoadedMessageID != 2 || state.OldestLoadedMessageID != 2 {
+		t.Fatalf("want loaded range reset to message 2, got latest=%d oldest=%d", state.LatestLoadedMessageID, state.OldestLoadedMessageID)
 	}
 }
 
@@ -797,7 +945,7 @@ func TestCreateChannelWithAvatarPinsToIPFS(t *testing.T) {
 	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "avatar.db"))
 	svc.SetIPFSFilePinner(fakeIPFSPinner{cid: "bafybeiavatarest"})
 
-	summary, err := svc.CreateChannelWithAvatar("avatar-channel", "bio", "avatar.png", "image/png", []byte("avatar-bytes"))
+	summary, err := svc.CreateChannelWithAvatar("avatar-channel", "bio", 0, "avatar.png", "image/png", []byte("avatar-bytes"))
 	if err != nil {
 		t.Fatal(err)
 	}

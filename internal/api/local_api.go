@@ -317,9 +317,9 @@ type ChatProvider interface {
 
 type PublicChannelProvider interface {
 	CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error)
-	CreateChannelWithAvatar(name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
+	CreateChannelWithAvatar(name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
 	UpdateChannelProfile(channelID string, input publicchannel.UpdateChannelProfileInput) (publicchannel.ChannelSummary, error)
-	UpdateChannelProfileWithAvatar(channelID, name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
+	UpdateChannelProfileWithAvatar(channelID, name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
 	CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
 	CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error)
 	UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
@@ -1107,10 +1107,10 @@ func (a *LocalAPI) handleIdentityPrivateKeyExport(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, map[string]any{
-		"encoding":            "base58",
-		"peer_id":             peerID,
-		"private_key_base58":  privateKeyBase58,
-		"requires_restart":    false,
+		"encoding":           "base58",
+		"peer_id":            peerID,
+		"private_key_base58": privateKeyBase58,
+		"requires_restart":   false,
 	})
 }
 
@@ -1136,10 +1136,10 @@ func (a *LocalAPI) handleIdentityPrivateKeyImport(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, map[string]any{
-		"ok":                true,
-		"encoding":          "base58",
-		"peer_id":           peerID,
-		"requires_restart":  true,
+		"ok":               true,
+		"encoding":         "base58",
+		"peer_id":          peerID,
+		"requires_restart": true,
 	})
 }
 
@@ -2049,9 +2049,19 @@ func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) 
 			if mimeType == "" {
 				mimeType = http.DetectContentType(data)
 			}
+			retentionMinutes := 0
+			if raw := strings.TrimSpace(r.FormValue("message_retention_minutes")); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil {
+					http.Error(w, "invalid message_retention_minutes: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				retentionMinutes = parsed
+			}
 			item, err := a.opts.PublicChannels.CreateChannelWithAvatar(
 				r.FormValue("name"),
 				r.FormValue("bio"),
+				retentionMinutes,
 				header.Filename,
 				mimeType,
 				data,
@@ -2141,10 +2151,27 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 				if mimeType == "" {
 					mimeType = http.DetectContentType(data)
 				}
+				retentionMinutes := 0
+				if raw := strings.TrimSpace(r.FormValue("message_retention_minutes")); raw != "" {
+					parsed, err := strconv.Atoi(raw)
+					if err != nil {
+						http.Error(w, "invalid message_retention_minutes: "+err.Error(), http.StatusBadRequest)
+						return
+					}
+					retentionMinutes = parsed
+				} else {
+					current, err := a.opts.PublicChannels.GetChannelSummary(channelID)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					retentionMinutes = current.Profile.MessageRetentionMinutes
+				}
 				item, err := a.opts.PublicChannels.UpdateChannelProfileWithAvatar(
 					channelID,
 					r.FormValue("name"),
 					r.FormValue("bio"),
+					retentionMinutes,
 					header.Filename,
 					mimeType,
 					data,
