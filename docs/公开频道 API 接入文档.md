@@ -159,6 +159,12 @@
 }
 ```
 
+说明：
+
+- 当前实现里，公开频道头像和文件的 IPFS CID 通过 `blob_id` 返回
+- 如果业务侧需要记录 CID，请直接持久化 `blob_id`
+- 资源访问默认推荐使用当前节点本地 `/ipfs/{blob_id}/...` 路径
+
 ### 4.3 ChannelChange
 
 ```json
@@ -228,6 +234,8 @@
 
 - 头像会直接走当前节点的嵌入式 IPFS 落地链路
 - 返回中的 `profile.avatar.blob_id/url/sha256` 会被自动填充
+- `profile.avatar.blob_id` 就是该头像文件的 IPFS CID
+- 头像访问默认推荐使用当前节点本地 `/ipfs/{blob_id}/...` 路径
 
 ### 5.2 按 owner 列出频道
 
@@ -542,6 +550,8 @@
   - `sha256`
   - `size`
   - `mime_type`
+- `content.files[0].blob_id` 就是该文件的 IPFS CID，数据记录建议直接保存它
+- 文件访问默认推荐使用当前节点本地 `/ipfs/{blob_id}/...` 路径
 - `message_type` 会自动识别成：
   - `image`
   - `video`
