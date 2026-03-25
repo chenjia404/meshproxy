@@ -52,8 +52,50 @@ func TestCreatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 	}
 }
 
+func TestUpdatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
+	t.Parallel()
+
+	summary := publicchannel.ChannelSummary{
+		Profile: publicchannel.ChannelProfile{
+			ChannelID:   "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+			OwnerPeerID: "12D3KooWTestOwner",
+			Name:        "updated",
+		},
+		Head: publicchannel.ChannelHead{
+			ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+		},
+	}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: stubPublicChannelProvider{updateChannelResult: summary},
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/public-channels/"+summary.Profile.ChannelID, bytes.NewBufferString(`{"name":"updated"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["channel_id"] != summary.Profile.ChannelID {
+		t.Fatalf("want top-level channel_id %q, got %#v", summary.Profile.ChannelID, body["channel_id"])
+	}
+	profile, ok := body["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("want profile object, got %#v", body["profile"])
+	}
+	if profile["channel_id"] != summary.Profile.ChannelID {
+		t.Fatalf("want profile.channel_id %q, got %#v", summary.Profile.ChannelID, profile["channel_id"])
+	}
+}
+
 type stubPublicChannelProvider struct {
 	createChannelResult publicchannel.ChannelSummary
+	updateChannelResult publicchannel.ChannelSummary
 }
 
 func (s stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
@@ -65,11 +107,11 @@ func (s stubPublicChannelProvider) CreateChannelWithAvatar(name, bio, fileName, 
 }
 
 func (s stubPublicChannelProvider) UpdateChannelProfile(channelID string, input publicchannel.UpdateChannelProfileInput) (publicchannel.ChannelSummary, error) {
-	return publicchannel.ChannelSummary{}, nil
+	return s.updateChannelResult, nil
 }
 
 func (s stubPublicChannelProvider) UpdateChannelProfileWithAvatar(channelID, name, bio, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error) {
-	return publicchannel.ChannelSummary{}, nil
+	return s.updateChannelResult, nil
 }
 
 func (s stubPublicChannelProvider) CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {

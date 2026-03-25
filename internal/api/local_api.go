@@ -2058,7 +2058,7 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				writeJSON(w, item)
+				writeJSON(w, newPublicChannelSummaryResponse(item))
 				return
 			}
 			var body publicchannel.UpdateChannelProfileInput
@@ -2071,7 +2071,7 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, item)
+			writeJSON(w, newPublicChannelSummaryResponse(item))
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
