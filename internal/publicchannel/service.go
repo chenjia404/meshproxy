@@ -371,27 +371,27 @@ func (s *Service) CreateChannelMessage(channelID string, input UpsertMessageInpu
 	return msg, nil
 }
 
-func (s *Service) CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (ChannelMessage, error) {
+func (s *Service) buildPinnedChatFile(fileName, mimeType string, data []byte) (File, error) {
 	if s.ipfs == nil {
-		return ChannelMessage{}, errors.New("ipfs not available for public channel file upload")
+		return File{}, errors.New("ipfs not available for public channel file upload")
 	}
 	if len(data) == 0 {
-		return ChannelMessage{}, errors.New("file is empty")
+		return File{}, errors.New("file is empty")
 	}
 	fileName = chat.NormalizeChatFileName(fileName)
 	if fileName == "" {
-		return ChannelMessage{}, errors.New("file_name is required")
+		return File{}, errors.New("file_name is required")
 	}
 	mimeType = strings.TrimSpace(mimeType)
 	fileCID, err := s.ipfs.PinChatFile(s.ctx, fileName, data)
 	if err != nil {
-		return ChannelMessage{}, err
+		return File{}, err
 	}
 	if strings.TrimSpace(fileCID) == "" {
-		return ChannelMessage{}, errors.New("ipfs pin returned empty cid")
+		return File{}, errors.New("ipfs pin returned empty cid")
 	}
 	sum := sha256.Sum256(data)
-	file := File{
+	return File{
 		FileID:   fileCID,
 		FileName: fileName,
 		MIMEType: mimeType,
@@ -399,12 +399,34 @@ func (s *Service) CreateChannelFileMessage(channelID, text, fileName, mimeType s
 		SHA256:   hex.EncodeToString(sum[:]),
 		BlobID:   fileCID,
 		URL:      "/ipfs/" + fileCID + "/" + filepath.Base(fileName),
+	}, nil
+}
+
+func (s *Service) CreateChannelFilesMessage(channelID, text string, uploads []UploadFileInput) (ChannelMessage, error) {
+	if len(uploads) == 0 {
+		return ChannelMessage{}, errors.New("files are required")
+	}
+	files := make([]File, 0, len(uploads))
+	for _, item := range uploads {
+		file, err := s.buildPinnedChatFile(item.FileName, item.MIMEType, item.Data)
+		if err != nil {
+			return ChannelMessage{}, err
+		}
+		files = append(files, file)
 	}
 	return s.CreateChannelMessage(channelID, UpsertMessageInput{
-		MessageType: DetermineMessageType(MessageContent{Files: []File{file}}, "", false),
+		MessageType: DetermineMessageType(MessageContent{Files: files}, "", false),
 		Text:        text,
-		Files:       []File{file},
+		Files:       files,
 	})
+}
+
+func (s *Service) CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (ChannelMessage, error) {
+	return s.CreateChannelFilesMessage(channelID, text, []UploadFileInput{{
+		FileName: fileName,
+		MIMEType: mimeType,
+		Data:     data,
+	}})
 }
 
 func (s *Service) UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input UpsertMessageInput) (ChannelMessage, error) {

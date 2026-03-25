@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -270,11 +271,84 @@ func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) 
 	}
 }
 
+func TestCreatePublicChannelFilesMessageMultipart(t *testing.T) {
+	t.Parallel()
+
+	result := publicchannel.ChannelMessage{
+		ChannelID:   "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+		MessageID:   7,
+		MessageType: publicchannel.MessageTypeImage,
+		Content: publicchannel.MessageContent{
+			Text: "trip",
+			Files: []publicchannel.File{
+				{FileName: "a.png", MIMEType: "image/png", BlobID: "bafy-a"},
+				{FileName: "b.png", MIMEType: "image/png", BlobID: "bafy-b"},
+			},
+		},
+	}
+	provider := &stubPublicChannelProvider{createChannelFilesResult: result}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{PublicChannels: provider})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("text", "trip"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("files", "a.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("png-a")); err != nil {
+		t.Fatal(err)
+	}
+	part, err = writer.CreateFormFile("files", "b.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("png-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels/"+result.ChannelID+"/messages/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if provider.createChannelFilesText != "trip" {
+		t.Fatalf("want text trip, got %q", provider.createChannelFilesText)
+	}
+	if len(provider.createChannelFilesUploads) != 2 {
+		t.Fatalf("want 2 uploaded files, got %d", len(provider.createChannelFilesUploads))
+	}
+	if provider.createChannelFilesUploads[0].FileName != "a.png" || provider.createChannelFilesUploads[1].FileName != "b.png" {
+		t.Fatalf("unexpected uploaded file names: %#v", provider.createChannelFilesUploads)
+	}
+	if provider.createChannelFilesUploads[0].MIMEType == "" || provider.createChannelFilesUploads[1].MIMEType == "" {
+		t.Fatalf("want detected mime types, got %#v", provider.createChannelFilesUploads)
+	}
+	var resp publicchannel.ChannelMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.MessageID != result.MessageID || len(resp.Content.Files) != 2 {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
 type stubPublicChannelProvider struct {
 	createChannelResult          publicchannel.ChannelSummary
 	createChannelInput           publicchannel.CreateChannelInput
 	updateChannelResult          publicchannel.ChannelSummary
 	updateChannelInput           publicchannel.UpdateChannelProfileInput
+	createChannelFilesResult     publicchannel.ChannelMessage
+	createChannelFilesText       string
+	createChannelFilesUploads    []publicchannel.UploadFileInput
 	getChannelSummaryResult      publicchannel.ChannelSummary
 	listSubscribedChannelsResult []publicchannel.ChannelSummary
 	getChannelMessagesResult     []publicchannel.ChannelMessage
@@ -308,6 +382,12 @@ func (s *stubPublicChannelProvider) CreateChannelMessage(channelID string, input
 
 func (s *stubPublicChannelProvider) CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error) {
 	return publicchannel.ChannelMessage{}, nil
+}
+
+func (s *stubPublicChannelProvider) CreateChannelFilesMessage(channelID, text string, files []publicchannel.UploadFileInput) (publicchannel.ChannelMessage, error) {
+	s.createChannelFilesText = text
+	s.createChannelFilesUploads = append([]publicchannel.UploadFileInput(nil), files...)
+	return s.createChannelFilesResult, nil
 }
 
 func (s *stubPublicChannelProvider) UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error) {

@@ -565,7 +565,45 @@
   - `audio`
   - `file`
 
-### 8.3 更新消息
+### 8.3 发送多文件图文消息
+
+`POST /api/v1/public-channels/{channel_id}/messages/files`
+
+`Content-Type: multipart/form-data`
+
+表单字段：
+
+- `files`：必填，可重复传多个
+- `text`：可选
+
+返回：
+
+- `ChannelMessage`
+
+说明：
+
+- 这个接口会把多个上传文件 pin 到当前节点嵌入式 IPFS，再创建为一条消息
+- 适合“一段文字 + 多张图片”这类图文内容
+- 返回中的 `content.files[]` 会包含每个文件的：
+  - `file_id`
+  - `blob_id`
+  - `url`
+  - `sha256`
+  - `size`
+  - `mime_type`
+- 如果所有文件都能识别为 `image/*`，`message_type` 会自动识别为 `image`
+- 如果混入非图片文件，`message_type` 可能会按首个可识别附件类型或 `file` 处理；标准客户端应以 `content.files[]` 为准渲染
+
+示例：
+
+```bash
+curl -X POST "http://127.0.0.1:19080/api/v1/public-channels/{channel_id}/messages/files" \
+  -F "text=旅行相册" \
+  -F "files=@/path/to/a.png" \
+  -F "files=@/path/to/b.png"
+```
+
+### 8.4 更新消息
 
 `PUT /api/v1/public-channels/{channel_id}/messages/{message_id}`
 
@@ -599,7 +637,7 @@
 - 如果更新带附件，需要调用方自己带完整 `files[]` 元数据
 - owner 修改旧消息前，服务端会先确保拉到该消息最新版本，避免盲改
 
-### 8.4 删除消息
+### 8.5 删除消息
 
 `DELETE /api/v1/public-channels/{channel_id}/messages/{message_id}`
 
@@ -646,6 +684,7 @@
 
 1. 纯文本或系统消息：`POST /messages`
 2. 图片/视频/语音/文件：`POST /messages/file`
+3. 一条消息带多张图片或多个附件：`POST /messages/files`
 
 前端不需要自己先把文件传 IPFS；本地节点会负责 pin 并回填元数据。
 

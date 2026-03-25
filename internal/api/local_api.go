@@ -322,6 +322,7 @@ type PublicChannelProvider interface {
 	UpdateChannelProfileWithAvatar(channelID, name, bio string, messageRetentionMinutes int, fileName, mimeType string, data []byte) (publicchannel.ChannelSummary, error)
 	CreateChannelMessage(channelID string, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
 	CreateChannelFileMessage(channelID, text, fileName, mimeType string, data []byte) (publicchannel.ChannelMessage, error)
+	CreateChannelFilesMessage(channelID, text string, files []publicchannel.UploadFileInput) (publicchannel.ChannelMessage, error)
 	UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input publicchannel.UpsertMessageInput) (publicchannel.ChannelMessage, error)
 	DeleteChannelMessage(ctx context.Context, channelID string, messageID int64) (publicchannel.ChannelMessage, error)
 	GetChannelSummary(channelID string) (publicchannel.ChannelSummary, error)
@@ -2320,6 +2321,51 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 			default:
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			}
+			return
+		}
+		if len(parts) == 3 && parts[2] == "files" {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseMultipartForm(chat.MaxChatFileBytes + (1 << 20)); err != nil {
+				http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			fileHeaders := r.MultipartForm.File["files"]
+			if len(fileHeaders) == 0 {
+				http.Error(w, "missing files", http.StatusBadRequest)
+				return
+			}
+			uploads := make([]publicchannel.UploadFileInput, 0, len(fileHeaders))
+			for _, header := range fileHeaders {
+				file, err := header.Open()
+				if err != nil {
+					http.Error(w, "open file: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				data, err := chat.ValidateChatFileData(file)
+				_ = file.Close()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				mimeType := strings.TrimSpace(header.Header.Get("Content-Type"))
+				if mimeType == "" {
+					mimeType = http.DetectContentType(data)
+				}
+				uploads = append(uploads, publicchannel.UploadFileInput{
+					FileName: header.Filename,
+					MIMEType: mimeType,
+					Data:     data,
+				})
+			}
+			item, err := a.opts.PublicChannels.CreateChannelFilesMessage(channelID, r.FormValue("text"), uploads)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, item)
 			return
 		}
 		if len(parts) == 3 && parts[2] == "file" {

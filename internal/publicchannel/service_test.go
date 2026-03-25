@@ -1071,6 +1071,59 @@ func TestCreateChannelFileMessageDetectsImageType(t *testing.T) {
 	}
 }
 
+func TestCreateChannelFilesMessageCreatesSingleImagePost(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13004")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "images-multi.db"))
+	svc.SetIPFSFilePinner(&fakeSequenceIPFSPinner{chatCIDs: []string{"bafy-one", "bafy-two"}})
+
+	summary, err := svc.CreateChannel(CreateChannelInput{Name: "gallery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := svc.CreateChannelFilesMessage(summary.Profile.ChannelID, "album", []UploadFileInput{
+		{FileName: "a.png", MIMEType: "image/png", Data: []byte("png-one")},
+		{FileName: "b.png", MIMEType: "image/png", Data: []byte("png-two")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.MessageID != 1 {
+		t.Fatalf("want message id 1, got %d", msg.MessageID)
+	}
+	if msg.MessageType != MessageTypeImage {
+		t.Fatalf("want message type %q, got %q", MessageTypeImage, msg.MessageType)
+	}
+	if msg.Content.Text != "album" {
+		t.Fatalf("want text album, got %q", msg.Content.Text)
+	}
+	if len(msg.Content.Files) != 2 {
+		t.Fatalf("want 2 files, got %d", len(msg.Content.Files))
+	}
+	if msg.Content.Files[0].BlobID != "bafy-one" || msg.Content.Files[1].BlobID != "bafy-two" {
+		t.Fatalf("unexpected blob ids: %#v", msg.Content.Files)
+	}
+	if msg.Content.Files[0].URL != "/ipfs/bafy-one/a.png" || msg.Content.Files[1].URL != "/ipfs/bafy-two/b.png" {
+		t.Fatalf("unexpected urls: %#v", msg.Content.Files)
+	}
+}
+
 func TestCreateChannelWithAvatarPinsToIPFS(t *testing.T) {
 	t.Parallel()
 
@@ -1172,6 +1225,26 @@ func (f fakeIPFSPinner) PinAvatar(ctx context.Context, fileName string, data []b
 
 func (f fakeIPFSPinner) PinChatFile(ctx context.Context, fileName string, data []byte) (string, error) {
 	return f.cid, nil
+}
+
+type fakeSequenceIPFSPinner struct {
+	chatCIDs []string
+}
+
+func (f *fakeSequenceIPFSPinner) PinAvatar(ctx context.Context, fileName string, data []byte) (string, error) {
+	if len(f.chatCIDs) == 0 {
+		return "", nil
+	}
+	return f.chatCIDs[0], nil
+}
+
+func (f *fakeSequenceIPFSPinner) PinChatFile(ctx context.Context, fileName string, data []byte) (string, error) {
+	if len(f.chatCIDs) == 0 {
+		return "", nil
+	}
+	cid := f.chatCIDs[0]
+	f.chatCIDs = f.chatCIDs[1:]
+	return cid, nil
 }
 
 type blockingRouting struct {

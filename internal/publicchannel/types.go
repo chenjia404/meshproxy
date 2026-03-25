@@ -180,6 +180,12 @@ type UpsertMessageInput struct {
 	Files       []File `json:"files"`
 }
 
+type UploadFileInput struct {
+	FileName string
+	MIMEType string
+	Data     []byte
+}
+
 type RPCRequest struct {
 	RequestID string          `json:"request_id"`
 	Method    string          `json:"method"`
