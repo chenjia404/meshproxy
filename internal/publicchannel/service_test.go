@@ -165,6 +165,52 @@ func TestSubscribeReceivesPubSubAndSyncsChanges(t *testing.T) {
 	t.Fatal("reader did not receive second message via pubsub+sync")
 }
 
+func TestSubscribeChannelRecordsPlaceholderBeforeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/12007")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "subscribe-placeholder.db"))
+
+	channelID := mustUUIDv7(t)
+	_, seedPeerID := mustTestIdentity(t)
+	result, err := svc.SubscribeChannel(ctx, channelID, []string{seedPeerID}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Profile.ChannelID != channelID {
+		t.Fatalf("want placeholder profile channel %q, got %q", channelID, result.Profile.ChannelID)
+	}
+	state, err := svc.store.GetChannelSyncState(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Subscribed {
+		t.Fatal("placeholder subscription should be stored as subscribed")
+	}
+	providers, err := svc.store.ListProviders(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0].PeerID != seedPeerID {
+		t.Fatalf("want placeholder seed provider %q, got %#v", seedPeerID, providers)
+	}
+}
+
 func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 	t.Parallel()
 

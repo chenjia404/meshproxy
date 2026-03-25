@@ -497,51 +497,126 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 		return SubscribeResult{}, err
 	}
 	now := time.Now().Unix()
-	for _, peerID := range seedPeerIDs {
-		s.upsertProviderIfKnown(channelID, peerID, "seed", now)
-	}
-	remoteProfile, remoteHead, remoteMessages, providers, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
-	if err != nil {
-		return SubscribeResult{}, err
-	}
-	if err := s.store.ApplyProfile(remoteProfile); err != nil {
+	if err := s.store.EnsureSubscribedChannel(channelID, lastSeenSeq, now); err != nil {
 		return SubscribeResult{}, err
 	}
 	for _, peerID := range seedPeerIDs {
 		_ = s.upsertProviderIfKnown(channelID, peerID, "seed", now)
 	}
-	if err := s.store.ApplyHead(remoteHead); err != nil {
-		return SubscribeResult{}, err
-	}
-	for _, item := range remoteMessages {
-		if err := s.applyVerifiedMessage(item); err != nil {
-			return SubscribeResult{}, err
-		}
-	}
-	if err := s.store.UpdateLoadedRange(channelID, remoteMessages, now); err != nil {
-		return SubscribeResult{}, err
-	}
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
-	s.ensureProvided(channelID)
-	resumeFrom := clampInt64(lastSeenSeq, 0, remoteHead.LastSeq)
-	if resumeFrom <= 0 {
-		if err := s.store.UpdateSyncState(channelID, remoteHead.LastSeq, remoteHead.LastSeq, true, now); err != nil {
-			return SubscribeResult{}, err
-		}
-	} else {
-		if err := s.store.UpdateSyncState(channelID, resumeFrom, resumeFrom, true, now); err != nil {
-			return SubscribeResult{}, err
-		}
-		if err := s.syncAfter(ctx, channelID, resumeFrom); err != nil {
-			log.Printf("[publicchannel] post-subscribe resume sync %s from %d: %v", channelID, resumeFrom, err)
-		}
+	remoteProfile, remoteHead, remoteMessages, providers, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
+	if err != nil {
+		log.Printf("[publicchannel] initial subscribe snapshot %s: %v", channelID, err)
+		s.bootstrapSubscriptionAsync(channelID, append([]string(nil), seedPeerIDs...), lastSeenSeq)
+		return s.localSubscribeResult(channelID)
+	}
+	if err := s.applyInitialSnapshot(ctx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now); err != nil {
+		return SubscribeResult{}, err
 	}
 	return SubscribeResult{
 		Profile:   remoteProfile,
 		Head:      remoteHead,
 		Messages:  remoteMessages,
+		Providers: providers,
+	}, nil
+}
+
+func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (SubscribeResult, error) {
+	if err := ValidateChannelID(channelID); err != nil {
+		return SubscribeResult{}, err
+	}
+	now := time.Now().Unix()
+	if err := s.store.EnsureSubscribedChannel(channelID, lastSeenSeq, now); err != nil {
+		return SubscribeResult{}, err
+	}
+	for _, peerID := range seedPeerIDs {
+		_ = s.upsertProviderIfKnown(channelID, peerID, "seed", now)
+	}
+	if err := s.subscribeTopic(channelID); err != nil {
+		return SubscribeResult{}, err
+	}
+	s.bootstrapSubscriptionAsync(channelID, append([]string(nil), seedPeerIDs...), lastSeenSeq)
+	return s.localSubscribeResult(channelID)
+}
+
+func (s *Service) applyInitialSnapshot(ctx context.Context, channelID string, remoteProfile ChannelProfile, remoteHead ChannelHead, remoteMessages []ChannelMessage, seedPeerIDs []string, lastSeenSeq, now int64) error {
+	if err := s.store.ApplyProfile(remoteProfile); err != nil {
+		return err
+	}
+	for _, peerID := range seedPeerIDs {
+		_ = s.upsertProviderIfKnown(channelID, peerID, "seed", now)
+	}
+	if err := s.store.ApplyHead(remoteHead); err != nil {
+		return err
+	}
+	for _, item := range remoteMessages {
+		if err := s.applyVerifiedMessage(item); err != nil {
+			return err
+		}
+	}
+	if err := s.store.UpdateLoadedRange(channelID, remoteMessages, now); err != nil {
+		return err
+	}
+	s.ensureProvided(channelID)
+	resumeFrom := clampInt64(lastSeenSeq, 0, remoteHead.LastSeq)
+	if resumeFrom <= 0 {
+		if err := s.store.UpdateSyncState(channelID, remoteHead.LastSeq, remoteHead.LastSeq, true, now); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := s.store.UpdateSyncState(channelID, resumeFrom, resumeFrom, true, now); err != nil {
+		return err
+	}
+	if err := s.syncAfter(ctx, channelID, resumeFrom); err != nil {
+		log.Printf("[publicchannel] post-subscribe resume sync %s from %d: %v", channelID, resumeFrom, err)
+	}
+	return nil
+}
+
+func (s *Service) bootstrapSubscriptionAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) {
+	safe.Go("publicchannel.subscribe.bootstrap."+channelID, func() {
+		ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+		defer cancel()
+		now := time.Now().Unix()
+		remoteProfile, remoteHead, remoteMessages, _, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
+		if err != nil {
+			log.Printf("[publicchannel] async subscribe snapshot %s: %v", channelID, err)
+			return
+		}
+		if err := s.applyInitialSnapshot(ctx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now); err != nil {
+			log.Printf("[publicchannel] async subscribe apply %s: %v", channelID, err)
+		}
+	})
+}
+
+func (s *Service) localSubscribeResult(channelID string) (SubscribeResult, error) {
+	summary, err := s.store.GetChannelSummary(channelID)
+	if err != nil {
+		return SubscribeResult{}, err
+	}
+	messages, err := s.store.GetChannelMessages(channelID, 0, DefaultPageLimit)
+	if err == sql.ErrNoRows {
+		messages = nil
+		err = nil
+	}
+	if err != nil {
+		return SubscribeResult{}, err
+	}
+	providers, err := s.store.ListProviders(channelID)
+	if err == sql.ErrNoRows {
+		providers = nil
+		err = nil
+	}
+	if err != nil {
+		return SubscribeResult{}, err
+	}
+	return SubscribeResult{
+		Profile:   summary.Profile,
+		Head:      summary.Head,
+		Messages:  messages,
 		Providers: providers,
 	}, nil
 }

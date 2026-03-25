@@ -199,6 +199,38 @@ func TestGetPublicChannelMessagesReturnsLocalDataAndLoadsAsync(t *testing.T) {
 	}
 }
 
+func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) {
+	t.Parallel()
+
+	result := publicchannel.SubscribeResult{
+		Profile: publicchannel.ChannelProfile{ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123"},
+		Head:    publicchannel.ChannelHead{ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123"},
+	}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: stubPublicChannelProvider{subscribeAsyncResult: result},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels/"+result.Profile.ChannelID+"/subscribe", bytes.NewBufferString(`{"peer_ids":["12D3KooWSeedPeer"],"last_seen_seq":0}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	profile, ok := body["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("want profile object, got %#v", body["profile"])
+	}
+	if profile["channel_id"] != result.Profile.ChannelID {
+		t.Fatalf("want placeholder channel_id %q, got %#v", result.Profile.ChannelID, profile["channel_id"])
+	}
+}
+
 type stubPublicChannelProvider struct {
 	createChannelResult          publicchannel.ChannelSummary
 	updateChannelResult          publicchannel.ChannelSummary
@@ -207,6 +239,7 @@ type stubPublicChannelProvider struct {
 	getChannelMessagesErr        error
 	loadMessagesErr              error
 	loadMessagesCalled           chan struct{}
+	subscribeAsyncResult         publicchannel.SubscribeResult
 }
 
 func (s stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
@@ -275,6 +308,10 @@ func (s stubPublicChannelProvider) ListProviders(channelID string) ([]publicchan
 
 func (s stubPublicChannelProvider) SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
 	return publicchannel.SubscribeResult{}, nil
+}
+
+func (s stubPublicChannelProvider) SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {
+	return s.subscribeAsyncResult, nil
 }
 
 func (s stubPublicChannelProvider) UnsubscribeChannel(channelID string) error {

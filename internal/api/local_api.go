@@ -327,6 +327,7 @@ type PublicChannelProvider interface {
 	ListSubscribedChannels() ([]publicchannel.ChannelSummary, error)
 	ListProviders(channelID string) ([]publicchannel.ChannelProvider, error)
 	SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
+	SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
 	UnsubscribeChannel(channelID string) error
 	SyncChannel(ctx context.Context, channelID string) error
 	LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error)
@@ -2141,7 +2142,7 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 		if strings.TrimSpace(body.PeerID) != "" {
 			body.PeerIDs = append(body.PeerIDs, strings.TrimSpace(body.PeerID))
 		}
-		item, err := a.opts.PublicChannels.SubscribeChannel(r.Context(), channelID, body.PeerIDs, body.LastSeenSeq)
+		item, err := a.opts.PublicChannels.SubscribeChannelAsync(channelID, body.PeerIDs, body.LastSeenSeq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

@@ -266,6 +266,57 @@ func (s *Store) CreateOwnedChannel(profile ChannelProfile, head ChannelHead, now
 	return nil
 }
 
+func (s *Store) EnsureSubscribedChannel(channelID string, lastSeenSeq, now int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var channelDBID int64
+	err = tx.QueryRow(`SELECT id FROM public_channels WHERE channel_id=?`, channelID).Scan(&channelDBID)
+	switch {
+	case err == sql.ErrNoRows:
+		res, err := tx.Exec(`
+			INSERT INTO public_channels(
+				channel_id, owner_peer_id, owner_version, name, avatar_json, bio, profile_version,
+				last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`, channelID, "", 0, "", "", "", 0, 0, 0, now, now, now, "", "")
+		if err != nil {
+			return err
+		}
+		channelDBID, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	}
+	if err := s.ensureSyncStateTx(tx, channelDBID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		UPDATE public_channel_sync_state
+		SET last_seen_seq=CASE
+				WHEN last_seen_seq < ? THEN ? ELSE last_seen_seq END,
+			subscribed=1,
+			updated_at=?
+		WHERE channel_db_id=?
+	`, lastSeenSeq, lastSeenSeq, now, channelDBID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func (s *Store) CommitOwnedProfileChange(profile ChannelProfile, head ChannelHead, change ChannelChange) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -442,7 +493,7 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 	case err != nil:
 		return err
 	default:
-		if profile.OwnerPeerID != currentProfile.OwnerPeerID {
+		if currentProfile.OwnerPeerID != "" && profile.OwnerPeerID != currentProfile.OwnerPeerID {
 			return fmt.Errorf("owner mismatch for channel %s", profile.ChannelID)
 		}
 		if profile.ProfileVersion < currentProfile.ProfileVersion {
@@ -453,9 +504,9 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 		}
 		if _, err := tx.Exec(`
 			UPDATE public_channels
-			SET owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, created_at=?, updated_at=?, profile_signature=?, head_signature=CASE WHEN head_signature='' THEN ? ELSE head_signature END
+			SET owner_peer_id=?, owner_version=?, name=?, avatar_json=?, bio=?, profile_version=?, created_at=?, updated_at=?, profile_signature=?, head_signature=CASE WHEN head_signature='' THEN ? ELSE head_signature END
 			WHERE id=?
-		`, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.ProfileVersion,
+		`, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio, profile.ProfileVersion,
 			profile.CreatedAt, profile.UpdatedAt, profile.Signature, currentHead.Signature, id); err != nil {
 			return err
 		}
