@@ -1938,6 +1938,19 @@ func newPublicChannelSummaryResponse(summary publicchannel.ChannelSummary) publi
 	}
 }
 
+func (a *LocalAPI) triggerPublicChannelMessageLoad(channelID string, beforeMessageID int64, limit int) {
+	if a.opts == nil || a.opts.PublicChannels == nil {
+		return
+	}
+	safe.Go("publicchannel.api.loadMessages", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, err := a.opts.PublicChannels.LoadMessagesFromProviders(ctx, channelID, beforeMessageID, limit); err != nil {
+			log.Printf("[publicchannel] async load messages %s before=%d limit=%d: %v", channelID, beforeMessageID, limit, err)
+		}
+	})
+}
+
 func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) {
 	if a.opts == nil || a.opts.PublicChannels == nil {
 		http.Error(w, "public channel service not available", http.StatusNotFound)
@@ -2177,21 +2190,29 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 			case http.MethodGet:
 				beforeMessageID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("before_message_id")), 10, 64)
 				limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
-				var (
-					items []publicchannel.ChannelMessage
-					err   error
-				)
-				if beforeMessageID > 0 {
-					items, err = a.opts.PublicChannels.LoadMessagesFromProviders(r.Context(), channelID, beforeMessageID, limit)
-				} else {
-					items, err = a.opts.PublicChannels.GetChannelMessages(channelID, beforeMessageID, limit)
-					if err == nil && len(items) == 0 {
-						items, err = a.opts.PublicChannels.LoadMessagesFromProviders(r.Context(), channelID, beforeMessageID, limit)
-					}
+				if limit <= 0 {
+					limit = publicchannel.DefaultPageLimit
+				}
+				items, err := a.opts.PublicChannels.GetChannelMessages(channelID, beforeMessageID, limit)
+				if err == sql.ErrNoRows {
+					items = nil
+					err = nil
 				}
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
+				}
+				needAsyncLoad := false
+				if beforeMessageID > 0 {
+					needAsyncLoad = len(items) < limit
+				} else if len(items) == 0 {
+					needAsyncLoad = true
+				}
+				if needAsyncLoad {
+					a.triggerPublicChannelMessageLoad(channelID, beforeMessageID, limit)
+				}
+				if items == nil {
+					items = []publicchannel.ChannelMessage{}
 				}
 				writeJSON(w, map[string]any{"channel_id": channelID, "items": items})
 			case http.MethodPost:

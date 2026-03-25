@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/chenjia404/meshproxy/internal/publicchannel"
 )
@@ -137,10 +139,51 @@ func TestListSubscribedPublicChannels(t *testing.T) {
 	}
 }
 
+func TestGetPublicChannelMessagesReturnsLocalDataAndLoadsAsync(t *testing.T) {
+	t.Parallel()
+
+	loadCalled := make(chan struct{}, 1)
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: stubPublicChannelProvider{
+			getChannelMessagesErr: sql.ErrNoRows,
+			loadMessagesErr:       context.DeadlineExceeded,
+			loadMessagesCalled:    loadCalled,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/public-channels/test-channel/messages?limit=20", nil)
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items, ok := body["items"].([]any)
+	if !ok {
+		t.Fatalf("want items array, got %#v", body["items"])
+	}
+	if len(items) != 0 {
+		t.Fatalf("want empty local items, got %d", len(items))
+	}
+	select {
+	case <-loadCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async message load to be triggered")
+	}
+}
+
 type stubPublicChannelProvider struct {
 	createChannelResult          publicchannel.ChannelSummary
 	updateChannelResult          publicchannel.ChannelSummary
 	listSubscribedChannelsResult []publicchannel.ChannelSummary
+	getChannelMessagesResult     []publicchannel.ChannelMessage
+	getChannelMessagesErr        error
+	loadMessagesErr              error
+	loadMessagesCalled           chan struct{}
 }
 
 func (s stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
@@ -184,7 +227,7 @@ func (s stubPublicChannelProvider) GetChannelHead(channelID string) (publicchann
 }
 
 func (s stubPublicChannelProvider) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
-	return nil, nil
+	return s.getChannelMessagesResult, s.getChannelMessagesErr
 }
 
 func (s stubPublicChannelProvider) GetChannelMessage(channelID string, messageID int64) (publicchannel.ChannelMessage, error) {
@@ -220,5 +263,11 @@ func (s stubPublicChannelProvider) SyncChannel(ctx context.Context, channelID st
 }
 
 func (s stubPublicChannelProvider) LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]publicchannel.ChannelMessage, error) {
-	return nil, nil
+	if s.loadMessagesCalled != nil {
+		select {
+		case s.loadMessagesCalled <- struct{}{}:
+		default:
+		}
+	}
+	return nil, s.loadMessagesErr
 }
