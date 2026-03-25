@@ -571,9 +571,19 @@ func (s *Service) UnsubscribeChannel(channelID string) error {
 }
 
 func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]ChannelMessage, error) {
+	if limit <= 0 {
+		limit = DefaultPageLimit
+	}
+	localItems, err := s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(localItems) >= limit {
+		return localItems, nil
+	}
 	peers := s.providerPeerIDs(ctx, channelID)
 	if len(peers) == 0 {
-		return s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+		return localItems, nil
 	}
 	body := struct {
 		ChannelID       string `json:"channel_id"`
@@ -586,6 +596,7 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	}
 	var resp GetMessagesResponse
 	var lastErr error
+	bestItems := localItems
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_messages", body, &resp); err != nil {
 			lastErr = err
@@ -597,12 +608,26 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 			}
 		}
 		_ = s.store.UpdateLoadedRange(channelID, resp.Items, time.Now().Unix())
-		return s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+		items, err := s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) > len(bestItems) {
+			bestItems = items
+		}
+		// 副本节点可能只缓存了部分历史；单个 provider 即便成功响应，也不能把空页或半页
+		// 直接当成“没有更早消息”，需要继续尝试后续 provider 直到凑满当前页。
+		if len(items) >= limit {
+			return items, nil
+		}
+	}
+	if len(bestItems) > 0 {
+		return bestItems, nil
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+	return localItems, nil
 }
 
 func (s *Service) SyncChannel(ctx context.Context, channelID string) error {

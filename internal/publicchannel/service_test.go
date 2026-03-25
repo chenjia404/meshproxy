@@ -281,6 +281,104 @@ func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 	}
 }
 
+func TestLoadMessagesFromProvidersFallsBackToNextProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	partialPriv, partialPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12021")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12022")
+	addr3 := mustMultiaddr(t, "/ip6/::1/tcp/12023")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialHost, err := mn.AddPeer(partialPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), partialHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(partialHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialPS, err := pubsub.NewGossipSub(ctx, partialHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-history.db"))
+	partialSvc := mustTestService(t, ctx, partialHost, partialPS, partialPriv, filepath.Join(t.TempDir(), "partial-history.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-history.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "history-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	for i := 1; i <= 40; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("history-%02d", i)}); err != nil {
+			t.Fatalf("create message %d: %v", i, err)
+		}
+	}
+
+	if _, err := partialSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatalf("partial subscribe: %v", err)
+	}
+	if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{partialPeerID}, 0); err != nil {
+		t.Fatalf("reader subscribe: %v", err)
+	}
+	now := time.Now().Unix()
+	if err := readerSvc.store.UpsertProvider(channelID, partialPeerID, "seed", now); err != nil {
+		t.Fatalf("upsert partial provider: %v", err)
+	}
+	if err := readerSvc.store.UpsertProvider(channelID, ownerPeerID, "seed", now-1); err != nil {
+		t.Fatalf("upsert owner provider: %v", err)
+	}
+
+	items, err := readerSvc.LoadMessagesFromProviders(ctx, channelID, 21, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 20 {
+		t.Fatalf("want 20 older messages, got %d", len(items))
+	}
+	if items[0].MessageID != 20 {
+		t.Fatalf("want first loaded message id 20, got %d", items[0].MessageID)
+	}
+	if items[len(items)-1].MessageID != 1 {
+		t.Fatalf("want last loaded message id 1, got %d", items[len(items)-1].MessageID)
+	}
+}
+
 func TestCreateChannelFileMessagePinsToIPFS(t *testing.T) {
 	t.Parallel()
 
