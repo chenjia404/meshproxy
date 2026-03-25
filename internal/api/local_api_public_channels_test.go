@@ -93,9 +93,54 @@ func TestUpdatePublicChannelReturnsTopLevelChannelID(t *testing.T) {
 	}
 }
 
+func TestListSubscribedPublicChannels(t *testing.T) {
+	t.Parallel()
+
+	items := []publicchannel.ChannelSummary{
+		{
+			Profile: publicchannel.ChannelProfile{
+				ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+				Name:      "sub-1",
+			},
+		},
+		{
+			Profile: publicchannel.ChannelProfile{
+				ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e124",
+				Name:      "sub-2",
+			},
+		},
+	}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: stubPublicChannelProvider{listSubscribedChannelsResult: items},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/public-channels/subscriptions", nil)
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 2 {
+		t.Fatalf("want 2 subscribed channels, got %d", len(body))
+	}
+	profile, ok := body[0]["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("want profile object, got %#v", body[0]["profile"])
+	}
+	if profile["channel_id"] != items[0].Profile.ChannelID {
+		t.Fatalf("want first subscribed channel %q, got %#v", items[0].Profile.ChannelID, profile["channel_id"])
+	}
+}
+
 type stubPublicChannelProvider struct {
-	createChannelResult publicchannel.ChannelSummary
-	updateChannelResult publicchannel.ChannelSummary
+	createChannelResult          publicchannel.ChannelSummary
+	updateChannelResult          publicchannel.ChannelSummary
+	listSubscribedChannelsResult []publicchannel.ChannelSummary
 }
 
 func (s stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
@@ -152,6 +197,10 @@ func (s stubPublicChannelProvider) GetChannelChanges(channelID string, afterSeq 
 
 func (s stubPublicChannelProvider) ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error) {
 	return nil, nil
+}
+
+func (s stubPublicChannelProvider) ListSubscribedChannels() ([]publicchannel.ChannelSummary, error) {
+	return s.listSubscribedChannelsResult, nil
 }
 
 func (s stubPublicChannelProvider) ListProviders(channelID string) ([]publicchannel.ChannelProvider, error) {

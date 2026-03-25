@@ -250,7 +250,17 @@
 ]
 ```
 
-### 5.3 获取频道详情
+### 5.3 列出本地已订阅频道
+
+`GET /api/v1/public-channels/subscriptions`
+
+语义：
+
+- 只返回本地已知且 `sync.subscribed=true` 的频道
+- 当前按 `public_channel_sync_state.updated_at DESC, public_channels.id DESC` 排序
+- 返回 `ChannelSummary[]`
+
+### 5.4 获取频道详情
 
 `GET /api/v1/public-channels/{channel_id}`
 
@@ -258,7 +268,7 @@
 
 - `ChannelSummary`
 
-### 5.4 获取频道 head
+### 5.5 获取频道 head
 
 `GET /api/v1/public-channels/{channel_id}/head`
 
@@ -266,7 +276,7 @@
 
 - `ChannelHead`
 
-### 5.5 更新频道资料
+### 5.6 更新频道资料
 
 #### JSON 更新
 

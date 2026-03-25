@@ -324,6 +324,7 @@ type PublicChannelProvider interface {
 	GetChannelMessage(channelID string, messageID int64) (publicchannel.ChannelMessage, error)
 	GetChannelChanges(channelID string, afterSeq int64, limit int) (publicchannel.GetChangesResponse, error)
 	ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error)
+	ListSubscribedChannels() ([]publicchannel.ChannelSummary, error)
 	ListProviders(channelID string) ([]publicchannel.ChannelProvider, error)
 	SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
 	UnsubscribeChannel(channelID string) error
@@ -408,6 +409,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
 	mux.HandleFunc("/api/v1/public-channels", api.handlePublicChannels)
+	mux.HandleFunc("/api/v1/public-channels/subscriptions", api.handlePublicChannelSubscriptions)
 	mux.HandleFunc("/api/v1/public-channels/", api.handlePublicChannelItem)
 	mux.HandleFunc("/api/v1/meshserver/spaces", api.handleMeshServerServers)
 	mux.HandleFunc("/api/v1/meshserver/spaces/", api.handleMeshServerServerItem)
@@ -2002,6 +2004,23 @@ func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *LocalAPI) handlePublicChannelSubscriptions(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.PublicChannels == nil {
+		http.Error(w, "public channel service not available", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	items, err := a.opts.PublicChannels.ListSubscribedChannels()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, items)
 }
 
 func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Request) {

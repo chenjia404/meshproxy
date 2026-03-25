@@ -167,6 +167,10 @@ func (s *Service) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, err
 	return s.store.ListChannelsByOwner(strings.TrimSpace(ownerPeerID))
 }
 
+func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
+	return s.store.ListSubscribedChannels()
+}
+
 func (s *Service) ListProviders(channelID string) ([]ChannelProvider, error) {
 	return s.store.ListProviders(channelID)
 }

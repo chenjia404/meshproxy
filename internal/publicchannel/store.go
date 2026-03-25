@@ -988,6 +988,40 @@ func (s *Store) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, error
 	return out, nil
 }
 
+func (s *Store) ListSubscribedChannels() ([]ChannelSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT c.channel_id
+		FROM public_channels c
+		JOIN public_channel_sync_state s ON s.channel_db_id = c.id
+		WHERE s.subscribed = 1
+		ORDER BY s.updated_at DESC, c.id DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var channelID string
+		if err := rows.Scan(&channelID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, channelID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]ChannelSummary, 0, len(ids))
+	for _, channelID := range ids {
+		item, err := s.GetChannelSummary(channelID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
 func boolToInt(v bool) int {
 	if v {
 		return 1

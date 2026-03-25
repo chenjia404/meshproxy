@@ -549,6 +549,62 @@ func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
 	}
 }
 
+func TestListSubscribedChannels(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13006")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "subscriptions.db"))
+
+	first, err := svc.CreateChannel(CreateChannelInput{Name: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.CreateChannel(CreateChannelInput{Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := svc.CreateChannel(CreateChannelInput{Name: "third"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.UnsubscribeChannel(second.Profile.ChannelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpdateSyncState(first.Profile.ChannelID, first.Head.LastSeq, first.Head.LastSeq, true, time.Now().Unix()+100); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := svc.ListSubscribedChannels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want 2 subscribed channels, got %d", len(items))
+	}
+	if items[0].Profile.ChannelID != first.Profile.ChannelID {
+		t.Fatalf("want first subscribed channel %q, got %q", first.Profile.ChannelID, items[0].Profile.ChannelID)
+	}
+	if items[1].Profile.ChannelID != third.Profile.ChannelID {
+		t.Fatalf("want second subscribed channel %q, got %q", third.Profile.ChannelID, items[1].Profile.ChannelID)
+	}
+}
+
 func TestCreateChannelFileMessagePinsToIPFS(t *testing.T) {
 	t.Parallel()
 
