@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chenjia404/meshproxy/internal/logfilter"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/sdk"
 )
@@ -51,6 +52,7 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config after overrides: %v", err)
 	}
+	logfilter.Apply(cfg.LogModules)
 	if cleanup, err := setupCrashCapture(cfg.DataDir); err != nil {
 		log.Printf("setup crash capture failed: %v", err)
 	} else {

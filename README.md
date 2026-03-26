@@ -123,12 +123,39 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 - **`socks5.tunnel_to_exit`**：是否开启“本地原样转发到 exit 的 SOCKS5”模式。开启后，本地 `socks5.listen` 接收到的 TCP 连接不会在本地解析 SOCKS5，而是直接通过 raw libp2p stream 原样转发到 exit 节点上的 SOCKS5 服务。
 - **`socks5.exit_upstream`**：当 `socks5.tunnel_to_exit: true` 时，exit 节点实际连接的上游 SOCKS5 地址，默认 `127.0.0.1:1081`。`relay+exit` 节点会额外启动一个标准 SOCKS5（默认 1081），它直接出网，但仍受出口策略限制。
 - **`api.listen`**：本地 HTTP API 监听地址，例如 `127.0.0.1:19080`。
+- **`log_modules`**：逗号分隔的模块名，用于过滤**标准库 `log`** 输出：只保留消息中带 `[模块名]` 标签的行（例如配置 `chat` 对应代码里的 `log.Printf("[chat] ...")`）；留空则不过滤、输出全部。不带 `[xxx]` 前缀的行（如启动提示）仍会输出。也可通过命令行 `--log_modules=chat,path_selector` 覆盖配置文件。
 
 **出口策略（仅在 `mode: relay+exit` 时生效）**：在配置中可加入 `exit` 段，用于控制出口允许的端口、域名、peer、是否允许私网/回环目标，以及维护模式（drain_mode）。默认配置较为保守：仅允许 TCP、80/443，禁止私网与回环。详见 `configs/config.example.yaml` 中的注释示例。
 
 **出口國家解析（GeoIP）**：當出口節點的 descriptor 未提供 `exit_info.country` 時，可通過 `client.geoip` 啟用「從出口節點 IP 推斷國家」：從節點 `listen_addrs` 中取首個公網 IP，再經 GeoIP 查詢得到國家代碼，用於 `country_only` / `country_preferred` 篩選以及 API `/api/v1/client/exit-candidates` 的 `country` 欄位。  
 - `client.geoip.provider: ip-api`：使用免費服務 ip-api.com（約 45 次/分鐘，建議設 `cache_ttl_minutes`）。  
 - `client.geoip.provider: geolite2`：使用本地 GeoLite2-Country.mmdb（`github.com/oschwald/geoip2-golang/v2`）；數據庫放在 `data_dir` 下，若不存在則自動從 [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb) 下載。
+
+日志
+----
+
+项目中有两类日志能力，可并存使用：
+
+1. **标准库 `log`（默认）**  
+   业务代码普遍使用 `log.Printf("[模块名] ...")` 输出。根配置项 **`log_modules`**（或命令行 **`--log_modules`**）按模块名过滤：多个模块用英文逗号分隔，大小写不敏感；仅当一行日志中**第一个**符合 `[a-zA-Z0-9_-]+` 形式的 `[标签]` 与列表中某项匹配时才输出该行。  
+   实现位于 `internal/logfilter`，在 `cmd/node/main.go` 校验配置后调用 `logfilter.Apply` 挂到 `log` 的输出上。
+
+2. **结构化日志 `internal/meshlog`（可选，供新代码逐步采用）**  
+   API 风格参考 [go-ethereum/log](https://github.com/ethereum/go-ethereum/tree/master/log)：基于 `log/slog`，提供 `meshlog.SetDefault`、`meshlog.New("module", "chat")`、分级 `Info`/`Warn`/… 等。默认根 logger 为 **丢弃**（与 geth 类似），需自行 `SetDefault(meshlog.NewLogger(meshlog.StderrTextHandler(meshlog.LevelInfo)))` 后才有输出；与现有 `log.Printf` 互不替换，可并行迁移。
+
+示例：
+
+```bash
+# 仅看 [chat] 与 [path_selector] 相关标准库日志
+./bin/meshproxy --log_modules=chat,path_selector -config configs/config.example.yaml
+```
+
+```go
+// 可选：在进程早期配置 meshlog（示例）
+meshlog.SetDefault(meshlog.NewLogger(meshlog.StderrTextHandler(meshlog.LevelInfo)))
+l := meshlog.New("module", "chat")
+l.Info("offline ok", "peer", peerID, "seq", seq)
+```
 
 双节点测试（示意）
 --------------

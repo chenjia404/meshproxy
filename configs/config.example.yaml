@@ -2,6 +2,9 @@ mode: relay
 
 data_dir: data
 
+# 仅输出指定 [模块] 的日志，逗号分隔，如 "chat,path_selector"；留空则输出全部
+# log_modules: ""
+
 identity_key_path: ""
 
 p2p:

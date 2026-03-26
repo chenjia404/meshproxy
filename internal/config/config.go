@@ -65,6 +65,9 @@ type Config struct {
 
 	// Chat 私聊相關（預設離線 store 節點等）。
 	Chat ChatConfig `yaml:"chat"`
+
+	// LogModules 逗号分隔，仅输出匹配 [name] 模块标签的日志行（name 与此处一致，大小写不敏感）；空表示不过滤。无 [module] 前缀的行（如启动提示）仍会输出。
+	LogModules string `yaml:"log_modules"`
 }
 
 // ChatConfig 私聊；OfflineStorePeers 與 p2p.bootstrap_peers 相同，為 multiaddr 字符串列表（含 /p2p/<peerID>）；亦可僅填 peer_id 走 DHT。
@@ -403,6 +406,7 @@ func (c *Config) Normalize() error {
 
 // postProcess fills derived fields and defaults that depend on others.
 func (c *Config) postProcess() error {
+	c.LogModules = strings.TrimSpace(c.LogModules)
 	if c.DataDir == "" {
 		c.DataDir = "data"
 	}
