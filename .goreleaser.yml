@@ -16,7 +16,9 @@ builds:
       pre:
         - cp -f configs/config.example.yaml "{{dir  .Path }}/config.yaml"
         - cp -f configs/config.docker.yaml "{{dir  .Path }}/config.docker.yaml"
-    
+    flags:
+      - -trimpath
+      - -buildvcs=false
     ldflags:
       - -s -w -X github.com/chenjia404/meshproxy/internal/update.Version={{.Version}}
     asmflags:
