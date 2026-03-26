@@ -394,16 +394,28 @@
 
 `GET /api/v1/public-channels/{channel_id}/sync?after_seq=0&limit=100`
 
-也支持：
+也支持异步触发：
 
 `POST /api/v1/public-channels/{channel_id}/sync`
 
 说明：
 
-- `POST` 会先触发一次实际同步
-- 然后返回当前本地已知的 change 列表
+- `GET` 用于读取当前本地已知的 change 列表
+- `POST` 会立即返回，不阻塞等待真实同步完成
+- `POST` 的作用是“安排一次后台同步任务”
+- 触发后如需读取最新结果，请再调用一次 `GET /sync`
 
-返回：
+`POST` 返回：
+
+```json
+{
+  "ok": true,
+  "channel_id": "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+  "scheduled": true
+}
+```
+
+`GET` 返回：
 
 ```json
 {

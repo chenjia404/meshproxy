@@ -2012,6 +2012,19 @@ func (a *LocalAPI) triggerPublicChannelMessageLoad(channelID string, beforeMessa
 	})
 }
 
+func (a *LocalAPI) triggerPublicChannelSync(channelID string) {
+	if a.opts == nil || a.opts.PublicChannels == nil {
+		return
+	}
+	safe.Go("publicchannel.api.sync", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := a.opts.PublicChannels.SyncChannel(ctx, channelID); err != nil {
+			log.Printf("[publicchannel] async sync channel %s: %v", channelID, err)
+		}
+	})
+}
+
 func (a *LocalAPI) handlePublicChannels(w http.ResponseWriter, r *http.Request) {
 	if a.opts == nil || a.opts.PublicChannels == nil {
 		http.Error(w, "public channel service not available", http.StatusNotFound)
@@ -2253,10 +2266,13 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 		afterSeq, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("after_seq")), 10, 64)
 		limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
 		if r.Method == http.MethodPost {
-			if err := a.opts.PublicChannels.SyncChannel(r.Context(), channelID); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
+			a.triggerPublicChannelSync(channelID)
+			writeJSON(w, map[string]any{
+				"ok":         true,
+				"channel_id": channelID,
+				"scheduled":  true,
+			})
+			return
 		}
 		item, err := a.opts.PublicChannels.GetChannelChanges(channelID, afterSeq, limit)
 		if err != nil {

@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,6 +272,57 @@ func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) 
 	}
 }
 
+func TestSyncPublicChannelReturnsImmediatelyAndRunsAsync(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls int32
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: &stubPublicChannelProvider{
+			syncChannelStarted: started,
+			syncChannelRelease: release,
+			syncChannelCalls:   &calls,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels/test-channel/sync", nil)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		api.server.Handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected sync endpoint to return immediately")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["scheduled"] != true {
+		t.Fatalf("want scheduled=true, got %#v", body["scheduled"])
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async sync to start")
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("want SyncChannel called once, got %d", atomic.LoadInt32(&calls))
+	}
+
+	close(release)
+}
+
 func TestCreatePublicChannelFilesMessageMultipart(t *testing.T) {
 	t.Parallel()
 
@@ -356,6 +408,9 @@ type stubPublicChannelProvider struct {
 	loadMessagesErr              error
 	loadMessagesCalled           chan struct{}
 	subscribeAsyncResult         publicchannel.SubscribeResult
+	syncChannelStarted           chan struct{}
+	syncChannelRelease           chan struct{}
+	syncChannelCalls             *int32
 }
 
 func (s *stubPublicChannelProvider) CreateChannel(input publicchannel.CreateChannelInput) (publicchannel.ChannelSummary, error) {
@@ -443,6 +498,22 @@ func (s *stubPublicChannelProvider) UnsubscribeChannel(channelID string) error {
 }
 
 func (s *stubPublicChannelProvider) SyncChannel(ctx context.Context, channelID string) error {
+	if s.syncChannelCalls != nil {
+		atomic.AddInt32(s.syncChannelCalls, 1)
+	}
+	if s.syncChannelStarted != nil {
+		select {
+		case s.syncChannelStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.syncChannelRelease != nil {
+		select {
+		case <-s.syncChannelRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 
