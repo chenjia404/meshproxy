@@ -2126,7 +2126,7 @@ func (s *Service) sendEnvelope(peerID string, v any) error {
 }
 
 // sendEnvelopeDirectOrRelay 默認先直連再中繼；若已有健康 relay-v1 則與 sendEnvelope 一致優先中繼。若走了中繼則 usedRelay 為 true。
-// 私聊已發送消息請用 sendStoredDirectMessage（直連失敗即寫離線 store 再試中繼）。
+// 私聊已發送消息請用 sendStoredDirectMessage（无直连先离线 store 再连对方；已有直连则直連失敗再寫離線 store 再試中繼）。
 func (s *Service) sendEnvelopeDirectOrRelay(peerID string, v any) (usedRelay bool, err error) {
 	if _, ok := s.relayV1PreferredRelayForDst(peerID); ok {
 		if err := s.sendViaRelay(peerID, v); err == nil {
@@ -2971,7 +2971,7 @@ func (s *Service) publishDirectMessageStateUpdate(msgID string) {
 	s.publishChatEvent(newDirectMessageStateEvent(m))
 }
 
-// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端（sendStoredDirectMessage：直連失敗即寫離線 store 再試中繼）；失败则标记 queued 并调度重试。
+// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端（sendStoredDirectMessage：无直连时先离线 store 再连对方；已有直连则直連失敗再寫離線 store 再試中繼）；失败则标记 queued 并调度重试。
 // 若用户在发送完成前撤回并删除本地消息，则放弃发送（避免对已删消息改状态）。
 func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cachedCiphertext []byte) {
 	cur, err := s.store.GetMessage(msg.MsgID)
@@ -3017,11 +3017,48 @@ func (s *Service) sendStoredDirectMessage(msg Message, storedBlob []byte, cached
 		return err
 	}
 	protoID := protocolForEnvelope(wire)
+
+	pid, decErr := peer.Decode(msg.ReceiverPeerID)
+	if decErr != nil {
+		return decErr
+	}
+	noDirect := s.host.Network().Connectedness(pid) != network.Connected
+
+	if noDirect {
+		// 無 libp2p 直連時：先提交離線 store，再嘗試連接對方並直連發送，最後中繼。
+		var storeErr error
+		var storeOK bool
+		if msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote {
+			storeErr = s.tryOfflineStoreSubmit(msg, storedBlob, cachedCiphertext, false)
+			storeOK = (storeErr == nil)
+			if storeErr != nil {
+				log.Printf("[chat] offline store (no direct) msg=%s: %v", msg.MsgID, storeErr)
+			}
+		}
+		directErr := s.sendJSON(msg.ReceiverPeerID, protoID, wire)
+		if directErr == nil {
+			return nil
+		}
+		relayErr := s.sendViaRelay(msg.ReceiverPeerID, wire)
+		if relayErr == nil {
+			return nil
+		}
+		if storeOK {
+			return nil
+		}
+		if msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote {
+			if storeErr != nil {
+				return fmt.Errorf("relay: %v; offline store: %w", relayErr, storeErr)
+			}
+		}
+		return fmt.Errorf("relay: %v; direct: %v", relayErr, directErr)
+	}
+
 	directErr := s.sendJSON(msg.ReceiverPeerID, protoID, wire)
 	if directErr == nil {
 		return nil
 	}
-	// 直連失敗則立即最佳努力寫入離線 store，再嘗試中繼；若 store 成功而中繼仍失敗，視為已送達（由對端拉取）。
+	// 已有直連但發送失敗：最佳努力寫入離線 store，再嘗試中繼；若 store 成功而中繼仍失敗，視為已送達（由對端拉取）。
 	var storeErr error
 	var storeOK bool
 	if msg.MsgType == MessageTypeChatText || msg.MsgType == MessageTypeGroupInviteNote {
