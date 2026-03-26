@@ -2,9 +2,13 @@ package offlinestore
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
+
+// ErrRPCLayer 表示服務端在 RPC 包絡層返回的錯誤（未知 method、非法請求等），body 為 RPCErrorBody 形狀。
+var ErrRPCLayer = errors.New("offlinestore: rpc layer error")
 
 // ProtocolRPC 與 meshchat-store 節點統一協議（單流多方法 RPC）。
 const ProtocolRPC protocol.ID = "/meshchat/offline-store/rpc/1.0.0"

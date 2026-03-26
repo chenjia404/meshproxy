@@ -39,36 +39,88 @@ func NewLibp2pStoreClient(h host.Host) *Libp2pStoreClient {
 	return &Libp2pStoreClient{Host: h, Codec: StreamCodec{}}
 }
 
-func (c *Libp2pStoreClient) rpcCall(ctx context.Context, storePeer peer.ID, method string, body any) (RPCResponse, error) {
+// rpcBodyHasOKKey 判斷 body 是否為業務層 Store/Fetch/Ack 響應（JSON 含 "ok" 字段）。
+// RPC 層錯誤形狀 RPCErrorBody 不含 "ok"，避免誤解為業務結構。
+func rpcBodyHasOKKey(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return false
+	}
+	_, ok := m["ok"]
+	return ok
+}
+
+// rpcLayerErrorFromBody 解析 RPC 層 body（error_code / error_message）。
+func rpcLayerErrorFromBody(body []byte) error {
+	var eb RPCErrorBody
+	if err := json.Unmarshal(body, &eb); err != nil {
+		return fmt.Errorf("%w: parse rpc error body: %w", ErrRPCLayer, err)
+	}
+	if eb.ErrorCode == "" {
+		return fmt.Errorf("%w: missing error_code", ErrRPCLayer)
+	}
+	if eb.ErrorMessage != "" {
+		return fmt.Errorf("%w: %s: %s", ErrRPCLayer, eb.ErrorCode, eb.ErrorMessage)
+	}
+	return fmt.Errorf("%w: %s", ErrRPCLayer, eb.ErrorCode)
+}
+
+func (c *Libp2pStoreClient) rpcCall(ctx context.Context, storePeer peer.ID, method string, body any) (reqID string, resp RPCResponse, err error) {
 	if c == nil || c.Host == nil {
-		return RPCResponse{}, errors.New("offlinestore: nil client or host")
+		return "", RPCResponse{}, errors.New("offlinestore: nil client or host")
 	}
 	ctx, cancel := withDefaultTimeout(ctx, DefaultRPCTimeout)
 	defer cancel()
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return RPCResponse{}, fmt.Errorf("offlinestore: marshal rpc body: %w", err)
+		return "", RPCResponse{}, fmt.Errorf("offlinestore: marshal rpc body: %w", err)
 	}
+	reqID = uuid.New().String()
 	req := RPCRequest{
-		RequestID: uuid.New().String(),
+		RequestID: reqID,
 		Method:    method,
 		Body:      bodyJSON,
 	}
 	stream, err := c.Host.NewStream(ctx, storePeer, ProtocolRPC)
 	if err != nil {
-		return RPCResponse{}, fmt.Errorf("offlinestore: new stream rpc: %w", err)
+		return "", RPCResponse{}, fmt.Errorf("offlinestore: new stream rpc: %w", err)
 	}
 	defer stream.Close()
 
 	if err := c.Codec.WriteFrame(stream, &req); err != nil {
-		return RPCResponse{}, err
+		return "", RPCResponse{}, err
 	}
-	var resp RPCResponse
-	if err := c.Codec.ReadFrameJSON(stream, &resp); err != nil {
-		return RPCResponse{}, err
+	var rpcResp RPCResponse
+	if err := c.Codec.ReadFrameJSON(stream, &rpcResp); err != nil {
+		return "", RPCResponse{}, err
 	}
-	return resp, nil
+	return reqID, rpcResp, nil
+}
+
+// handleRPCEnvelope 在已讀取 RPCResponse 後：區分 RPC 層錯誤與業務層失敗；業務成功時 rpcOK 為 true。
+func handleRPCEnvelope(rpcResp RPCResponse) (rpcOK bool, businessBody []byte, err error) {
+	if rpcResp.OK {
+		if !rpcBodyHasOKKey(rpcResp.Body) {
+			return false, nil, fmt.Errorf("offlinestore: rpc ok=true but body missing business \"ok\" field")
+		}
+		return true, rpcResp.Body, nil
+	}
+	// !rpcResp.OK
+	if rpcBodyHasOKKey(rpcResp.Body) {
+		return false, rpcResp.Body, nil
+	}
+	if len(rpcResp.Body) == 0 {
+		msg := rpcResp.Error
+		if msg != "" {
+			return false, nil, fmt.Errorf("%w: empty body: %s", ErrRPCLayer, msg)
+		}
+		return false, nil, fmt.Errorf("%w: empty body", ErrRPCLayer)
+	}
+	return false, nil, rpcLayerErrorFromBody(rpcResp.Body)
 }
 
 // StoreMessage 協議 /meshchat/offline-store/rpc/1.0.0 method offline.store
@@ -80,13 +132,23 @@ func (c *Libp2pStoreClient) StoreMessage(ctx context.Context, storePeer peer.ID,
 	if req == nil {
 		return nil, errors.New("offlinestore: nil request")
 	}
-	rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineStore, req)
+	_, rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineStore, req)
+	if err != nil {
+		return nil, err
+	}
+	ok, body, err := handleRPCEnvelope(rpcResp)
 	if err != nil {
 		return nil, err
 	}
 	var inner StoreMessageResponse
-	if err := json.Unmarshal(rpcResp.Body, &inner); err != nil {
+	if err := json.Unmarshal(body, &inner); err != nil {
 		return nil, fmt.Errorf("offlinestore: unmarshal store response: %w", err)
+	}
+	if ok {
+		if !inner.OK {
+			return nil, fmt.Errorf("offlinestore: rpc ok=true but store ok=false")
+		}
+		return &inner, nil
 	}
 	if !inner.OK {
 		return &inner, fmt.Errorf("%w: %s", ErrResponseNotOK, inner.ErrorCode)
@@ -112,13 +174,23 @@ func (c *Libp2pStoreClient) FetchMessages(ctx context.Context, storePeer peer.ID
 		AfterSeq:    afterSeq,
 		Limit:       limit,
 	}
-	rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineFetch, req)
+	_, rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineFetch, req)
+	if err != nil {
+		return nil, err
+	}
+	ok, body, err := handleRPCEnvelope(rpcResp)
 	if err != nil {
 		return nil, err
 	}
 	var inner FetchMessagesResponse
-	if err := json.Unmarshal(rpcResp.Body, &inner); err != nil {
+	if err := json.Unmarshal(body, &inner); err != nil {
 		return nil, fmt.Errorf("offlinestore: unmarshal fetch response: %w", err)
+	}
+	if ok {
+		if !inner.OK {
+			return nil, fmt.Errorf("offlinestore: rpc ok=true but fetch ok=false")
+		}
+		return &inner, nil
 	}
 	if !inner.OK {
 		return &inner, fmt.Errorf("%w: %s", ErrResponseNotOK, inner.ErrorCode)
@@ -135,13 +207,23 @@ func (c *Libp2pStoreClient) AckMessages(ctx context.Context, storePeer peer.ID, 
 	if req == nil {
 		return nil, errors.New("offlinestore: nil request")
 	}
-	rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineAck, req)
+	_, rpcResp, err := c.rpcCall(ctx, storePeer, MethodOfflineAck, req)
+	if err != nil {
+		return nil, err
+	}
+	ok, body, err := handleRPCEnvelope(rpcResp)
 	if err != nil {
 		return nil, err
 	}
 	var inner AckMessagesResponse
-	if err := json.Unmarshal(rpcResp.Body, &inner); err != nil {
+	if err := json.Unmarshal(body, &inner); err != nil {
 		return nil, fmt.Errorf("offlinestore: unmarshal ack response: %w", err)
+	}
+	if ok {
+		if !inner.OK {
+			return nil, fmt.Errorf("offlinestore: rpc ok=true but ack ok=false")
+		}
+		return &inner, nil
 	}
 	if !inner.OK {
 		code := inner.ErrorCode
