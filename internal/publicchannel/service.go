@@ -28,6 +28,7 @@ import (
 
 type Service struct {
 	ctx       context.Context
+	cancel    context.CancelFunc
 	host      host.Host
 	routing   corerouting.Routing
 	pubsub    *pubsub.PubSub
@@ -38,12 +39,33 @@ type Service struct {
 
 	subMu sync.Mutex
 	subs  map[string]*channelSubscription
+
+	provideMu               sync.Mutex
+	provideStates           map[string]*provideState
+	provideWakeCh           chan struct{}
+	provideRetryBackoffs    []time.Duration
+	provideSuccessInterval  time.Duration
+	provideLoopInterval     time.Duration
+	provideTimeout          time.Duration
+	provideSuccessLogMinGap time.Duration
+	nowFn                   func() time.Time
 }
 
 type channelSubscription struct {
 	topic  *pubsub.Topic
 	sub    *pubsub.Subscription
 	cancel context.CancelFunc
+}
+
+// 公开频道 provider 公告状态只保存在内存中，用于异步重试与周期性重发。
+type provideState struct {
+	channelID        string
+	lastProvideAt    int64
+	lastProvideErrAt int64
+	nextProvideAt    int64
+	retryCount       int
+	inFlight         bool
+	nextProvideTime  time.Time
 }
 
 type contentRouter interface {
@@ -57,28 +79,44 @@ type ipfsFilePinner interface {
 }
 
 func NewService(ctx context.Context, dbPath string, h host.Host, routing corerouting.Routing, ps *pubsub.PubSub) (*Service, error) {
+	serviceCtx, cancel := context.WithCancel(ctx)
 	store, err := NewStore(dbPath)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	s := &Service{
-		ctx:       ctx,
-		host:      h,
-		routing:   routing,
-		pubsub:    ps,
-		store:     store,
-		localPeer: h.ID().String(),
-		subs:      make(map[string]*channelSubscription),
+		ctx:                     serviceCtx,
+		cancel:                  cancel,
+		host:                    h,
+		routing:                 routing,
+		pubsub:                  ps,
+		store:                   store,
+		localPeer:               h.ID().String(),
+		subs:                    make(map[string]*channelSubscription),
+		provideStates:           make(map[string]*provideState),
+		provideWakeCh:           make(chan struct{}, 1),
+		provideRetryBackoffs:    []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute},
+		provideSuccessInterval:  20 * time.Minute,
+		provideLoopInterval:     time.Second,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: time.Minute,
+		nowFn:                   time.Now,
 	}
 	h.SetStreamHandler(p2p.ProtocolPublicChannelRPC, s.handleRPCStream)
 	s.runRetentionSweep(time.Now().UTC())
 	safe.Go("publicchannel.retentionLoop", func() { s.runRetentionLoop() })
+	safe.Go("publicchannel.reprovideLoop", func() { s.runProvideLoop() })
+	safe.Go("publicchannel.reprovideRestore", func() { s.restoreOwnedChannelsForProvide() })
 	return s, nil
 }
 
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
+	}
+	if s.cancel != nil {
+		s.cancel()
 	}
 	s.subMu.Lock()
 	for channelID, item := range s.subs {
@@ -106,6 +144,17 @@ func (s *Service) SetNodePrivateKey(priv crypto.PrivKey) {
 
 func (s *Service) SetIPFSFilePinner(p ipfsFilePinner) {
 	s.ipfs = p
+}
+
+func (s *Service) now() time.Time {
+	if s != nil && s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
+
+func (s *Service) nowUnix() int64 {
+	return s.now().Unix()
 }
 
 func (s *Service) buildPinnedAvatar(fileName, mimeType string, data []byte) (Avatar, error) {
@@ -299,7 +348,7 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 		return ChannelSummary{}, err
 	}
 	s.runRetentionSweep(time.Unix(now, 0).UTC())
-	s.ensureProvided(channelID)
+	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
 	return s.store.GetChannelSummary(channelID)
 }
@@ -366,7 +415,7 @@ func (s *Service) CreateChannelMessage(channelID string, input UpsertMessageInpu
 	if err := s.store.CommitOwnedMessageChange(msg, head, change); err != nil {
 		return ChannelMessage{}, err
 	}
-	s.ensureProvided(channelID)
+	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
 	return msg, nil
 }
@@ -480,6 +529,7 @@ func (s *Service) UpdateChannelMessage(ctx context.Context, channelID string, me
 	if err := s.store.CommitOwnedMessageChange(current, head, change); err != nil {
 		return ChannelMessage{}, err
 	}
+	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
 	return current, nil
 }
@@ -528,6 +578,7 @@ func (s *Service) DeleteChannelMessage(ctx context.Context, channelID string, me
 	if err := s.store.CommitOwnedMessageChange(current, head, change); err != nil {
 		return ChannelMessage{}, err
 	}
+	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
 	return current, nil
 }
@@ -1169,28 +1220,169 @@ func (s *Service) publishChange(change ChannelChange) {
 
 func (s *Service) bootstrapOwnedChannelAsync(channelID string) {
 	safe.Go("publicchannel.bootstrap."+channelID, func() {
-		s.ensureProvided(channelID)
+		s.scheduleOwnedProvide(channelID)
 		if _, err := s.ensureTopic(channelID, false); err != nil {
 			log.Printf("[publicchannel] ensure topic %s: %v", channelID, err)
 		}
 	})
 }
 
+func (s *Service) restoreOwnedChannelsForProvide() {
+	if _, ok := s.routing.(contentRouter); !ok || s.store == nil {
+		return
+	}
+	channelIDs, err := s.store.ListOwnedChannelIDs(s.localPeer)
+	if err != nil {
+		log.Printf("[publicchannel] restore owned channels for provide: %v", err)
+		return
+	}
+	for _, channelID := range channelIDs {
+		s.scheduleOwnedProvide(channelID)
+	}
+}
+
+func (s *Service) scheduleOwnedProvide(channelID string) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return
+	}
+	if _, ok := s.routing.(contentRouter); !ok {
+		return
+	}
+	now := s.now()
+	s.provideMu.Lock()
+	state, ok := s.provideStates[channelID]
+	if !ok {
+		state = &provideState{channelID: channelID}
+		s.provideStates[channelID] = state
+	}
+	if state.nextProvideTime.IsZero() || state.nextProvideTime.After(now) {
+		state.nextProvideTime = now
+		state.nextProvideAt = now.Unix()
+	}
+	s.provideMu.Unlock()
+	s.wakeProvideLoop()
+}
+
+func (s *Service) wakeProvideLoop() {
+	select {
+	case s.provideWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) runProvideLoop() {
+	ticker := time.NewTicker(s.provideLoopInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.startDueProvides()
+		case <-s.provideWakeCh:
+			s.startDueProvides()
+		}
+	}
+}
+
+func (s *Service) startDueProvides() {
+	now := s.now()
+	dueChannelIDs := make([]string, 0)
+	s.provideMu.Lock()
+	for channelID, state := range s.provideStates {
+		if state.inFlight {
+			continue
+		}
+		if state.nextProvideTime.IsZero() || state.nextProvideTime.After(now) {
+			continue
+		}
+		state.inFlight = true
+		dueChannelIDs = append(dueChannelIDs, channelID)
+	}
+	s.provideMu.Unlock()
+	for _, channelID := range dueChannelIDs {
+		channelID := channelID
+		safe.Go("publicchannel.reprovide."+channelID, func() { s.runProvideAttempt(channelID) })
+	}
+}
+
+func (s *Service) runProvideAttempt(channelID string) {
+	now := s.now()
+	err := s.provideChannel(channelID)
+	s.provideMu.Lock()
+	state, ok := s.provideStates[channelID]
+	if !ok {
+		state = &provideState{channelID: channelID}
+		s.provideStates[channelID] = state
+	}
+	state.inFlight = false
+	previousLastProvideAt := state.lastProvideAt
+	previousRetryCount := state.retryCount
+	if err != nil {
+		state.lastProvideErrAt = now.Unix()
+		state.retryCount++
+		delay := s.provideRetryDelay(state.retryCount)
+		nextTime := now.Add(delay)
+		state.nextProvideTime = nextTime
+		state.nextProvideAt = nextTime.Unix()
+		retryCount := state.retryCount
+		nextProvideAt := state.nextProvideAt
+		s.provideMu.Unlock()
+		log.Printf("[publicchannel] provide retry channel=%s retry_count=%d next_retry_at=%d err=%v", channelID, retryCount, nextProvideAt, err)
+		return
+	}
+	state.lastProvideAt = now.Unix()
+	state.retryCount = 0
+	nextTime := now.Add(s.provideSuccessInterval)
+	state.nextProvideTime = nextTime
+	state.nextProvideAt = nextTime.Unix()
+	state.lastProvideErrAt = 0
+	lastProvideAt := state.lastProvideAt
+	shouldLogSuccess := previousLastProvideAt == 0 || previousRetryCount > 0 || lastProvideAt-previousLastProvideAt >= int64(s.provideSuccessLogMinGap/time.Second)
+	nextProvideAt := state.nextProvideAt
+	s.provideMu.Unlock()
+	if shouldLogSuccess {
+		log.Printf("[publicchannel] provide ok channel=%s next_provide_at=%d", channelID, nextProvideAt)
+	}
+}
+
+func (s *Service) provideRetryDelay(retryCount int) time.Duration {
+	if len(s.provideRetryBackoffs) == 0 {
+		return time.Minute
+	}
+	if retryCount <= 0 {
+		return s.provideRetryBackoffs[0]
+	}
+	idx := retryCount - 1
+	if idx >= len(s.provideRetryBackoffs) {
+		idx = len(s.provideRetryBackoffs) - 1
+	}
+	return s.provideRetryBackoffs[idx]
+}
+
 func (s *Service) ensureProvided(channelID string) {
+	if err := s.provideChannel(channelID); err != nil {
+		log.Printf("[publicchannel] provide %s: %v", channelID, err)
+	}
+}
+
+func (s *Service) provideChannel(channelID string) error {
 	cr, ok := s.routing.(contentRouter)
 	if !ok {
-		return
+		return nil
 	}
 	key, err := providerCID(channelID)
 	if err != nil {
-		return
+		return err
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(s.ctx, s.provideTimeout)
 	defer cancel()
 	if err := cr.Provide(ctx, key, true); err != nil {
-		log.Printf("[publicchannel] provide %s: %v", channelID, err)
+		return err
 	}
-	_ = s.upsertProviderIfKnown(channelID, s.localPeer, "dht", time.Now().Unix())
+	_ = s.upsertProviderIfKnown(channelID, s.localPeer, "dht", s.nowUnix())
+	return nil
 }
 
 func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []string {

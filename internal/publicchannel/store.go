@@ -1142,6 +1142,28 @@ func (s *Store) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, error
 	return out, nil
 }
 
+func (s *Store) ListOwnedChannelIDs(ownerPeerID string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT channel_id
+		FROM public_channels
+		WHERE owner_peer_id=?
+		ORDER BY updated_at DESC, channel_id DESC
+	`, stringsTrim(ownerPeerID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var channelID string
+		if err := rows.Scan(&channelID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, channelID)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) ListSubscribedChannels(localOwnerPeerID string) ([]ChannelSummary, error) {
 	rows, err := s.db.Query(`
 		SELECT c.channel_id

@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -891,6 +893,172 @@ func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
 	}
 }
 
+func TestProvideRetriesAfterFailureAndLaterSucceeds(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13008")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing := newScriptedProvideRouting(errors.New("first provide failed"), nil)
+	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "provide-retry.db"), h, routing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetNodePrivateKey(priv)
+	svc.provideRetryBackoffs = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}
+	svc.provideLoopInterval = 10 * time.Millisecond
+	svc.provideSuccessInterval = time.Hour
+	svc.provideSuccessLogMinGap = 0
+	t.Cleanup(func() { _ = svc.Close() })
+
+	summary, err := svc.CreateChannel(CreateChannelInput{Name: "retry-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing.waitForProvideCount(t, 2, 2*time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		svc.provideMu.Lock()
+		state := svc.provideStates[summary.Profile.ChannelID]
+		svc.provideMu.Unlock()
+		if state != nil && state.retryCount == 0 && state.lastProvideAt > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	svc.provideMu.Lock()
+	state := svc.provideStates[summary.Profile.ChannelID]
+	svc.provideMu.Unlock()
+	if state == nil {
+		t.Fatal("want provide state after retry")
+	}
+	t.Fatalf("want retry_count reset and lastProvideAt set after success, got retry=%d lastProvideAt=%d", state.retryCount, state.lastProvideAt)
+}
+
+func TestServiceStartupSchedulesOwnedChannelsForProvide(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, ownerPeerID := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13009")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "startup-owned.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	profile := ChannelProfile{
+		ChannelID:      mustUUIDv7(t),
+		OwnerPeerID:    ownerPeerID,
+		OwnerVersion:   1,
+		Name:           "owned-startup",
+		ProfileVersion: 1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := signProfile(priv, &profile); err != nil {
+		t.Fatal(err)
+	}
+	head := ChannelHead{
+		ChannelID:      profile.ChannelID,
+		OwnerPeerID:    ownerPeerID,
+		OwnerVersion:   1,
+		LastMessageID:  0,
+		ProfileVersion: 1,
+		LastSeq:        0,
+		UpdatedAt:      now,
+	}
+	if err := signHead(priv, &head); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateOwnedChannel(profile, head, now, ownerPeerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	routing := newScriptedProvideRouting(nil)
+	svc, err := NewService(ctx, dbPath, h, routing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetNodePrivateKey(priv)
+	svc.provideLoopInterval = 10 * time.Millisecond
+	svc.provideSuccessInterval = time.Hour
+	svc.provideSuccessLogMinGap = 0
+	t.Cleanup(func() { _ = svc.Close() })
+
+	routing.waitForProvideCount(t, 1, 2*time.Second)
+	svc.provideMu.Lock()
+	state := svc.provideStates[profile.ChannelID]
+	svc.provideMu.Unlock()
+	if state == nil {
+		t.Fatal("want owned channel to be scheduled into provide queue on startup")
+	}
+}
+
+func TestProvideSuccessSchedulesPeriodicReprovide(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13010")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing := newScriptedProvideRouting(nil, nil, nil)
+	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "periodic-provide.db"), h, routing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetNodePrivateKey(priv)
+	svc.provideLoopInterval = 10 * time.Millisecond
+	svc.provideSuccessInterval = 50 * time.Millisecond
+	svc.provideSuccessLogMinGap = 0
+	t.Cleanup(func() { _ = svc.Close() })
+
+	summary, err := svc.CreateChannel(CreateChannelInput{Name: "periodic-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing.waitForProvideCount(t, 2, 2*time.Second)
+
+	svc.provideMu.Lock()
+	state := svc.provideStates[summary.Profile.ChannelID]
+	svc.provideMu.Unlock()
+	if state == nil {
+		t.Fatal("want provide state after periodic provide")
+	}
+	if state.lastProvideAt == 0 {
+		t.Fatal("want successful provide timestamp to be recorded")
+	}
+}
+
 func TestCreateChannelDefaultsToSubscribed(t *testing.T) {
 	t.Parallel()
 
@@ -1290,5 +1458,81 @@ func (r *blockingRouting) SearchValue(context.Context, string, ...corerouting.Op
 }
 
 func (r *blockingRouting) Bootstrap(context.Context) error {
+	return nil
+}
+
+type scriptedProvideRouting struct {
+	mu           sync.Mutex
+	provideCalls int
+	outcomes     []error
+	provideCh    chan struct{}
+}
+
+func newScriptedProvideRouting(outcomes ...error) *scriptedProvideRouting {
+	return &scriptedProvideRouting{
+		outcomes:  append([]error(nil), outcomes...),
+		provideCh: make(chan struct{}, 32),
+	}
+}
+
+func (r *scriptedProvideRouting) Provide(context.Context, cid.Cid, bool) error {
+	r.mu.Lock()
+	r.provideCalls++
+	callIndex := r.provideCalls - 1
+	var err error
+	if callIndex < len(r.outcomes) {
+		err = r.outcomes[callIndex]
+	}
+	r.mu.Unlock()
+	select {
+	case r.provideCh <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func (r *scriptedProvideRouting) waitForProvideCount(t *testing.T, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		r.mu.Lock()
+		got := r.provideCalls
+		r.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-r.provideCh:
+		case <-deadline:
+			t.Fatalf("want at least %d provide calls, got %d", want, got)
+		}
+	}
+}
+
+func (r *scriptedProvideRouting) FindProvidersAsync(context.Context, cid.Cid, int) <-chan peer.AddrInfo {
+	ch := make(chan peer.AddrInfo)
+	close(ch)
+	return ch
+}
+
+func (r *scriptedProvideRouting) FindPeer(context.Context, peer.ID) (peer.AddrInfo, error) {
+	return peer.AddrInfo{}, corerouting.ErrNotFound
+}
+
+func (r *scriptedProvideRouting) PutValue(context.Context, string, []byte, ...corerouting.Option) error {
+	return nil
+}
+
+func (r *scriptedProvideRouting) GetValue(context.Context, string, ...corerouting.Option) ([]byte, error) {
+	return nil, corerouting.ErrNotFound
+}
+
+func (r *scriptedProvideRouting) SearchValue(context.Context, string, ...corerouting.Option) (<-chan []byte, error) {
+	ch := make(chan []byte)
+	close(ch)
+	return ch, nil
+}
+
+func (r *scriptedProvideRouting) Bootstrap(context.Context) error {
 	return nil
 }

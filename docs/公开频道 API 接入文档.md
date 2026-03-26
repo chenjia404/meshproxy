@@ -374,6 +374,8 @@
 - 如果本地此前还不知道这个频道，会先创建一个本地占位订阅记录
 - 首轮 `profile/head/messages` 抓取改为后台异步执行，不阻塞当前 HTTP 响应
 - 后台抓到快照后，会补齐最新一页消息、建立 PubSub 订阅，并继续通过 `channel_changes` 做增量同步
+- owner 节点会在后台持续做 DHT provider 公告与退避重试，但这只是辅助发现手段
+- 订阅时显式传入 `peer_id` / `peer_ids` 作为 seed peer，仍然是推荐做法
 
 ### 6.2 取消订阅
 
