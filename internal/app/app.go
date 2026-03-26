@@ -117,6 +117,25 @@ const (
 	bootstrapCacheMaxEntries   = 200
 )
 
+// emptyRelayCacheJSON 与 relaycache 持久化格式一致的空缓存（JSON 数组）。
+const emptyRelayCacheJSON = "[]"
+
+// openRelayCacheRecoverCorrupt 打开 relays.json / bootstrap.json；若文件损坏或无法解析则清空后重试，保证能正常启动。
+func openRelayCacheRecoverCorrupt(path string) (*relaycache.Cache, error) {
+	c, err := relaycache.New(path)
+	if err != nil {
+		log.Printf("[relaycache] 文件损坏或无法读取，已清空: %s: %v", path, err)
+		if werr := os.WriteFile(path, []byte(emptyRelayCacheJSON), 0o644); werr != nil {
+			return nil, fmt.Errorf("rewrite empty cache %s: %w", path, werr)
+		}
+		c, err = relaycache.New(path)
+		if err != nil {
+			return nil, fmt.Errorf("open cache after reset %s: %w", path, err)
+		}
+	}
+	return c, nil
+}
+
 // New creates and initializes a new App instance.
 func New(ctx context.Context, cfg config.Config) (*App, error) {
 	return NewWithOptions(ctx, cfg, Options{
@@ -141,12 +160,12 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	resourceIDsPath := filepath.Join(cfg.DataDir, "meshserver_resource_ids.db")
 	resourceIDsStore := meshserver.NewResourceIDsStore(resourceIDsPath)
 	cachePath := filepath.Join(cfg.DataDir, "relays.json")
-	relayCache, err := relaycache.New(cachePath)
+	relayCache, err := openRelayCacheRecoverCorrupt(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("init relay cache: %w", err)
 	}
 	bootstrapPath := filepath.Join(cfg.DataDir, "bootstrap.json")
-	bootstrapCache, err := relaycache.New(bootstrapPath)
+	bootstrapCache, err := openRelayCacheRecoverCorrupt(bootstrapPath)
 	if err != nil {
 		return nil, fmt.Errorf("init bootstrap cache: %w", err)
 	}
