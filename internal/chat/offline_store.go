@@ -346,7 +346,8 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 		batches++
 		var maxOK uint64
 		var sawNonEmpty bool
-		for _, raw := range resp.Items {
+		nItems := len(resp.Items)
+		for i, raw := range resp.Items {
 			if len(raw) == 0 {
 				continue
 			}
@@ -360,7 +361,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 					}
 					continue
 				}
-				log.Printf("[chat] offline fetch item store_seq=%d blocked for retry: %v", seq, perr)
+				log.Printf("[chat] offline fetch item [%d/%d] store_seq=%d blocked for retry: %v", i+1, nItems, seq, perr)
 				break
 			}
 			if seq > maxOK {
@@ -371,7 +372,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 			if !sawNonEmpty {
 				break
 			}
-			log.Printf("[chat] offline fetch peer=%s: non-empty batch but no store_seq (cannot advance cursor)", node.PeerID)
+			log.Printf("[chat] offline fetch peer=%s: non-empty batch (%d items) but no successful store_seq (cannot advance cursor; check logs above)", node.PeerID, nItems)
 			return
 		}
 		ackReq, err := s.signOfflineAckReq(int64(maxOK))

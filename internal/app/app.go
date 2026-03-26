@@ -1904,7 +1904,7 @@ func (a *App) restoreCachedPeerConnections() {
 			ctx, cancel := context.WithTimeout(a.ctx, startupCacheConnectTimeout)
 			defer cancel()
 			if err := a.Host().Connect(ctx, peer.AddrInfo{ID: pid, Addrs: maddrs}); err != nil {
-				log.Printf("[startup] connect cached peer %s failed: %v", peerID, err)
+				// log.Printf("[startup] connect cached peer %s failed: %v", peerID, err)
 				return
 			}
 			// log.Printf("[startup] connected cached peer %s", peerID)

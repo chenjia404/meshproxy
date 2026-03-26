@@ -2675,7 +2675,15 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 	// Notify websocket clients that this conversation has a new inbound message (include body for UI).
 	s.publishChatEvent(chatEventDirectMessage(incoming))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
-	return s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID)
+	if err := s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID); err != nil {
+		// 離線 store 拉取：對端可能不可達，送達回執失敗不應阻斷入庫與對 store 的 ACK 游標推進，否則會卡死整批拉取。
+		if transportMode == TransportModeOfflineStore {
+			log.Printf("[chat] offline fetch: delivery ack to peer failed (ignored) msg=%s peer=%s: %v", msg.MsgID, msg.FromPeerID, err)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) handleIncomingGroupInviteNotice(msg ChatText, plain []byte) error {
