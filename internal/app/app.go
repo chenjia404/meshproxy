@@ -34,8 +34,8 @@ import (
 	"github.com/chenjia404/meshproxy/internal/meshserver"
 	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/p2p"
-	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/publicchannel"
 	"github.com/chenjia404/meshproxy/internal/relay"
 	"github.com/chenjia404/meshproxy/internal/relaycache"
 	"github.com/chenjia404/meshproxy/internal/safe"
@@ -1907,7 +1907,7 @@ func (a *App) restoreCachedPeerConnections() {
 				log.Printf("[startup] connect cached peer %s failed: %v", peerID, err)
 				return
 			}
-			log.Printf("[startup] connected cached peer %s", peerID)
+			// log.Printf("[startup] connected cached peer %s", peerID)
 		})
 	}
 }

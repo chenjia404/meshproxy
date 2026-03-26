@@ -9,10 +9,12 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -2465,7 +2467,7 @@ func (s *Service) processEnvelopeBytes(data []byte) error {
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, "relay", "", true)
+		return s.handleIncomingChatText(msg, "relay", "", true, false)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
@@ -2530,7 +2532,7 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 		if err := remarshal(env, &msg); err != nil {
 			return err
 		}
-		return s.handleIncomingChatText(msg, TransportModeDirect, streamPeerID, true)
+		return s.handleIncomingChatText(msg, TransportModeDirect, streamPeerID, true, false)
 	case MessageTypeChatFile:
 		var msg ChatFile
 		if err := remarshal(env, &msg); err != nil {
@@ -2612,7 +2614,7 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 	}
 }
 
-func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string, incrementUnread bool) error {
+func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string, incrementUnread bool, skipGapAfterSyncFail bool) error {
 	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
 		log.Printf("[chat] chat text ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
 		return nil
@@ -2630,7 +2632,8 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 		}
 		return err
 	}
-	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
+	// 离线 gap skip 时不在此函数内单独 UpdateRecvCounter；recv 仅在 AddInboundMessageAndAdvanceRecvCounter 事务内与消息一并推进。
+	duplicate, _, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter, skipGapAfterSyncFail)
 	if err != nil || duplicate {
 		return err
 	}
@@ -2719,7 +2722,7 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 		}
 		return err
 	}
-	duplicate, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter)
+	duplicate, _, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter, false)
 	if err != nil || duplicate {
 		return err
 	}
@@ -2878,26 +2881,69 @@ func (s *Service) handleChatFileFetchResponse(resp ChatFileFetchResponse, stream
 	return nil
 }
 
-func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64) (bool, error) {
+// syncFailureAllowsOfflineGapSkip 僅在「對端/網絡暫時不可達」類錯誤時為 true；解密失敗、落庫錯誤、協議無進展等不得跳過 gap。
+func syncFailureAllowsOfflineGapSkip(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "chat sync made no progress") || strings.Contains(msg, "chat sync exceeded max rounds") {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	if msg == "chat sync relay timeout" {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Timeout() {
+			return true
+		}
+		if opErr.Err != nil {
+			if errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, syscall.EHOSTUNREACH) ||
+				errors.Is(opErr.Err, syscall.ENETUNREACH) || errors.Is(opErr.Err, syscall.ECONNRESET) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// checkIncomingDirectCounter 返回值 offlineGapSkip 為 true 時：僅表示允許在之後一次事務中跳過中間序號入庫當前條，不在此函數內寫入 recv_counter。
+func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64, skipGapAfterSyncFail bool) (duplicate bool, offlineGapSkip bool, err error) {
 	for {
 		expected := sess.RecvCounter
 		switch {
 		case counter < expected:
-			return true, s.sendDeliveryAck(conv, msgID, conv.PeerID)
+			return true, false, s.sendDeliveryAck(conv, msgID, conv.PeerID)
 		case counter > expected:
 			// 先同步補齊中間序號，再重讀游標；若本條已在同步中入庫則改為重複並回 ack。
-			if err := s.syncConversationFromCounter(conv.ConversationID, conv.PeerID, expected); err != nil {
+			if syncErr := s.syncConversationFromCounter(conv.ConversationID, conv.PeerID, expected); syncErr != nil {
+				if skipGapAfterSyncFail && syncFailureAllowsOfflineGapSkip(syncErr) {
+					log.Printf("[chat] offline fetch gap skip (transient sync failure): conversation=%s peer=%s skip [%d,%d) sync_err=%v",
+						conv.ConversationID, conv.PeerID, expected, counter, syncErr)
+					return false, true, nil
+				}
 				s.triggerConversationSync(conv.ConversationID, conv.PeerID, expected)
-				return false, fmt.Errorf("%w: expected=%d got=%d sync_err=%v", errChatCounterGap, expected, counter, err)
+				return false, false, fmt.Errorf("%w: expected=%d got=%d sync_err=%v", errChatCounterGap, expected, counter, syncErr)
 			}
-			var err error
-			sess, err = s.store.GetSessionState(conv.ConversationID)
-			if err != nil {
-				return false, err
+			var reloadErr error
+			sess, reloadErr = s.store.GetSessionState(conv.ConversationID)
+			if reloadErr != nil {
+				return false, false, reloadErr
 			}
 			continue
 		default:
-			return false, nil
+			return false, false, nil
 		}
 	}
 }
@@ -3185,7 +3231,7 @@ func (s *Service) applyChatSyncResponse(conversationID string, resp ChatSyncResp
 			// 不在此处单独 UpdateRecvCounter：若先于 handleIncomingChatText 把游标跳到 msg.Counter，
 			// 随后 AddInboundMessageAndAdvanceRecvCounter 失败，会出现「recv 已前进但消息未落库」。
 			// 游标仅由入站处理在事务里与消息一并推进；若存在 counter 空洞，由 handleIncomingChatText 报 gap 并触发同步。
-			if err := s.handleIncomingChatText(msg, TransportModeDirect, "", false); err != nil {
+			if err := s.handleIncomingChatText(msg, TransportModeDirect, "", false, false); err != nil {
 				return fmt.Errorf("msg=%s counter=%d type=%s: %w", msg.MsgID, msg.Counter, msg.Type, err)
 			}
 			expected = msg.Counter + 1

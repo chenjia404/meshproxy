@@ -14,6 +14,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 func TestPeekOfflineStoreSeq(t *testing.T) {
@@ -81,6 +82,8 @@ func TestProcessOneOfflineFetchItem_RepairsMissingSessionState(t *testing.T) {
 	}
 	hSender.SetStreamHandler(p2p.ProtocolChatAck, func(str network.Stream) {
 		defer str.Close()
+		var ack DeliveryAck
+		_ = tunnel.ReadJSONFrame(str, &ack)
 	})
 	s.host = hRecv
 
@@ -170,8 +173,8 @@ func TestProcessOneOfflineFetchItem_RepairsMissingSessionState(t *testing.T) {
 	if msg.Plaintext != string(plaintext) {
 		t.Fatalf("want plaintext %q, got %q", string(plaintext), msg.Plaintext)
 	}
-	if msg.TransportMode != TransportModeDirect {
-		t.Fatalf("want transport mode %q, got %q", TransportModeDirect, msg.TransportMode)
+	if msg.TransportMode != TransportModeOfflineStore {
+		t.Fatalf("want transport mode %q, got %q", TransportModeOfflineStore, msg.TransportMode)
 	}
 }
 

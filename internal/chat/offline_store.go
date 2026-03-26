@@ -510,7 +510,7 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		Counter:        counter,
 		SentAtUnix:     offlineSentAtUnix(env),
 	}
-	if err := s.handleIncomingChatText(ct, TransportModeDirect, "", true); err != nil {
+	if err := s.handleIncomingChatText(ct, TransportModeOfflineStore, "", true, true); err != nil {
 		return seq, err
 	}
 	return seq, nil
