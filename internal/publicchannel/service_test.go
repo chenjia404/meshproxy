@@ -509,6 +509,165 @@ func TestSubscribeChannelRecordsPlaceholderBeforeSnapshot(t *testing.T) {
 	}
 }
 
+func TestLoadMessagesFromProvidersBootstrapsPlaceholderProfile(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12008")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12009")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-placeholder-load.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-placeholder-load.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "placeholder-load"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+	for i := 1; i <= 3; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("msg-%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	now := time.Now().Unix()
+	if err := readerSvc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := readerSvc.store.UpsertProvider(channelID, ownerPeerID, "seed", now); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := readerSvc.store.GetChannelProfile(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isPlaceholderChannelProfile(profile) {
+		t.Fatal("want local placeholder profile before loading messages")
+	}
+
+	items, err := readerSvc.LoadMessagesFromProviders(ctx, channelID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("want 3 loaded messages, got %d", len(items))
+	}
+	profile, err = readerSvc.store.GetChannelProfile(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.OwnerPeerID != ownerPeerID {
+		t.Fatalf("want profile owner %q after bootstrap, got %q", ownerPeerID, profile.OwnerPeerID)
+	}
+}
+
+func TestEnsureMessageAvailableBootstrapsPlaceholderProfile(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12010")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12013")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-placeholder-message.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-placeholder-message.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "placeholder-message"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+	created, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Unix()
+	if err := readerSvc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := readerSvc.store.UpsertProvider(channelID, ownerPeerID, "seed", now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := readerSvc.ensureMessageAvailable(ctx, channelID, created.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := readerSvc.store.GetChannelProfile(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.OwnerPeerID != ownerPeerID {
+		t.Fatalf("want profile owner %q after single message bootstrap, got %q", ownerPeerID, profile.OwnerPeerID)
+	}
+	msg, err := readerSvc.store.GetChannelMessage(channelID, created.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content.Text != "hello" {
+		t.Fatalf("want loaded message text hello, got %q", msg.Content.Text)
+	}
+}
+
 func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 	t.Parallel()
 

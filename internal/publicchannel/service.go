@@ -807,6 +807,10 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	if len(peers) == 0 {
 		return localItems, nil
 	}
+	profile, err := s.ensureChannelProfileAvailable(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
 	body := struct {
 		ChannelID       string `json:"channel_id"`
 		BeforeMessageID int64  `json:"before_message_id,omitempty"`
@@ -819,10 +823,6 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	var resp GetMessagesResponse
 	var lastErr error
 	bestItems := localItems
-	profile, err := s.store.GetChannelProfile(channelID)
-	if err != nil {
-		return nil, err
-	}
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_messages", body, &resp); err != nil {
 			lastErr = err
@@ -830,7 +830,7 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 		}
 		appliedItems := make([]ChannelMessage, 0, len(resp.Items))
 		for _, item := range resp.Items {
-			if err := s.applyVerifiedMessage(item); err != nil {
+			if err := s.applyVerifiedMessageWithProfile(profile, item); err != nil {
 				return nil, err
 			}
 			expired, err := s.isMessageExpired(profile, item)
@@ -880,6 +880,10 @@ func (s *Service) ensureMessageAvailable(ctx context.Context, channelID string, 
 	if err != sql.ErrNoRows {
 		return err
 	}
+	profile, err := s.ensureChannelProfileAvailable(ctx, channelID)
+	if err != nil {
+		return err
+	}
 	peers := s.providerPeerIDs(ctx, channelID)
 	body := struct {
 		ChannelID string `json:"channel_id"`
@@ -890,7 +894,7 @@ func (s *Service) ensureMessageAvailable(ctx context.Context, channelID string, 
 		if err := s.rpcCall(ctx, peerID, "get_channel_message", body, &msg); err != nil {
 			continue
 		}
-		if err := s.applyVerifiedMessage(msg); err != nil {
+		if err := s.applyVerifiedMessageWithProfile(profile, msg); err != nil {
 			return err
 		}
 		_, err := s.store.GetChannelMessage(channelID, messageID)
@@ -1102,6 +1106,13 @@ func (s *Service) applyVerifiedMessage(message ChannelMessage) error {
 	if err != nil {
 		return err
 	}
+	if isPlaceholderChannelProfile(profile) {
+		return errors.New("channel profile is not available")
+	}
+	return s.applyVerifiedMessageWithProfile(profile, message)
+}
+
+func (s *Service) applyVerifiedMessageWithProfile(profile ChannelProfile, message ChannelMessage) error {
 	if err := s.verifyMessageAgainstProfile(profile, message); err != nil {
 		return err
 	}
@@ -1113,6 +1124,65 @@ func (s *Service) applyVerifiedMessage(message ChannelMessage) error {
 		return nil
 	}
 	return s.store.ApplyMessage(message)
+}
+
+func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID string) (ChannelProfile, error) {
+	profile, err := s.store.GetChannelProfile(channelID)
+	switch {
+	case err == nil && !isPlaceholderChannelProfile(profile):
+		return profile, nil
+	case err != nil && err != sql.ErrNoRows:
+		return ChannelProfile{}, err
+	}
+	peers := s.providerPeerIDs(ctx, channelID)
+	if len(peers) == 0 {
+		if err == nil {
+			return ChannelProfile{}, errors.New("channel profile is placeholder and no providers available")
+		}
+		return ChannelProfile{}, err
+	}
+	body := struct {
+		ChannelID string `json:"channel_id"`
+	}{ChannelID: channelID}
+	var lastErr error
+	for _, peerID := range peers {
+		var remoteProfile ChannelProfile
+		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_profile", body, &remoteProfile); rpcErr != nil {
+			lastErr = rpcErr
+			continue
+		}
+		if err := verifyProfile(remoteProfile); err != nil {
+			return ChannelProfile{}, err
+		}
+		var remoteHead ChannelHead
+		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_head", body, &remoteHead); rpcErr != nil {
+			lastErr = rpcErr
+			continue
+		}
+		if err := verifyHead(remoteHead); err != nil {
+			return ChannelProfile{}, err
+		}
+		if remoteHead.OwnerPeerID != remoteProfile.OwnerPeerID {
+			return ChannelProfile{}, errors.New("channel head owner mismatch")
+		}
+		if err := s.store.ApplyProfile(remoteProfile); err != nil {
+			return ChannelProfile{}, err
+		}
+		if err := s.store.ApplyHead(remoteHead); err != nil {
+			return ChannelProfile{}, err
+		}
+		return remoteProfile, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("failed to fetch channel profile")
+	}
+	return ChannelProfile{}, lastErr
+}
+
+func isPlaceholderChannelProfile(profile ChannelProfile) bool {
+	return strings.TrimSpace(profile.OwnerPeerID) == "" ||
+		profile.OwnerVersion == 0 ||
+		strings.TrimSpace(profile.Signature) == ""
 }
 
 func (s *Service) verifyMessageAgainstProfile(profile ChannelProfile, message ChannelMessage) error {
