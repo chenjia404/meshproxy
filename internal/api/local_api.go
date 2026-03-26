@@ -333,6 +333,7 @@ type PublicChannelProvider interface {
 	ListChannelsByOwner(ownerPeerID string) ([]publicchannel.ChannelSummary, error)
 	ListSubscribedChannels() ([]publicchannel.ChannelSummary, error)
 	ListProviders(channelID string) ([]publicchannel.ChannelProvider, error)
+	ClearChannelUnreadCount(channelID string) (publicchannel.ChannelSummary, error)
 	SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
 	SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error)
 	UnsubscribeChannel(channelID string) error
@@ -2243,6 +2244,17 @@ func (a *LocalAPI) handlePublicChannelItem(w http.ResponseWriter, r *http.Reques
 			body.PeerIDs = append(body.PeerIDs, strings.TrimSpace(body.PeerID))
 		}
 		item, err := a.opts.PublicChannels.SubscribeChannelAsync(channelID, body.PeerIDs, body.LastSeenSeq)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, item)
+	case "read":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		item, err := a.opts.PublicChannels.ClearChannelUnreadCount(channelID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

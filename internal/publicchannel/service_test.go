@@ -371,6 +371,80 @@ func TestSubscribeReceivesPubSubAndSyncsChanges(t *testing.T) {
 	t.Fatal("reader did not receive second message via pubsub+sync")
 }
 
+func TestPublicChannelUnreadCountAndClear(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12031")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12032")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-unread.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-unread.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "unread-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: "unread-1"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := readerSvc.store.GetChannelSyncState(channelID)
+		if err == nil && state.UnreadCount == 1 {
+			cleared, err := readerSvc.ClearChannelUnreadCount(channelID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cleared.Sync.UnreadCount != 0 {
+				t.Fatalf("want unread count cleared to 0, got %d", cleared.Sync.UnreadCount)
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	state, err := readerSvc.store.GetChannelSyncState(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("want unread count 1 after remote message, got %d", state.UnreadCount)
+}
+
 func TestSubscribeChannelFiltersExpiredMessagesInResponse(t *testing.T) {
 	t.Parallel()
 

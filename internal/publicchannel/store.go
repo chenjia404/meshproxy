@@ -102,6 +102,7 @@ func (s *Store) migrate() error {
 			last_synced_seq INTEGER NOT NULL DEFAULT 0,
 			latest_loaded_message_id INTEGER NOT NULL DEFAULT 0,
 			oldest_loaded_message_id INTEGER NOT NULL DEFAULT 0,
+			unread_count INTEGER NOT NULL DEFAULT 0,
 			subscribed INTEGER NOT NULL DEFAULT 0,
 			updated_at INTEGER NOT NULL DEFAULT 0
 		)`,
@@ -127,6 +128,9 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE public_channels ADD COLUMN message_retention_minutes INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("migrate public channel db add message_retention_minutes: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channel_sync_state ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add unread_count: %w", err)
 	}
 	if _, err := s.db.Exec(`UPDATE public_channels SET head_updated_at=updated_at WHERE head_updated_at=0`); err != nil {
 		return fmt.Errorf("migrate public channel db backfill head_updated_at: %w", err)
@@ -251,7 +255,7 @@ func (s *Store) CreateOwnedChannel(profile ChannelProfile, head ChannelHead, now
 	}
 	if _, err := tx.Exec(`
 		UPDATE public_channel_sync_state
-		SET last_seen_seq=?, last_synced_seq=?, subscribed=1, updated_at=?
+		SET last_seen_seq=?, last_synced_seq=?, unread_count=0, subscribed=1, updated_at=?
 		WHERE channel_db_id=?
 	`, head.LastSeq, head.LastSeq, now, channelDBID); err != nil {
 		return err
@@ -680,6 +684,43 @@ func (s *Store) UpdateSyncState(channelID string, lastSeenSeq, lastSyncedSeq int
 	return nil
 }
 
+func (s *Store) IncrementChannelUnreadCount(channelID string, delta int, now int64) error {
+	if delta <= 0 {
+		return nil
+	}
+	channelDBID, err := s.getChannelDBID(channelID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO public_channel_sync_state(channel_db_id, unread_count, updated_at)
+		VALUES(?,?,?)
+		ON CONFLICT(channel_db_id) DO UPDATE SET
+			unread_count=public_channel_sync_state.unread_count + excluded.unread_count,
+			updated_at=excluded.updated_at
+	`, channelDBID, delta, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ClearChannelUnreadCount(channelID string, now int64) error {
+	channelDBID, err := s.getChannelDBID(channelID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO public_channel_sync_state(channel_db_id, unread_count, updated_at)
+		VALUES(?,?,?)
+		ON CONFLICT(channel_db_id) DO UPDATE SET
+			unread_count=0,
+			updated_at=excluded.updated_at
+	`, channelDBID, 0, now); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) UpdateLoadedRange(channelID string, messages []ChannelMessage, now int64) error {
 	if len(messages) == 0 {
 		return nil
@@ -1063,7 +1104,7 @@ func (s *Store) GetChannelSyncState(channelID string) (ChannelSyncState, error) 
 		subscribed int
 	)
 	err = s.db.QueryRow(`
-		SELECT last_seen_seq, last_synced_seq, latest_loaded_message_id, oldest_loaded_message_id, subscribed, updated_at
+		SELECT last_seen_seq, last_synced_seq, latest_loaded_message_id, oldest_loaded_message_id, unread_count, subscribed, updated_at
 		FROM public_channel_sync_state
 		WHERE channel_db_id=?
 	`, channelDBID).Scan(
@@ -1071,6 +1112,7 @@ func (s *Store) GetChannelSyncState(channelID string) (ChannelSyncState, error) 
 		&state.LastSyncedSeq,
 		&state.LatestLoadedMessageID,
 		&state.OldestLoadedMessageID,
+		&state.UnreadCount,
 		&subscribed,
 		&state.UpdatedAt,
 	)

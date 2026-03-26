@@ -123,6 +123,7 @@ type ChannelSyncState struct {
 	LastSyncedSeq         int64  `json:"last_synced_seq"`
 	LatestLoadedMessageID int64  `json:"latest_loaded_message_id"`
 	OldestLoadedMessageID int64  `json:"oldest_loaded_message_id"`
+	UnreadCount           int    `json:"unread_count"`
 	Subscribed            bool   `json:"subscribed"`
 	UpdatedAt             int64  `json:"updated_at"`
 }

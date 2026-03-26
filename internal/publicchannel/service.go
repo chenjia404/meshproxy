@@ -264,6 +264,14 @@ func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
 	return s.store.ListSubscribedChannels(s.localPeer)
 }
 
+func (s *Service) ClearChannelUnreadCount(channelID string) (ChannelSummary, error) {
+	now := time.Now().Unix()
+	if err := s.store.ClearChannelUnreadCount(channelID, now); err != nil {
+		return ChannelSummary{}, err
+	}
+	return s.store.GetChannelSummary(channelID)
+}
+
 func (s *Service) ListProviders(channelID string) ([]ChannelProvider, error) {
 	return s.store.ListProviders(channelID)
 }
@@ -1038,6 +1046,7 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
+	unreadDelta := 0
 	for _, change := range resp.Items {
 		switch change.ChangeType {
 		case ChangeTypeProfile:
@@ -1058,6 +1067,12 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 		case ChangeTypeMessage:
 			if change.MessageID == nil {
 				continue
+			}
+			existingMissing := false
+			if _, err := s.store.GetChannelMessage(channelID, *change.MessageID); err == sql.ErrNoRows {
+				existingMissing = true
+			} else if err != nil {
+				return err
 			}
 			var remoteMsg ChannelMessage
 			if err := s.rpcCall(ctx, sourcePeerID, "get_channel_message", struct {
@@ -1085,8 +1100,16 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 			if err := s.store.ApplyMessage(remoteMsg); err != nil {
 				return err
 			}
+			if existingMissing && !remoteMsg.IsDeleted && profile.OwnerPeerID != s.localPeer {
+				unreadDelta++
+			}
 		}
 		if err := s.store.RecordChange(change); err != nil {
+			return err
+		}
+	}
+	if unreadDelta > 0 {
+		if err := s.store.IncrementChannelUnreadCount(channelID, unreadDelta, time.Now().Unix()); err != nil {
 			return err
 		}
 	}

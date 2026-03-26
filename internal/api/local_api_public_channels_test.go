@@ -145,6 +145,10 @@ func TestListSubscribedPublicChannels(t *testing.T) {
 				ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
 				Name:      "sub-1",
 			},
+			Sync: publicchannel.ChannelSyncState{
+				ChannelID:   "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e123",
+				UnreadCount: 3,
+			},
 		},
 		{
 			Profile: publicchannel.ChannelProfile{
@@ -177,6 +181,13 @@ func TestListSubscribedPublicChannels(t *testing.T) {
 	}
 	if profile["channel_id"] != items[0].Profile.ChannelID {
 		t.Fatalf("want first subscribed channel %q, got %#v", items[0].Profile.ChannelID, profile["channel_id"])
+	}
+	syncState, ok := body[0]["sync"].(map[string]any)
+	if !ok {
+		t.Fatalf("want sync object, got %#v", body[0]["sync"])
+	}
+	if syncState["unread_count"] != float64(3) {
+		t.Fatalf("want unread_count 3, got %#v", syncState["unread_count"])
 	}
 }
 
@@ -269,6 +280,37 @@ func TestSubscribePublicChannelReturnsLocalPlaceholderImmediately(t *testing.T) 
 	}
 	if profile["channel_id"] != result.Profile.ChannelID {
 		t.Fatalf("want placeholder channel_id %q, got %#v", result.Profile.ChannelID, profile["channel_id"])
+	}
+}
+
+func TestReadPublicChannelClearsUnreadCount(t *testing.T) {
+	t.Parallel()
+
+	result := publicchannel.ChannelSummary{
+		Profile: publicchannel.ChannelProfile{ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e126"},
+		Sync:    publicchannel.ChannelSyncState{ChannelID: "0195f3f0-8d4a-7c12-b2c1-9db1f0a9e126", UnreadCount: 0},
+	}
+	api := NewLocalAPI(":0", nil, nil, nil, &LocalAPIOpts{
+		PublicChannels: &stubPublicChannelProvider{clearUnreadResult: result},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/public-channels/"+result.Profile.ChannelID+"/read", nil)
+	rec := httptest.NewRecorder()
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	syncState, ok := body["sync"].(map[string]any)
+	if !ok {
+		t.Fatalf("want sync object, got %#v", body["sync"])
+	}
+	if syncState["unread_count"] != float64(0) {
+		t.Fatalf("want unread_count 0, got %#v", syncState["unread_count"])
 	}
 }
 
@@ -402,6 +444,7 @@ type stubPublicChannelProvider struct {
 	createChannelFilesText       string
 	createChannelFilesUploads    []publicchannel.UploadFileInput
 	getChannelSummaryResult      publicchannel.ChannelSummary
+	clearUnreadResult            publicchannel.ChannelSummary
 	listSubscribedChannelsResult []publicchannel.ChannelSummary
 	getChannelMessagesResult     []publicchannel.ChannelMessage
 	getChannelMessagesErr        error
@@ -483,6 +526,10 @@ func (s *stubPublicChannelProvider) ListSubscribedChannels() ([]publicchannel.Ch
 
 func (s *stubPublicChannelProvider) ListProviders(channelID string) ([]publicchannel.ChannelProvider, error) {
 	return nil, nil
+}
+
+func (s *stubPublicChannelProvider) ClearChannelUnreadCount(channelID string) (publicchannel.ChannelSummary, error) {
+	return s.clearUnreadResult, nil
 }
 
 func (s *stubPublicChannelProvider) SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (publicchannel.SubscribeResult, error) {

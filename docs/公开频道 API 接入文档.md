@@ -272,6 +272,7 @@
 - 新创建的自有频道默认就是 `sync.subscribed=true`
 - 当前优先按订阅更新时间排序；如果是当前节点自己创建但未订阅的频道，则回退按频道自身 `updated_at` 排序，最后再按 `public_channels.id DESC`
 - 返回 `ChannelSummary[]`
+- 列表里的 `sync.unread_count` 会返回该公开频道当前本地未读数，前端可直接用于会话列表角标
 
 ### 5.4 获取频道详情
 
