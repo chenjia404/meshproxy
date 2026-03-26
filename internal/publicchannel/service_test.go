@@ -909,15 +909,17 @@ func TestProvideRetriesAfterFailureAndLaterSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	routing := newScriptedProvideRouting(errors.New("first provide failed"), nil)
-	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "provide-retry.db"), h, routing, nil)
+	svc, err := newServiceWithConfig(ctx, filepath.Join(t.TempDir(), "provide-retry.db"), h, routing, nil, serviceConfig{
+		provideRetryBackoffs:    []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond},
+		provideSuccessInterval:  time.Hour,
+		provideLoopInterval:     10 * time.Millisecond,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: 0,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetNodePrivateKey(priv)
-	svc.provideRetryBackoffs = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}
-	svc.provideLoopInterval = 10 * time.Millisecond
-	svc.provideSuccessInterval = time.Hour
-	svc.provideSuccessLogMinGap = 0
 	t.Cleanup(func() { _ = svc.Close() })
 
 	summary, err := svc.CreateChannel(CreateChannelInput{Name: "retry-channel"})
@@ -962,14 +964,17 @@ func TestProvideRetryDelayStartsFromAttemptFinish(t *testing.T) {
 	routing := newScriptedProvideRouting(nil)
 	routing.delays = []time.Duration{80 * time.Millisecond}
 	routing.outcomes = []error{errors.New("slow failure")}
-	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "provide-delay.db"), h, routing, nil)
+	svc, err := newServiceWithConfig(ctx, filepath.Join(t.TempDir(), "provide-delay.db"), h, routing, nil, serviceConfig{
+		provideRetryBackoffs:    []time.Duration{50 * time.Millisecond},
+		provideSuccessInterval:  time.Hour,
+		provideLoopInterval:     10 * time.Millisecond,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: 0,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetNodePrivateKey(priv)
-	svc.provideRetryBackoffs = []time.Duration{50 * time.Millisecond}
-	svc.provideSuccessInterval = time.Hour
-	svc.provideSuccessLogMinGap = 0
 	t.Cleanup(func() { _ = svc.Close() })
 
 	startedAt := time.Now()
@@ -1046,14 +1051,16 @@ func TestServiceStartupSchedulesOwnedChannelsForProvide(t *testing.T) {
 	}
 
 	routing := newScriptedProvideRouting(nil)
-	svc, err := NewService(ctx, dbPath, h, routing, nil)
+	svc, err := newServiceWithConfig(ctx, dbPath, h, routing, nil, serviceConfig{
+		provideSuccessInterval:  time.Hour,
+		provideLoopInterval:     10 * time.Millisecond,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: 0,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetNodePrivateKey(priv)
-	svc.provideLoopInterval = 10 * time.Millisecond
-	svc.provideSuccessInterval = time.Hour
-	svc.provideSuccessLogMinGap = 0
 	t.Cleanup(func() { _ = svc.Close() })
 
 	routing.waitForProvideCount(t, 1, 2*time.Second)
@@ -1081,14 +1088,16 @@ func TestProvideSuccessSchedulesPeriodicReprovide(t *testing.T) {
 		t.Fatal(err)
 	}
 	routing := newScriptedProvideRouting(nil, nil, nil)
-	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "periodic-provide.db"), h, routing, nil)
+	svc, err := newServiceWithConfig(ctx, filepath.Join(t.TempDir(), "periodic-provide.db"), h, routing, nil, serviceConfig{
+		provideSuccessInterval:  50 * time.Millisecond,
+		provideLoopInterval:     10 * time.Millisecond,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: 0,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetNodePrivateKey(priv)
-	svc.provideLoopInterval = 10 * time.Millisecond
-	svc.provideSuccessInterval = 50 * time.Millisecond
-	svc.provideSuccessLogMinGap = 0
 	t.Cleanup(func() { _ = svc.Close() })
 
 	summary, err := svc.CreateChannel(CreateChannelInput{Name: "periodic-channel"})

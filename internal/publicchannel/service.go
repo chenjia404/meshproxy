@@ -51,6 +51,15 @@ type Service struct {
 	nowFn                   func() time.Time
 }
 
+type serviceConfig struct {
+	provideRetryBackoffs    []time.Duration
+	provideSuccessInterval  time.Duration
+	provideLoopInterval     time.Duration
+	provideTimeout          time.Duration
+	provideSuccessLogMinGap time.Duration
+	nowFn                   func() time.Time
+}
+
 type channelSubscription struct {
 	topic  *pubsub.Topic
 	sub    *pubsub.Subscription
@@ -78,12 +87,45 @@ type ipfsFilePinner interface {
 	PinChatFile(ctx context.Context, fileName string, data []byte) (cid string, err error)
 }
 
+func defaultServiceConfig() serviceConfig {
+	return serviceConfig{
+		provideRetryBackoffs:    []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute},
+		provideSuccessInterval:  20 * time.Minute,
+		provideLoopInterval:     time.Second,
+		provideTimeout:          10 * time.Second,
+		provideSuccessLogMinGap: time.Minute,
+		nowFn:                   time.Now,
+	}
+}
+
 func NewService(ctx context.Context, dbPath string, h host.Host, routing corerouting.Routing, ps *pubsub.PubSub) (*Service, error) {
+	return newServiceWithConfig(ctx, dbPath, h, routing, ps, defaultServiceConfig())
+}
+
+func newServiceWithConfig(ctx context.Context, dbPath string, h host.Host, routing corerouting.Routing, ps *pubsub.PubSub, cfg serviceConfig) (*Service, error) {
 	serviceCtx, cancel := context.WithCancel(ctx)
 	store, err := NewStore(dbPath)
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if len(cfg.provideRetryBackoffs) == 0 {
+		cfg.provideRetryBackoffs = defaultServiceConfig().provideRetryBackoffs
+	}
+	if cfg.provideSuccessInterval <= 0 {
+		cfg.provideSuccessInterval = defaultServiceConfig().provideSuccessInterval
+	}
+	if cfg.provideLoopInterval <= 0 {
+		cfg.provideLoopInterval = defaultServiceConfig().provideLoopInterval
+	}
+	if cfg.provideTimeout <= 0 {
+		cfg.provideTimeout = defaultServiceConfig().provideTimeout
+	}
+	if cfg.provideSuccessLogMinGap < 0 {
+		cfg.provideSuccessLogMinGap = 0
+	}
+	if cfg.nowFn == nil {
+		cfg.nowFn = time.Now
 	}
 	s := &Service{
 		ctx:                     serviceCtx,
@@ -96,12 +138,12 @@ func NewService(ctx context.Context, dbPath string, h host.Host, routing corerou
 		subs:                    make(map[string]*channelSubscription),
 		provideStates:           make(map[string]*provideState),
 		provideWakeCh:           make(chan struct{}, 1),
-		provideRetryBackoffs:    []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute},
-		provideSuccessInterval:  20 * time.Minute,
-		provideLoopInterval:     time.Second,
-		provideTimeout:          10 * time.Second,
-		provideSuccessLogMinGap: time.Minute,
-		nowFn:                   time.Now,
+		provideRetryBackoffs:    append([]time.Duration(nil), cfg.provideRetryBackoffs...),
+		provideSuccessInterval:  cfg.provideSuccessInterval,
+		provideLoopInterval:     cfg.provideLoopInterval,
+		provideTimeout:          cfg.provideTimeout,
+		provideSuccessLogMinGap: cfg.provideSuccessLogMinGap,
+		nowFn:                   cfg.nowFn,
 	}
 	h.SetStreamHandler(p2p.ProtocolPublicChannelRPC, s.handleRPCStream)
 	s.runRetentionSweep(time.Now().UTC())
