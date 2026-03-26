@@ -6,12 +6,37 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
-// 協議 ID（與《私聊離線消息（節點側）改造文檔 V1》一致，不得改動）
+// ProtocolRPC 與 meshchat-store 節點統一協議（單流多方法 RPC）。
+const ProtocolRPC protocol.ID = "/meshchat/offline-store/rpc/1.0.0"
+
+// 與 store-node internal/protocol 一致的方法名。
 const (
-	ProtocolStore protocol.ID = "/chat/offline/store/1.0.0"
-	ProtocolFetch protocol.ID = "/chat/offline/fetch/1.0.0"
-	ProtocolAck   protocol.ID = "/chat/offline/ack/1.0.0"
+	MethodOfflineStore = "offline.store"
+	MethodOfflineFetch = "offline.fetch"
+	MethodOfflineAck   = "offline.ack"
 )
+
+// RPCRequest 單一流上的請求：body 為 StoreRequest / FetchRequest / AckRequest JSON。
+type RPCRequest struct {
+	RequestID string          `json:"request_id"`
+	Method    string          `json:"method"`
+	Body      json.RawMessage `json:"body"`
+}
+
+// RPCResponse 單一流上的響應：body 為 StoreResponse / FetchResponse / AckResponse，或 RPC 層錯誤形狀。
+type RPCResponse struct {
+	RequestID string          `json:"request_id"`
+	OK        bool            `json:"ok"`
+	Error     string          `json:"error"`
+	Body      json.RawMessage `json:"body"`
+}
+
+// RPCErrorBody RPC 層錯誤（非法請求、未知 method 等）時 body 的固定形狀。
+type RPCErrorBody struct {
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
+	Method       string `json:"method,omitempty"`
+}
 
 // OfflineStoreNode 用戶資料或節點配置（chat.offline_store_peers 解析結果）中的單個 store。
 // Addrs 可省略：僅填 peer_id 時由 ConnectStorePeer 經 DHT FindPeer 查址後連線。
@@ -20,38 +45,40 @@ type OfflineStoreNode struct {
 	Addrs  []string `json:"addrs,omitempty" yaml:"addrs,omitempty"`
 }
 
-// StoreMessageRequest 對應文檔 7.3
+// StoreMessageRequest 對應業務 StoreRequest（文檔 7.3）
 type StoreMessageRequest struct {
 	Version int             `json:"version"`
 	Message json.RawMessage `json:"message"`
 }
 
-// StoreMessageResponse 對應文檔 7.4
+// StoreMessageResponse 對應業務 StoreResponse（文檔 7.4）
 type StoreMessageResponse struct {
-	OK         bool   `json:"ok"`
-	Duplicate  bool   `json:"duplicate"`
-	StoreSeq   int64  `json:"store_seq"`
-	ExpireAt   int64  `json:"expire_at"`
-	ErrorCode  string `json:"error_code"`
+	OK           bool   `json:"ok"`
+	Duplicate    bool   `json:"duplicate"`
+	StoreSeq     int64  `json:"store_seq"`
+	ExpireAt     int64  `json:"expire_at"`
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
-// FetchMessagesRequest 對應文檔 8.3
+// FetchMessagesRequest 對應業務 FetchRequest（文檔 8.3）
 type FetchMessagesRequest struct {
-	Version      int    `json:"version"`
-	RecipientID  string `json:"recipient_id"`
-	AfterSeq     int64  `json:"after_seq"`
-	Limit        int    `json:"limit"`
+	Version     int    `json:"version"`
+	RecipientID string `json:"recipient_id"`
+	AfterSeq    int64  `json:"after_seq"`
+	Limit       int    `json:"limit"`
 }
 
-// FetchMessagesResponse 對應文檔 8.4
+// FetchMessagesResponse 對應業務 FetchResponse（文檔 8.4）
 type FetchMessagesResponse struct {
-	OK        bool              `json:"ok"`
-	Items     []json.RawMessage `json:"items"`
-	HasMore   bool              `json:"has_more"`
-	ErrorCode string            `json:"error_code"`
+	OK           bool              `json:"ok"`
+	Items        []json.RawMessage `json:"items"`
+	HasMore      bool              `json:"has_more"`
+	ErrorCode    string            `json:"error_code"`
+	ErrorMessage string            `json:"error_message,omitempty"`
 }
 
-// AckMessagesRequest 對應文檔 9.2
+// AckMessagesRequest 對應業務 AckRequest（文檔 9.2）
 type AckMessagesRequest struct {
 	Version     int             `json:"version"`
 	RecipientID string          `json:"recipient_id"`
@@ -61,8 +88,10 @@ type AckMessagesRequest struct {
 	Signature   json.RawMessage `json:"signature"`
 }
 
-// AckMessagesResponse 對應文檔 9.3
+// AckMessagesResponse 對應業務 AckResponse（文檔 9.3）
 type AckMessagesResponse struct {
-	OK               bool  `json:"ok"`
-	DeletedUntilSeq  int64 `json:"deleted_until_seq"`
+	OK               bool   `json:"ok"`
+	DeletedUntilSeq  int64  `json:"deleted_until_seq"`
+	ErrorCode        string `json:"error_code"`
+	ErrorMessage     string `json:"error_message,omitempty"`
 }
