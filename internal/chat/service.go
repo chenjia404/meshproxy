@@ -56,6 +56,7 @@ type Service struct {
 
 	offlineStoreNodes  []offlinestore.OfflineStoreNode
 	offlineStoreSyncMu sync.Mutex
+	offlineConvWorkers sync.Map // key: conversation_id -> chan offlineConversationTask
 
 	// ChatRelay V1（《聊天中继.md》）：按目標 peer 復用會話。
 	relayV1SessionsMu        sync.Mutex // 僅保護 relayV1Sessions map 本身；單會話狀態用 relayV1PeerSession.mu。
@@ -1336,6 +1337,8 @@ func (s *Service) SyncConversation(conversationID string) error {
 
 func (s *Service) syncConversationFromCounter(conversationID, peerID string, nextCounter uint64) error {
 	for round := 0; round < directSyncMaxRounds; round++ {
+		log.Printf("[chat] chat sync round begin conversation=%s peer=%s round=%d next_counter=%d",
+			conversationID, peerID, round+1, nextCounter)
 		req := ChatSyncRequest{
 			Type:           MessageTypeChatSyncRequest,
 			ConversationID: conversationID,
@@ -1346,15 +1349,23 @@ func (s *Service) syncConversationFromCounter(conversationID, peerID string, nex
 		}
 		resp, err := s.requestChatSync(peerID, req)
 		if err != nil {
+			log.Printf("[chat] chat sync round request failed conversation=%s peer=%s round=%d next_counter=%d err=%v",
+				conversationID, peerID, round+1, nextCounter, err)
 			return err
 		}
+		log.Printf("[chat] chat sync round response conversation=%s peer=%s round=%d next_counter=%d remote_send_counter=%d msgs=%d files=%d",
+			conversationID, peerID, round+1, nextCounter, resp.RemoteSendCounter, len(resp.Messages), len(resp.Files))
 		if err := s.applyChatSyncResponse(conversationID, resp); err != nil {
+			log.Printf("[chat] chat sync round apply failed conversation=%s peer=%s round=%d next_counter=%d err=%v",
+				conversationID, peerID, round+1, nextCounter, err)
 			return err
 		}
 		sess, err := s.store.GetSessionState(conversationID)
 		if err != nil {
 			return err
 		}
+		log.Printf("[chat] chat sync round post-apply conversation=%s peer=%s round=%d recv_counter=%d remote_send_counter=%d",
+			conversationID, peerID, round+1, sess.RecvCounter, resp.RemoteSendCounter)
 		if sess.RecvCounter >= resp.RemoteSendCounter {
 			return nil
 		}
@@ -2170,30 +2181,40 @@ func isAvatarEnvelope(v any) bool {
 
 func (s *Service) sendViaRelay(peerID string, v any) error {
 	const relayAttemptLimit = 5
+	log.Printf("[chat] sendViaRelay begin dst=%s payload_type=%T", peerID, v)
 	relays, err := s.relayV1RelayCandidatesWithPreferred(peerID, relayAttemptLimit)
 	if err != nil {
+		log.Printf("[chat] sendViaRelay candidates failed dst=%s err=%v", peerID, err)
 		return err
 	}
+	log.Printf("[chat] sendViaRelay candidates dst=%s count=%d relays=%v", peerID, len(relays), relays)
 	toSend, err := s.attachRelaySignature(v)
 	if err != nil {
+		log.Printf("[chat] sendViaRelay attach signature failed dst=%s err=%v", peerID, err)
 		return err
 	}
 	payload, err := json.Marshal(toSend)
 	if err != nil {
+		log.Printf("[chat] sendViaRelay marshal failed dst=%s err=%v", peerID, err)
 		return err
 	}
 
 	var lastErr error
 	for _, relayPID := range relays {
+		log.Printf("[chat] sendViaRelay attempt dst=%s relay=%s payload_len=%d", peerID, relayPID.String(), len(payload))
 		if err := s.sendViaRelayV1(relayPID, peerID, payload); err != nil {
+			log.Printf("[chat] sendViaRelay attempt failed dst=%s relay=%s err=%v", peerID, relayPID.String(), err)
 			lastErr = err
 			continue
 		}
+		log.Printf("[chat] sendViaRelay attempt ok dst=%s relay=%s", peerID, relayPID.String())
 		return nil
 	}
 	if lastErr != nil {
+		log.Printf("[chat] sendViaRelay all failed dst=%s err=%v", peerID, lastErr)
 		return lastErr
 	}
+	log.Printf("[chat] sendViaRelay no relay path dst=%s", peerID)
 	return errors.New("no relay path available")
 }
 
@@ -2615,27 +2636,62 @@ func (s *Service) processDirectEnvelope(env map[string]any, streamPeerID string)
 }
 
 func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, streamPeerID string, incrementUnread bool, skipGapAfterSyncFail bool) error {
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat enter msg=%s conv=%s from=%s counter=%d", msg.MsgID, msg.ConversationID, msg.FromPeerID, msg.Counter)
+	}
 	if streamPeerID != "" && !streamPeerIdentityOK(streamPeerID, msg.FromPeerID) {
 		log.Printf("[chat] chat text ignored: stream peer mismatch stream=%s claimed=%s", streamPeerID, msg.FromPeerID)
 		return nil
 	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat peer-check begin msg=%s from=%s", msg.MsgID, msg.FromPeerID)
+	}
 	if contact, err := s.store.GetPeer(msg.FromPeerID); err == nil && contact.Blocked {
 		return nil
 	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat peer-check ok msg=%s from=%s", msg.MsgID, msg.FromPeerID)
+		log.Printf("[chat] offline fetch chat load-state begin msg=%s conv=%s from=%s transport=%s", msg.MsgID, msg.ConversationID, msg.FromPeerID, transportMode)
+	}
 	conv, sess, _, err := s.loadIncomingDirectState(msg.ConversationID, msg.FromPeerID, transportMode)
 	if err != nil {
+		if transportMode == TransportModeOfflineStore {
+			log.Printf("[chat] offline fetch chat load-state err msg=%s conv=%s from=%s err=%v", msg.MsgID, msg.ConversationID, msg.FromPeerID, err)
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			// 对方尚未建立好友关系，或者本地仍无法恢复会话状态：直接拒绝发送方。
 			if s.maybeSendSessionRejectForConversation(msg.FromPeerID) {
 				return nil
 			}
 		}
-		return err
+		return fmt.Errorf("load incoming state msg=%s conv=%s from=%s transport=%s counter=%d: %w",
+			msg.MsgID, msg.ConversationID, msg.FromPeerID, transportMode, msg.Counter, err)
+	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat load-state ok msg=%s conv=%s from=%s", msg.MsgID, conv.ConversationID, msg.FromPeerID)
+		log.Printf("[chat] offline fetch chat state-ready msg=%s conv=%s from=%s counter=%d recv_counter=%d",
+			msg.MsgID, conv.ConversationID, msg.FromPeerID, msg.Counter, sess.RecvCounter)
 	}
 	// 离线 gap skip 时不在此函数内单独 UpdateRecvCounter；recv 仅在 AddInboundMessageAndAdvanceRecvCounter 事务内与消息一并推进。
 	duplicate, _, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter, skipGapAfterSyncFail)
-	if err != nil || duplicate {
-		return err
+	if duplicate {
+		// 重复消息分支会尝试 sendDeliveryAck；对端不可达时 err!=nil。离线 store 拉取不得因此失败，否则整批无法 ACK、游标卡死。
+		if err != nil {
+			if transportMode == TransportModeOfflineStore {
+				log.Printf("[chat] offline fetch: delivery ack for duplicate message failed (ignored): %v", err)
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check incoming counter msg=%s conv=%s from=%s transport=%s counter=%d recv_counter=%d: %w",
+			msg.MsgID, msg.ConversationID, msg.FromPeerID, transportMode, msg.Counter, sess.RecvCounter, err)
+	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat counter-ok msg=%s conv=%s from=%s counter=%d",
+			msg.MsgID, conv.ConversationID, msg.FromPeerID, msg.Counter)
 	}
 	msgType := msg.Type
 	if msgType == "" {
@@ -2648,11 +2704,29 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 	aad := []byte(msg.ConversationID + "\x00" + msgType)
 	plain, err := protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
 	if err != nil {
-		return err
+		repairedConv, repairedSess, repaired, recoverErr := s.tryRecoverDirectStateOnCounterZeroAuthFailure(msg, transportMode, conv, err)
+		if recoverErr != nil {
+			return fmt.Errorf("decrypt inbound chat text msg=%s conv=%s from=%s type=%s counter=%d ciphertext_len=%d: %w",
+				msg.MsgID, msg.ConversationID, msg.FromPeerID, msgType, msg.Counter, len(msg.Ciphertext), recoverErr)
+		}
+		if repaired {
+			conv = repairedConv
+			sess = repairedSess
+			plain, err = protocol.AEADOpen(sess.RecvKey, nonce, msg.Ciphertext, aad)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("decrypt inbound chat text msg=%s conv=%s from=%s type=%s counter=%d ciphertext_len=%d: %w",
+			msg.MsgID, msg.ConversationID, msg.FromPeerID, msgType, msg.Counter, len(msg.Ciphertext), err)
+	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat decrypt-ok msg=%s conv=%s from=%s type=%s counter=%d plaintext_len=%d",
+			msg.MsgID, conv.ConversationID, msg.FromPeerID, msgType, msg.Counter, len(plain))
 	}
 	if msgType == MessageTypeGroupInviteNote {
 		if err := s.handleIncomingGroupInviteNotice(msg, plain); err != nil {
-			return err
+			return fmt.Errorf("handle group invite notice msg=%s conv=%s from=%s counter=%d: %w",
+				msg.MsgID, msg.ConversationID, msg.FromPeerID, msg.Counter, err)
 		}
 	}
 	incoming := Message{
@@ -2670,17 +2744,22 @@ func (s *Service) handleIncomingChatText(msg ChatText, transportMode string, str
 	}
 	// 消息 + recv 游标在同一事务提交后，再发 delivery_ack（见 AddInboundMessageAndAdvanceRecvCounter）。
 	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(incoming, msg.Ciphertext, msg.Counter+1, incrementUnread); err != nil {
-		return err
+		return fmt.Errorf("store inbound chat text msg=%s conv=%s from=%s type=%s counter=%d next_recv=%d: %w",
+			msg.MsgID, msg.ConversationID, msg.FromPeerID, msgType, msg.Counter, msg.Counter+1, err)
+	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch chat stored msg=%s conv=%s from=%s type=%s counter=%d next_recv=%d",
+			msg.MsgID, conv.ConversationID, msg.FromPeerID, msgType, msg.Counter, msg.Counter+1)
 	}
 	// Notify websocket clients that this conversation has a new inbound message (include body for UI).
 	s.publishChatEvent(chatEventDirectMessage(incoming))
 	_ = s.store.UpsertPeer(msg.FromPeerID, "", "")
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch stored skip peer-ack msg=%s conv=%s from=%s type=%s counter=%d",
+			msg.MsgID, conv.ConversationID, msg.FromPeerID, msgType, msg.Counter)
+		return nil
+	}
 	if err := s.sendDeliveryAck(conv, msg.MsgID, msg.FromPeerID); err != nil {
-		// 離線 store 拉取：對端可能不可達，送達回執失敗不應阻斷入庫與對 store 的 ACK 游標推進，否則會卡死整批拉取。
-		if transportMode == TransportModeOfflineStore {
-			log.Printf("[chat] offline fetch: delivery ack to peer failed (ignored) msg=%s peer=%s: %v", msg.MsgID, msg.FromPeerID, err)
-			return nil
-		}
 		return err
 	}
 	return nil
@@ -2731,7 +2810,17 @@ func (s *Service) handleIncomingChatFile(msg ChatFile, transportMode string, str
 		return err
 	}
 	duplicate, _, err := s.checkIncomingDirectCounter(conv, sess, msg.MsgID, msg.Counter, false)
-	if err != nil || duplicate {
+	if duplicate {
+		if err != nil {
+			if transportMode == TransportModeOfflineStore {
+				log.Printf("[chat] offline fetch: delivery ack for duplicate chat file failed (ignored): %v", err)
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	if err != nil {
 		return err
 	}
 	storedBlob := msg.Ciphertext
@@ -2926,21 +3015,56 @@ func syncFailureAllowsOfflineGapSkip(err error) bool {
 	return false
 }
 
+func isDirectChatAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "message authentication failed")
+}
+
+func (s *Service) tryRecoverDirectStateOnCounterZeroAuthFailure(msg ChatText, transportMode string, currentConv Conversation, decryptErr error) (Conversation, sessionState, bool, error) {
+	if s == nil || s.store == nil {
+		return Conversation{}, sessionState{}, false, decryptErr
+	}
+	if msg.Counter != 0 || !isDirectChatAuthFailure(decryptErr) {
+		return Conversation{}, sessionState{}, false, decryptErr
+	}
+	log.Printf("[chat] counter=0 decrypt auth failed; resetting local direct state and retrying msg=%s conv=%s from=%s transport=%s",
+		msg.MsgID, currentConv.ConversationID, msg.FromPeerID, transportMode)
+	if err := s.store.DeleteConversationData(currentConv.ConversationID); err != nil {
+		return Conversation{}, sessionState{}, false, fmt.Errorf("reset stale direct state conversation=%s peer=%s: %w",
+			currentConv.ConversationID, msg.FromPeerID, err)
+	}
+	repairedConv, repairedSess, _, err := s.loadIncomingDirectState(msg.ConversationID, msg.FromPeerID, transportMode)
+	if err != nil {
+		return Conversation{}, sessionState{}, false, fmt.Errorf("reload direct state after reset conversation=%s peer=%s: %w",
+			msg.ConversationID, msg.FromPeerID, err)
+	}
+	log.Printf("[chat] direct state reset complete; retrying decrypt msg=%s conv=%s from=%s",
+		msg.MsgID, repairedConv.ConversationID, msg.FromPeerID)
+	return repairedConv, repairedSess, true, nil
+}
+
 // checkIncomingDirectCounter 返回值 offlineGapSkip 為 true 時：僅表示允許在之後一次事務中跳過中間序號入庫當前條，不在此函數內寫入 recv_counter。
 func (s *Service) checkIncomingDirectCounter(conv Conversation, sess sessionState, msgID string, counter uint64, skipGapAfterSyncFail bool) (duplicate bool, offlineGapSkip bool, err error) {
 	for {
 		expected := sess.RecvCounter
 		switch {
 		case counter < expected:
+			if skipGapAfterSyncFail {
+				log.Printf("[chat] offline fetch duplicate skip peer-ack msg=%s conv=%s peer=%s counter=%d recv_counter=%d",
+					msgID, conv.ConversationID, conv.PeerID, counter, expected)
+				return true, false, nil
+			}
 			return true, false, s.sendDeliveryAck(conv, msgID, conv.PeerID)
 		case counter > expected:
+			if skipGapAfterSyncFail {
+				log.Printf("[chat] offline fetch gap skip conversation=%s peer=%s msg=%s skip [%d,%d) accept_counter=%d",
+					conv.ConversationID, conv.PeerID, msgID, expected, counter, counter)
+				return false, true, nil
+			}
 			// 先同步補齊中間序號，再重讀游標；若本條已在同步中入庫則改為重複並回 ack。
 			if syncErr := s.syncConversationFromCounter(conv.ConversationID, conv.PeerID, expected); syncErr != nil {
-				if skipGapAfterSyncFail && syncFailureAllowsOfflineGapSkip(syncErr) {
-					log.Printf("[chat] offline fetch gap skip (transient sync failure): conversation=%s peer=%s skip [%d,%d) sync_err=%v",
-						conv.ConversationID, conv.PeerID, expected, counter, syncErr)
-					return false, true, nil
-				}
 				s.triggerConversationSync(conv.ConversationID, conv.PeerID, expected)
 				return false, false, fmt.Errorf("%w: expected=%d got=%d sync_err=%v", errChatCounterGap, expected, counter, syncErr)
 			}
@@ -3006,8 +3130,12 @@ func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string
 		return nil
 	}
 	if strings.TrimSpace(ack.ConversationID) != "" && m.ConversationID != ack.ConversationID {
-		log.Printf("[chat] delivery ack ignored: conversation mismatch msg=%s want=%s got=%s", ack.MsgID, m.ConversationID, ack.ConversationID)
-		return nil
+		// 對端使用 deriveStableConversationID 的 stable_v1:…；本地出站行可能仍為歷史 conversation_id（舊格式），仍屬同一直聊。
+		stable := deriveStableConversationID(m.SenderPeerID, m.ReceiverPeerID)
+		if ack.ConversationID != stable {
+			log.Printf("[chat] delivery ack ignored: conversation mismatch msg=%s want=%s got=%s stable=%s", ack.MsgID, m.ConversationID, ack.ConversationID, stable)
+			return nil
+		}
 	}
 	if err := s.store.MarkMessageDelivered(ack.MsgID, time.UnixMilli(ack.AckedAtUnix)); err != nil {
 		return err
@@ -3339,7 +3467,10 @@ func (s *Service) handleChatSyncRequest(req ChatSyncRequest, remotePeerID string
 }
 
 func (s *Service) requestChatSync(peerID string, req ChatSyncRequest) (ChatSyncResponse, error) {
+	log.Printf("[chat] requestChatSync begin peer=%s conversation=%s next_counter=%d", peerID, req.ConversationID, req.NextCounter)
 	if err := s.ensurePeerConnected(peerID); err != nil {
+		log.Printf("[chat] requestChatSync direct unavailable peer=%s conversation=%s next_counter=%d err=%v; fallback relay",
+			peerID, req.ConversationID, req.NextCounter, err)
 		// Fallback to relay when direct connection is unavailable.
 		return s.requestChatSyncViaRelay(peerID, req)
 	}
@@ -3351,36 +3482,54 @@ func (s *Service) requestChatSync(peerID string, req ChatSyncRequest) (ChatSyncR
 	defer cancel()
 	str, err := s.host.NewStream(ctx, pid, p2p.ProtocolChatSync)
 	if err != nil {
+		log.Printf("[chat] requestChatSync direct stream failed peer=%s conversation=%s next_counter=%d err=%v",
+			peerID, req.ConversationID, req.NextCounter, err)
 		return ChatSyncResponse{}, err
 	}
 	defer str.Close()
+	log.Printf("[chat] requestChatSync direct stream-open peer=%s conversation=%s next_counter=%d", peerID, req.ConversationID, req.NextCounter)
 	if err := tunnel.WriteJSONFrame(str, req); err != nil {
+		log.Printf("[chat] requestChatSync direct write failed peer=%s conversation=%s next_counter=%d err=%v",
+			peerID, req.ConversationID, req.NextCounter, err)
 		return ChatSyncResponse{}, err
 	}
+	log.Printf("[chat] requestChatSync direct write-ok peer=%s conversation=%s next_counter=%d", peerID, req.ConversationID, req.NextCounter)
 	var resp ChatSyncResponse
 	if err := tunnel.ReadJSONFrame(str, &resp); err != nil {
+		log.Printf("[chat] requestChatSync direct read failed peer=%s conversation=%s next_counter=%d err=%v; fallback relay",
+			peerID, req.ConversationID, req.NextCounter, err)
 		// Direct sync stream failed (e.g. EOF): fallback to relay.
 		return s.requestChatSyncViaRelay(peerID, req)
 	}
+	log.Printf("[chat] requestChatSync direct read-ok peer=%s conversation=%s next_counter=%d remote_send_counter=%d msgs=%d files=%d",
+		peerID, req.ConversationID, req.NextCounter, resp.RemoteSendCounter, len(resp.Messages), len(resp.Files))
 	return resp, nil
 }
 
 func (s *Service) requestChatSyncViaRelay(peerID string, req ChatSyncRequest) (ChatSyncResponse, error) {
 	const relaySyncTimeout = 20 * time.Second
+	log.Printf("[chat] requestChatSync relay begin peer=%s conversation=%s next_counter=%d", peerID, req.ConversationID, req.NextCounter)
 	waitCh := make(chan ChatSyncResponse, 1)
 	s.chatSyncPending.Store(req.ConversationID, waitCh)
 	defer s.chatSyncPending.Delete(req.ConversationID)
 
 	if err := s.sendViaRelay(peerID, req); err != nil {
+		log.Printf("[chat] requestChatSync relay send failed peer=%s conversation=%s next_counter=%d err=%v",
+			peerID, req.ConversationID, req.NextCounter, err)
 		return ChatSyncResponse{}, err
 	}
+	log.Printf("[chat] requestChatSync relay sent peer=%s conversation=%s next_counter=%d timeout=%s",
+		peerID, req.ConversationID, req.NextCounter, relaySyncTimeout)
 
 	select {
 	case <-s.ctx.Done():
 		return ChatSyncResponse{}, s.ctx.Err()
 	case resp := <-waitCh:
+		log.Printf("[chat] requestChatSync relay recv peer=%s conversation=%s next_counter=%d remote_send_counter=%d msgs=%d files=%d",
+			peerID, req.ConversationID, req.NextCounter, resp.RemoteSendCounter, len(resp.Messages), len(resp.Files))
 		return resp, nil
 	case <-time.After(relaySyncTimeout):
+		log.Printf("[chat] requestChatSync relay timeout peer=%s conversation=%s next_counter=%d", peerID, req.ConversationID, req.NextCounter)
 		return ChatSyncResponse{}, errors.New("chat sync relay timeout")
 	}
 }

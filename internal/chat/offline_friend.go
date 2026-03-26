@@ -78,17 +78,22 @@ func (s *Service) tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID string,
 
 // sendFriendControlEnvelope 直连失败则中继；中继成功或直连失败时最佳努力写入离线 store（内层 ECIES + 外层签名）。
 func (s *Service) sendFriendControlEnvelope(peerID string, v any, kind string, msgID string) error {
+	log.Printf("[chat] friend control send begin kind=%s id=%s peer=%s", kind, msgID, peerID)
 	usedRelay, err := s.sendEnvelopeDirectOrRelay(peerID, v)
 	if err != nil {
+		log.Printf("[chat] friend control send failed kind=%s id=%s peer=%s err=%v", kind, msgID, peerID, err)
 		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v, false); subErr != nil {
 			log.Printf("[chat] offline friend store after send fail kind=%s id=%s: %v", kind, msgID, subErr)
 		}
 		return err
 	}
+	log.Printf("[chat] friend control send ok kind=%s id=%s peer=%s used_relay=%t", kind, msgID, peerID, usedRelay)
 	if usedRelay {
+		log.Printf("[chat] friend control store-after-relay begin kind=%s id=%s peer=%s", kind, msgID, peerID)
 		if subErr := s.tryOfflineFriendStoreSubmit(kind, peerID, msgID, v, true); subErr != nil {
 			log.Printf("[chat] offline friend store after relay kind=%s id=%s: %v", kind, msgID, subErr)
 		}
+		log.Printf("[chat] friend control store-after-relay done kind=%s id=%s peer=%s", kind, msgID, peerID)
 	}
 	return nil
 }
@@ -115,6 +120,7 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 	}
 	switch kind {
 	case MessageTypeSessionRequest:
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s begin", kind, storeSeq, env.MsgID, env.SenderID)
 		var req SessionRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return 0, err
@@ -125,7 +131,9 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := s.handleIncomingSessionRequestEnvelope(req, TransportModeDirect, true); err != nil {
 			return 0, err
 		}
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s done", kind, storeSeq, env.MsgID, env.SenderID)
 	case MessageTypeSessionAccept:
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s begin", kind, storeSeq, env.MsgID, env.SenderID)
 		var acc SessionAccept
 		if err := json.Unmarshal(payload, &acc); err != nil {
 			return 0, err
@@ -136,7 +144,9 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := s.handleIncomingSessionAcceptEnvelope(acc, true, true); err != nil {
 			return 0, err
 		}
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s done", kind, storeSeq, env.MsgID, env.SenderID)
 	case MessageTypeSessionReject:
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s begin", kind, storeSeq, env.MsgID, env.SenderID)
 		var rej SessionReject
 		if err := json.Unmarshal(payload, &rej); err != nil {
 			return 0, err
@@ -147,7 +157,9 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := s.handleIncomingSessionRejectEnvelope(rej, true); err != nil {
 			return 0, err
 		}
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s done", kind, storeSeq, env.MsgID, env.SenderID)
 	case MessageTypeSessionAcceptAck:
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s begin", kind, storeSeq, env.MsgID, env.SenderID)
 		var ack SessionAcceptAck
 		if err := json.Unmarshal(payload, &ack); err != nil {
 			return 0, err
@@ -158,6 +170,7 @@ func (s *Service) processOfflineFriendPayload(env *OfflineMessageEnvelope, store
 		if err := s.handleIncomingSessionAcceptAckEnvelope(ack); err != nil {
 			return 0, err
 		}
+		log.Printf("[chat] offline friend payload kind=%s store_seq=%d msg=%s from=%s done", kind, storeSeq, env.MsgID, env.SenderID)
 	default:
 		return 0, fmt.Errorf("unknown offline friend kind %q", kind)
 	}

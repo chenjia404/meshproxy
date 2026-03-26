@@ -282,6 +282,7 @@ func (s *Service) relayV1SessionFor(dstPeer string) *relayV1PeerSession {
 }
 
 func (s *Service) sendViaRelayV1(relayPID peer.ID, dstPeerID string, payload []byte) error {
+	log.Printf("[chat] relayV1 send begin relay=%s dst=%s payload_len=%d", relayPID.String(), dstPeerID, len(payload))
 	st := s.relayV1SessionFor(dstPeerID)
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -293,9 +294,13 @@ func (s *Service) sendViaRelayV1(relayPID peer.ID, dstPeerID string, payload []b
 		needEstablish = true
 	}
 	if needEstablish {
+		log.Printf("[chat] relayV1 establish needed relay=%s dst=%s handshake_ok=%t session_id=%s expire_at=%d",
+			relayPID.String(), dstPeerID, st.handshakeOK, st.sessionID, st.expireAt)
 		if err := s.relayV1Establish(s.ctx, relayPID, dstPeerID, st); err != nil {
+			log.Printf("[chat] relayV1 establish failed relay=%s dst=%s err=%v", relayPID.String(), dstPeerID, err)
 			return err
 		}
+		log.Printf("[chat] relayV1 establish ok relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, st.sessionID)
 	}
 
 	nonce, ct, err := chatrelay.SealDataFrame(st.txKey, st.sessionID, st.packetSeq, payload)
@@ -321,13 +326,20 @@ func (s *Service) sendViaRelayV1(relayPID peer.ID, dstPeerID string, payload []b
 	defer cancel()
 	str, err := s.host.NewStream(cctx, relayPID, chatrelay.ProtocolRelayData)
 	if err != nil {
+		log.Printf("[chat] relayV1 data stream failed relay=%s dst=%s err=%v", relayPID.String(), dstPeerID, err)
 		return err
 	}
 	defer str.Close()
 	_ = str.SetDeadline(time.Now().Add(45 * time.Second))
+	log.Printf("[chat] relayV1 data stream-open relay=%s dst=%s session_id=%s packet_seq=%d",
+		relayPID.String(), dstPeerID, st.sessionID, frame.PacketSeq)
 	if err := tunnel.WriteJSONFrame(str, &frame); err != nil {
+		log.Printf("[chat] relayV1 data write failed relay=%s dst=%s session_id=%s packet_seq=%d err=%v",
+			relayPID.String(), dstPeerID, st.sessionID, frame.PacketSeq, err)
 		return err
 	}
+	log.Printf("[chat] relayV1 data write-ok relay=%s dst=%s session_id=%s packet_seq=%d",
+		relayPID.String(), dstPeerID, st.sessionID, frame.PacketSeq)
 	st.lastUsedUnix = time.Now().Unix()
 	s.relayV1MaybeStartHeartbeat(relayPID, dstPeerID, st)
 	return nil
@@ -402,6 +414,7 @@ func relayV1ValidateHandshakeResponse(hsResp *chatrelay.RelayHandshakeResponse, 
 }
 
 func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPeerID string, st *relayV1PeerSession) error {
+	log.Printf("[chat] relayV1 establish begin relay=%s dst=%s", relayPID.String(), dstPeerID)
 	relayV1PeerSessionStopHeartbeatLocked(st)
 	sessionID := uuid.NewString()
 	ttl := 3600
@@ -422,19 +435,23 @@ func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPee
 
 	cctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
+	log.Printf("[chat] relayV1 connect stream dialing relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	str, err := s.host.NewStream(cctx, relayPID, chatrelay.ProtocolRelayConnect)
 	if err != nil {
 		return err
 	}
 	defer str.Close()
 	_ = str.SetDeadline(time.Now().Add(40 * time.Second))
+	log.Printf("[chat] relayV1 connect stream-open relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	if err := tunnel.WriteJSONFrame(str, &req); err != nil {
 		return err
 	}
+	log.Printf("[chat] relayV1 connect write-ok relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	var resp chatrelay.RelayConnectResponse
 	if err := tunnel.ReadJSONFrame(str, &resp); err != nil {
 		return err
 	}
+	log.Printf("[chat] relayV1 connect read-ok relay=%s dst=%s session_id=%s accepted=%t", relayPID.String(), dstPeerID, sessionID, resp.Accepted)
 	if !resp.Accepted {
 		return fmt.Errorf("%s: %s", chatrelay.ErrRelayConnectRejected, "peer rejected")
 	}
@@ -475,19 +492,23 @@ func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPee
 
 	cctx2, cancel2 := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel2()
+	log.Printf("[chat] relayV1 handshake stream dialing relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	str2, err := s.host.NewStream(cctx2, relayPID, chatrelay.ProtocolRelayHandshake)
 	if err != nil {
 		return err
 	}
 	defer str2.Close()
 	_ = str2.SetDeadline(time.Now().Add(40 * time.Second))
+	log.Printf("[chat] relayV1 handshake stream-open relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	if err := tunnel.WriteJSONFrame(str2, &hs); err != nil {
 		return err
 	}
+	log.Printf("[chat] relayV1 handshake write-ok relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	var hsResp chatrelay.RelayHandshakeResponse
 	if err := tunnel.ReadJSONFrame(str2, &hsResp); err != nil {
 		return err
 	}
+	log.Printf("[chat] relayV1 handshake read-ok relay=%s dst=%s session_id=%s", relayPID.String(), dstPeerID, sessionID)
 	if err := relayV1ValidateHandshakeResponse(&hsResp, s.localPeer, dstPeerID, sessionID, &hs); err != nil {
 		return err
 	}
@@ -511,6 +532,7 @@ func (s *Service) relayV1Establish(ctx context.Context, relayPID peer.ID, dstPee
 	st.packetSeq = 0
 	st.handshakeOK = true
 	st.lastUsedUnix = time.Now().Unix()
+	log.Printf("[chat] relayV1 establish complete relay=%s dst=%s session_id=%s expire_at=%d", relayPID.String(), dstPeerID, sessionID, st.expireAt)
 	return nil
 }
 

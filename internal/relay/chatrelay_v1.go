@@ -4,7 +4,6 @@ package relay
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -243,7 +242,7 @@ func ForwardRelayConnect(ctx context.Context, h host.Host, tbl *ChatRelayV1Table
 		if len(prefix) > 8 {
 			prefix = prefix[:8]
 		}
-		log.Printf("[relay-v1] connect forward dial dst=%s: %v", prefix, err)
+		// log.Printf("[relay-v1] connect forward dial dst=%s: %v", prefix, err)
 		return
 	}
 	defer nextStr.Close()

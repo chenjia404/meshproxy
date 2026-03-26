@@ -6,6 +6,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/chenjia404/meshproxy/internal/safe"
 )
 
 func (s *Service) repairHistoricalDirectState() error {
@@ -241,6 +243,9 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 	if s == nil || s.store == nil || conversationID == "" || fromPeerID == "" {
 		return Conversation{}, sessionState{}, false, sql.ErrNoRows
 	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch repair-direct-state begin conv=%s from=%s", conversationID, fromPeerID)
+	}
 
 	req, remotePub, err := s.findAcceptedRequestForPeer(fromPeerID, conversationID)
 	if err != nil {
@@ -319,6 +324,9 @@ func (s *Service) repairIncomingDirectState(conversationID, fromPeerID, transpor
 	if !hasConv || existingConv.State != ConversationStateActive || !hadSession {
 		log.Printf("[chat] repaired incoming direct state peer=%s conversation=%s session_rebuilt=%t", fromPeerID, targetConvID, !hadSession)
 	}
+	if transportMode == TransportModeOfflineStore {
+		log.Printf("[chat] offline fetch repair-direct-state done conv=%s from=%s target_conv=%s rebuilt=%t", conversationID, fromPeerID, targetConvID, !hadSession)
+	}
 	return conv, sess, true, nil
 }
 
@@ -391,12 +399,17 @@ func (s *Service) maybeSendSessionRejectForConversation(fromPeerID string) bool 
 		return false
 	}
 
-	_ = s.sendEnvelope(fromPeerID, SessionReject{
+	reject := SessionReject{
 		Type:       MessageTypeSessionReject,
 		RequestID:  requestID,
 		FromPeerID: s.localPeer,
 		ToPeerID:   fromPeerID,
 		SentAtUnix: time.Now().UTC().UnixMilli(),
+	}
+	safe.Go("chat.sendSessionReject."+requestID, func() {
+		if err := s.sendEnvelope(fromPeerID, reject); err != nil {
+			log.Printf("[chat] session reject best-effort send failed peer=%s request=%s err=%v", fromPeerID, requestID, err)
+		}
 	})
 	return true
 }

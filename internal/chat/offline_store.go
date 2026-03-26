@@ -18,6 +18,7 @@ import (
 
 	"github.com/chenjia404/meshproxy/internal/offlinestore"
 	"github.com/chenjia404/meshproxy/internal/protocol"
+	"github.com/chenjia404/meshproxy/internal/safe"
 )
 
 const (
@@ -40,6 +41,22 @@ const (
 type offlineFetchItemError struct {
 	err       error
 	permanent bool
+}
+
+type offlineConversationTask struct {
+	run    func() (uint64, error)
+	result chan offlineConversationTaskResult
+}
+
+type offlineConversationTaskResult struct {
+	seq uint64
+	err error
+}
+
+type offlineFetchPendingItem struct {
+	idx      int
+	storeSeq uint64
+	resultCh chan offlineConversationTaskResult
 }
 
 func (e *offlineFetchItemError) Error() string {
@@ -66,6 +83,73 @@ func newPermanentOfflineFetchItemError(err error) error {
 func isPermanentOfflineFetchItemError(err error) bool {
 	var target *offlineFetchItemError
 	return errors.As(err, &target) && target.permanent
+}
+
+func offlineFetchTaskKey(raw []byte) string {
+	var preview struct {
+		Message *struct {
+			ConversationID string `json:"conversation_id"`
+			SenderID       string `json:"sender_id"`
+			MsgID          string `json:"msg_id"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &preview); err != nil || preview.Message == nil {
+		return "__offline_default__"
+	}
+	if key := strings.TrimSpace(preview.Message.ConversationID); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(preview.Message.SenderID); key != "" {
+		return "__peer__:" + key
+	}
+	if key := strings.TrimSpace(preview.Message.MsgID); key != "" {
+		return "__msg__:" + key
+	}
+	return "__offline_default__"
+}
+
+func (s *Service) offlineConversationTaskQueue(key string) chan offlineConversationTask {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "__offline_default__"
+	}
+	if q, ok := s.offlineConvWorkers.Load(key); ok {
+		return q.(chan offlineConversationTask)
+	}
+	q := make(chan offlineConversationTask, 64)
+	actual, loaded := s.offlineConvWorkers.LoadOrStore(key, q)
+	if loaded {
+		return actual.(chan offlineConversationTask)
+	}
+	safe.Go("chat.offlineConvWorker."+key, func() {
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case task, ok := <-q:
+				if !ok {
+					return
+				}
+				seq, err := task.run()
+				task.result <- offlineConversationTaskResult{seq: seq, err: err}
+				close(task.result)
+			}
+		}
+	})
+	return q
+}
+
+func (s *Service) runOfflineConversationTask(key string, run func() (uint64, error)) chan offlineConversationTaskResult {
+	resultCh := make(chan offlineConversationTaskResult, 1)
+	q := s.offlineConversationTaskQueue(key)
+	task := offlineConversationTask{run: run, result: resultCh}
+	select {
+	case q <- task:
+	case <-s.ctx.Done():
+		resultCh <- offlineConversationTaskResult{err: s.ctx.Err()}
+		close(resultCh)
+	}
+	return resultCh
 }
 
 func (s *Service) mergeOfflineStoreNodes(forRecipientPeerID string) []offlinestore.OfflineStoreNode {
@@ -330,6 +414,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 		log.Printf("[chat] offline store cursor: %v", err)
 		return
 	}
+	log.Printf("[chat] offline fetch start peer=%s after_seq=%d limit=%d", node.PeerID, lastAck, offlineFetchLimit)
 	client := offlinestore.NewLibp2pStoreClient(s.host)
 	var batches int
 	var finalSeq uint64
@@ -344,15 +429,34 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 			return
 		}
 		batches++
+		log.Printf("[chat] offline fetch batch peer=%s batch=%d after_seq=%d items=%d has_more=%v", node.PeerID, batch+1, lastAckI64, len(resp.Items), resp.HasMore)
 		var maxOK uint64
 		var sawNonEmpty bool
 		nItems := len(resp.Items)
+		pending := make([]offlineFetchPendingItem, 0, nItems)
 		for i, raw := range resp.Items {
 			if len(raw) == 0 {
 				continue
 			}
 			sawNonEmpty = true
-			seq, perr := s.processOneOfflineFetchItem(raw)
+			seqPreview := peekOfflineStoreSeq(raw)
+			log.Printf("[chat] offline fetch item begin peer=%s batch=%d item=%d/%d store_seq=%d", node.PeerID, batch+1, i+1, nItems, seqPreview)
+			rawCopy := append([]byte(nil), raw...)
+			resultCh := s.runOfflineConversationTask(offlineFetchTaskKey(rawCopy), func() (uint64, error) {
+				return s.processOneOfflineFetchItem(rawCopy)
+			})
+			pending = append(pending, offlineFetchPendingItem{
+				idx:      i,
+				storeSeq: seqPreview,
+				resultCh: resultCh,
+			})
+		}
+		for _, item := range pending {
+			result, ok := <-item.resultCh
+			if !ok {
+				result = offlineConversationTaskResult{seq: item.storeSeq, err: errors.New("offline conversation worker closed")}
+			}
+			seq, perr := result.seq, result.err
 			if perr != nil {
 				if isPermanentOfflineFetchItemError(perr) {
 					log.Printf("[chat] offline fetch item store_seq=%d skipped permanently: %v", seq, perr)
@@ -361,9 +465,10 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 					}
 					continue
 				}
-				log.Printf("[chat] offline fetch item [%d/%d] store_seq=%d blocked for retry: %v", i+1, nItems, seq, perr)
+				log.Printf("[chat] offline fetch item [%d/%d] store_seq=%d blocked for retry: %v", item.idx+1, nItems, seq, perr)
 				break
 			}
+			log.Printf("[chat] offline fetch item done peer=%s batch=%d item=%d/%d store_seq=%d", node.PeerID, batch+1, item.idx+1, nItems, seq)
 			if seq > maxOK {
 				maxOK = seq
 			}
@@ -380,6 +485,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 			log.Printf("[chat] offline ack sign: %v", err)
 			return
 		}
+		log.Printf("[chat] offline ack submit peer=%s batch=%d ack_seq=%d", node.PeerID, batch+1, maxOK)
 		ackCtx, ackCancel := context.WithTimeout(s.ctx, offlinestore.DefaultRPCTimeout)
 		ackResp, err := client.AckMessages(ackCtx, storePID, ackReq)
 		ackCancel()
@@ -398,6 +504,7 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 			log.Printf("[chat] offline cursor save: %v", err)
 			return
 		}
+		log.Printf("[chat] offline ack applied peer=%s batch=%d ack_seq=%d deleted_until_seq=%d", node.PeerID, batch+1, maxOK, ackResp.DeletedUntilSeq)
 		finalSeq = maxOK
 		lastAckI64 = int64(maxOK)
 		if !resp.HasMore {
@@ -486,25 +593,33 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		return seq, newPermanentOfflineFetchItemError(errors.New("nil offline message"))
 	}
 	env := wire.Message
+	log.Printf("[chat] offline fetch item parsed store_seq=%d msg=%s conv=%s from=%s to=%s algo=%s",
+		seq, env.MsgID, env.ConversationID, env.SenderID, env.RecipientID, env.Cipher.Algorithm)
 	if strings.TrimSpace(env.RecipientID) != s.localPeer {
 		return seq, newPermanentOfflineFetchItemError(errors.New("recipient mismatch"))
 	}
 	if err := verifyOfflineEnvelope(env.SenderID, env, offlineDefaultTTLSec); err != nil {
 		return seq, newPermanentOfflineFetchItemError(err)
 	}
+	log.Printf("[chat] offline fetch item verified store_seq=%d msg=%s", seq, env.MsgID)
 	if err := validateOfflineEnvelopeTiming(env, &wire, offlineDefaultTTLSec, time.Now().UTC()); err != nil {
 		return seq, newPermanentOfflineFetchItemError(err)
 	}
+	log.Printf("[chat] offline fetch item timing-ok store_seq=%d msg=%s", seq, env.MsgID)
 	if env.Cipher.Algorithm == OfflineFriendAlgoECIES {
+		log.Printf("[chat] offline fetch item friend-control begin store_seq=%d msg=%s", seq, env.MsgID)
 		if _, err := s.processOfflineFriendPayload(env, seq); err != nil {
-			return seq, err
+			return seq, fmt.Errorf("store_seq=%d msg=%s conv=%s from=%s algo=%s: process offline friend payload: %w",
+				seq, env.MsgID, env.ConversationID, env.SenderID, env.Cipher.Algorithm, err)
 		}
+		log.Printf("[chat] offline fetch item friend-control done store_seq=%d msg=%s", seq, env.MsgID)
 		return seq, nil
 	}
 	counter, msgType, err := decodeRecipientKeyID(env.Cipher.RecipientKeyID)
 	if err != nil {
 		return seq, newPermanentOfflineFetchItemError(err)
 	}
+	log.Printf("[chat] offline fetch item chat begin store_seq=%d msg=%s type=%s counter=%d", seq, env.MsgID, msgType, counter)
 	ctBytes, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
 	if err != nil {
 		return seq, newPermanentOfflineFetchItemError(err)
@@ -520,7 +635,9 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		SentAtUnix:     offlineSentAtUnix(env),
 	}
 	if err := s.handleIncomingChatText(ct, TransportModeOfflineStore, "", true, true); err != nil {
-		return seq, err
+		return seq, fmt.Errorf("store_seq=%d msg=%s conv=%s from=%s to=%s type=%s counter=%d: handle incoming chat text: %w",
+			seq, env.MsgID, env.ConversationID, env.SenderID, env.RecipientID, msgType, counter, err)
 	}
+	log.Printf("[chat] offline fetch item chat done store_seq=%d msg=%s type=%s counter=%d", seq, env.MsgID, msgType, counter)
 	return seq, nil
 }
