@@ -2243,7 +2243,7 @@ func (a *App) tryConnectPeerExchangeRelay(peerID string, addrs []string) {
 	ctx, cancel := context.WithTimeout(a.ctx, peerExchangeDialTimeout)
 	defer cancel()
 	if err := a.Host().Connect(ctx, peer.AddrInfo{ID: pid, Addrs: maddrs}); err != nil {
-		log.Printf("[peerx] connect relay %s failed: %v", peerID, err)
+		// log.Printf("[peerx] connect relay %s failed: %v", peerID, err)
 	}
 }
 
