@@ -944,6 +944,55 @@ func TestProvideRetriesAfterFailureAndLaterSucceeds(t *testing.T) {
 	t.Fatalf("want retry_count reset and lastProvideAt set after success, got retry=%d lastProvideAt=%d", state.retryCount, state.lastProvideAt)
 }
 
+func TestProvideRetryDelayStartsFromAttemptFinish(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, _ := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13011")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing := newScriptedProvideRouting(nil)
+	routing.delays = []time.Duration{80 * time.Millisecond}
+	routing.outcomes = []error{errors.New("slow failure")}
+	svc, err := NewService(ctx, filepath.Join(t.TempDir(), "provide-delay.db"), h, routing, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetNodePrivateKey(priv)
+	svc.provideRetryBackoffs = []time.Duration{50 * time.Millisecond}
+	svc.provideSuccessInterval = time.Hour
+	svc.provideSuccessLogMinGap = 0
+	t.Cleanup(func() { _ = svc.Close() })
+
+	startedAt := time.Now()
+	summary, err := svc.CreateChannel(CreateChannelInput{Name: "delay-channel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing.waitForProvideCount(t, 1, 2*time.Second)
+
+	svc.provideMu.Lock()
+	state := svc.provideStates[summary.Profile.ChannelID]
+	svc.provideMu.Unlock()
+	if state == nil {
+		t.Fatal("want provide state after failed attempt")
+	}
+	if state.lastProvideErrAt == 0 {
+		t.Fatal("want lastProvideErrAt after failed attempt")
+	}
+	if state.nextProvideTime.Sub(startedAt) < 120*time.Millisecond {
+		t.Fatalf("want next retry to be scheduled from attempt finish, got delay=%v", state.nextProvideTime.Sub(startedAt))
+	}
+}
+
 func TestServiceStartupSchedulesOwnedChannelsForProvide(t *testing.T) {
 	t.Parallel()
 
@@ -1465,6 +1514,7 @@ type scriptedProvideRouting struct {
 	mu           sync.Mutex
 	provideCalls int
 	outcomes     []error
+	delays       []time.Duration
 	provideCh    chan struct{}
 }
 
@@ -1483,7 +1533,14 @@ func (r *scriptedProvideRouting) Provide(context.Context, cid.Cid, bool) error {
 	if callIndex < len(r.outcomes) {
 		err = r.outcomes[callIndex]
 	}
+	var delay time.Duration
+	if callIndex < len(r.delays) {
+		delay = r.delays[callIndex]
+	}
 	r.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	select {
 	case r.provideCh <- struct{}{}:
 	default:

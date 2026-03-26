@@ -1308,8 +1308,8 @@ func (s *Service) startDueProvides() {
 }
 
 func (s *Service) runProvideAttempt(channelID string) {
-	now := s.now()
 	err := s.provideChannel(channelID)
+	now := s.now()
 	s.provideMu.Lock()
 	state, ok := s.provideStates[channelID]
 	if !ok {
