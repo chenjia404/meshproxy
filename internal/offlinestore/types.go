@@ -10,6 +10,9 @@ import (
 // ErrRPCLayer 表示服務端在 RPC 包絡層返回的錯誤（未知 method、非法請求等），body 為 RPCErrorBody 形狀。
 var ErrRPCLayer = errors.New("offlinestore: rpc layer error")
 
+// ErrRPCRequestIDMismatch 響應的 request_id 與請求不一致。
+var ErrRPCRequestIDMismatch = errors.New("offlinestore: rpc request_id mismatch")
+
 // ProtocolRPC 與 meshchat-store 節點統一協議（單流多方法 RPC）。
 const ProtocolRPC protocol.ID = "/meshchat/offline-store/rpc/1.0.0"
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,16 @@ func rpcBodyHasOKKey(body []byte) bool {
 	return ok
 }
 
+func validateRPCRequestID(want string, resp RPCResponse) error {
+	if strings.TrimSpace(resp.RequestID) == "" {
+		return errors.New("offlinestore: response missing request_id")
+	}
+	if resp.RequestID != want {
+		return fmt.Errorf("%w: want %q got %q", ErrRPCRequestIDMismatch, want, resp.RequestID)
+	}
+	return nil
+}
+
 // rpcLayerErrorFromBody 解析 RPC 層 body（error_code / error_message）。
 func rpcLayerErrorFromBody(body []byte) error {
 	var eb RPCErrorBody
@@ -96,6 +107,9 @@ func (c *Libp2pStoreClient) rpcCall(ctx context.Context, storePeer peer.ID, meth
 	}
 	var rpcResp RPCResponse
 	if err := c.Codec.ReadFrameJSON(stream, &rpcResp); err != nil {
+		return "", RPCResponse{}, err
+	}
+	if err := validateRPCRequestID(reqID, rpcResp); err != nil {
 		return "", RPCResponse{}, err
 	}
 	return reqID, rpcResp, nil
