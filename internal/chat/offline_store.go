@@ -384,8 +384,13 @@ func (s *Service) fetchAndProcessFromStore(node offlinestore.OfflineStoreNode) {
 		ackResp, err := client.AckMessages(ackCtx, storePID, ackReq)
 		ackCancel()
 		if err != nil || ackResp == nil || !ackResp.OK {
-			if err != nil {
+			switch {
+			case err != nil:
 				log.Printf("[chat] offline ack peer=%s: %v", node.PeerID, err)
+			case ackResp == nil:
+				log.Printf("[chat] offline ack peer=%s: nil response", node.PeerID)
+			default:
+				log.Printf("[chat] offline ack peer=%s: ok=false code=%s msg=%s", node.PeerID, ackResp.ErrorCode, ackResp.ErrorMessage)
 			}
 			return
 		}
@@ -421,7 +426,10 @@ func (s *Service) signOfflineAckReq(ackSeq int64) (*offlinestore.AckMessagesRequ
 		return nil, errors.New("no node key")
 	}
 	t := time.Now().Unix()
-	pl, err := canonicalAckPayload(1, s.localPeer, offlineDeviceID, uint64(ackSeq), t)
+	// meshchat-store V1：AckRequest.device_id 必須等於 recipient_id（見 store-node validateAckRequest），
+	// 與 auth.CanonicalAck 簽名載荷一致；不可用固定字串如 mesh-proxy。
+	deviceID := s.localPeer
+	pl, err := canonicalAckPayload(1, s.localPeer, deviceID, uint64(ackSeq), t)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +448,7 @@ func (s *Service) signOfflineAckReq(ackSeq int64) (*offlinestore.AckMessagesRequ
 	return &offlinestore.AckMessagesRequest{
 		Version:     1,
 		RecipientID: s.localPeer,
-		DeviceID:    offlineDeviceID,
+		DeviceID:    deviceID,
 		AckSeq:      ackSeq,
 		AckedAt:     t,
 		Signature:   sigRaw,

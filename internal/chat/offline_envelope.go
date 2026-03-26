@@ -17,7 +17,6 @@ import (
 
 const (
 	offlineDefaultTTLSec = int64(2592000) // 30d，與 store-node 預設 default_ttl_sec 一致
-	offlineDeviceID      = "mesh-proxy"
 
 	// OfflineFriendAlgoECIES 好友控制离线载荷：ECIES（临时 X25519 + 对端 libp2p Ed25519 身份映射到 Curve25519）+ ChaCha20-Poly1305；store 仅见密文与临时公钥。
 	OfflineFriendAlgoECIES = "mesh-friend-ecies-v1"
