@@ -3,6 +3,7 @@ package identity
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -82,6 +83,29 @@ func (m *Manager) ImportPrivateKeyBase58(encoded string) (string, error) {
 	return pid.String(), nil
 }
 
+// SignChallenge 使用当前节点的 libp2p 私钥对 challenge 原文签名，并返回适合 meshchat-server 登录接口使用的字段。
+func (m *Manager) SignChallenge(challenge string) (signatureBase64 string, publicKeyBase64 string, peerID string, err error) {
+	if m == nil || m.privateKey == nil {
+		return "", "", "", errors.New("identity not available")
+	}
+	if challenge == "" {
+		return "", "", "", errors.New("challenge must not be empty")
+	}
+	sig, err := m.privateKey.Sign([]byte(challenge))
+	if err != nil {
+		return "", "", "", fmt.Errorf("sign challenge: %w", err)
+	}
+	pubBytes, err := crypto.MarshalPublicKey(m.privateKey.GetPublic())
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal public key: %w", err)
+	}
+	pid, err := peer.IDFromPrivateKey(m.privateKey)
+	if err != nil {
+		return "", "", "", fmt.Errorf("derive peer id: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(sig), base64.StdEncoding.EncodeToString(pubBytes), pid.String(), nil
+}
+
 // loadOrCreate loads an existing Ed25519 key or creates and persists a new one.
 func loadOrCreate(path string) (crypto.PrivKey, error) {
 	if _, err := os.Stat(path); err == nil {
@@ -151,4 +175,3 @@ func savePrivateKeyToFile(path string, priv crypto.PrivKey) error {
 	}
 	return nil
 }
-

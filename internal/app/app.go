@@ -605,6 +605,14 @@ func (a *App) ImportIdentityPrivateKeyBase58(encoded string) (string, error) {
 	return a.idMgr.ImportPrivateKeyBase58(encoded)
 }
 
+// SignChallenge 使用本节点身份私钥签名 challenge，供 meshchat-server /auth/login 使用。
+func (a *App) SignChallenge(challenge string) (string, string, string, error) {
+	if a == nil || a.idMgr == nil {
+		return "", "", "", fmt.Errorf("identity not available")
+	}
+	return a.idMgr.SignChallenge(challenge)
+}
+
 // Mode returns the configured node mode.
 func (a *App) Mode() string {
 	return a.cfg.Mode

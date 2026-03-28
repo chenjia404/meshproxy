@@ -205,6 +205,7 @@ type UpdateSettingsProvider interface {
 type IdentityProvider interface {
 	ExportIdentityPrivateKeyBase58() (privateKeyBase58 string, peerID string, err error)
 	ImportIdentityPrivateKeyBase58(encoded string) (peerID string, err error)
+	SignChallenge(challenge string) (signatureBase64 string, publicKeyBase64 string, peerID string, err error)
 }
 
 // MeshServerProvider exposes centralized server chat APIs.
@@ -417,6 +418,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/chat/peers/", api.handleChatPeerRoutes)
 	mux.HandleFunc("/api/v1/identity/private-key/export", api.handleIdentityPrivateKeyExport)
 	mux.HandleFunc("/api/v1/identity/private-key/import", api.handleIdentityPrivateKeyImport)
+	mux.HandleFunc("/api/v1/identity/challenge/sign", api.handleIdentityChallengeSign)
 	mux.HandleFunc("/api/v1/groups", api.handleGroups)
 	mux.HandleFunc("/api/v1/groups/", api.handleGroupItem)
 	mux.HandleFunc("/api/v1/public-channels", api.handlePublicChannels)
@@ -1142,6 +1144,43 @@ func (a *LocalAPI) handleIdentityPrivateKeyImport(w http.ResponseWriter, r *http
 		"encoding":         "base58",
 		"peer_id":          peerID,
 		"requires_restart": true,
+	})
+}
+
+func (a *LocalAPI) handleIdentityChallengeSign(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.opts == nil || a.opts.Identity == nil {
+		http.Error(w, "identity service not available", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.Challenge == "" {
+		http.Error(w, "challenge is empty", http.StatusBadRequest)
+		return
+	}
+	signatureBase64, publicKeyBase64, peerID, err := a.opts.Identity.SignChallenge(body.Challenge)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"peer_id":             peerID,
+		"challenge":           body.Challenge,
+		"signature":           signatureBase64,
+		"public_key":          publicKeyBase64,
+		"signature_base64":    signatureBase64,
+		"public_key_base64":   publicKeyBase64,
+		"signature_encoding":  "base64",
+		"public_key_encoding": "base64",
 	})
 }
 
