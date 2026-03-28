@@ -115,6 +115,32 @@ func TestSignIdentityChallenge(t *testing.T) {
 	}
 }
 
+func TestCORSReflectsOriginWhenCredentialsIncluded(t *testing.T) {
+	t.Parallel()
+
+	api := NewLocalAPI(":0", nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/identity/challenge/sign", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	rec := httptest.NewRecorder()
+
+	api.server.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want status 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Fatalf("want reflected origin, got %q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("want allow-credentials=true, got %q", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("want Vary=Origin, got %q", got)
+	}
+}
+
 type stubIdentityProvider struct {
 	exportedPrivateKeyBase58 string
 	exportedPeerID           string

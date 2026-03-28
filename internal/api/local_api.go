@@ -513,7 +513,15 @@ func (a *LocalAPI) handleChatPage(w http.ResponseWriter, r *http.Request) {
 
 func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	headers := w.Header()
-	headers.Set("Access-Control-Allow-Origin", "*")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		// 带 credentials 的请求不能使用 *，必须回显具体 Origin。
+		headers.Set("Access-Control-Allow-Origin", origin)
+		headers.Set("Vary", "Origin")
+		headers.Set("Access-Control-Allow-Credentials", "true")
+	} else {
+		headers.Set("Access-Control-Allow-Origin", "*")
+	}
 	headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	if reqHeaders := r.Header.Get("Access-Control-Request-Headers"); reqHeaders != "" {
 		headers.Set("Access-Control-Allow-Headers", reqHeaders)
