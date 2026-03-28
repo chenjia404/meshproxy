@@ -54,6 +54,10 @@ type Service struct {
 
 	eventsHub *chatEventHub
 
+	// 仅用于好友请求的异步投递注入点，方便测试时替换掉真实网络发送。
+	friendRequestTransportFn   func(peerID string, v any) (usedRelay bool, err error)
+	friendRequestStoreSubmitFn func(kind, recipientPeer, msgID string, payload any, quiet bool) error
+
 	offlineStoreNodes  []offlinestore.OfflineStoreNode
 	offlineStoreSyncMu sync.Mutex
 	offlineConvWorkers sync.Map // key: conversation_id -> chan offlineConversationTask
@@ -1084,14 +1088,54 @@ func (s *Service) SendRequest(toPeerID, introText string) (Request, error) {
 		return Request{}, err
 	}
 	_ = s.store.UpsertPeer(toPeerID, "", "")
-	if err := s.sendFriendControlEnvelope(toPeerID, wire, MessageTypeSessionRequest, req.RequestID); err != nil {
-		// Can't reach the friend right now: persist + retry with backoff for up to 1 week.
-		log.Printf("[chat] send friend request queued request=%s peer=%s err=%v", req.RequestID, toPeerID, err)
-		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, toPeerID, 0); retryErr != nil {
-			log.Printf("[chat] schedule friend request retry failed request=%s peer=%s err=%v", req.RequestID, toPeerID, retryErr)
+	s.dispatchOutgoingFriendControl(req.RequestID, req.ToPeerID, MessageTypeSessionRequest, wire, false)
+	return s.store.GetRequest(req.RequestID)
+}
+
+func (s *Service) dispatchOutgoingFriendControl(msgID, peerID, kind string, payload any, scheduleRetryOnSendError bool) {
+	if s == nil {
+		return
+	}
+	// 好友控制消息不阻塞 HTTP：先返回，再在后台优先写离线服务器，之后尝试直连/中转。
+	safe.Go("chat.dispatchOutgoingFriendControl."+kind+"."+msgID, func() {
+		s.sendOutgoingFriendControl(msgID, peerID, kind, payload, scheduleRetryOnSendError)
+	})
+}
+
+func (s *Service) sendOutgoingFriendControl(msgID, peerID, kind string, payload any, scheduleRetryOnSendError bool) {
+	if s == nil {
+		return
+	}
+	if len(s.mergeOfflineStoreNodes(peerID)) > 0 {
+		if err := s.submitFriendControlToOfflineStore(kind, peerID, msgID, payload, false); err != nil {
+			log.Printf("[chat] offline friend store kind=%s id=%s peer=%s err=%v", kind, msgID, peerID, err)
 		}
 	}
-	return s.store.GetRequest(req.RequestID)
+	usedRelay, err := s.sendFriendControlTransport(peerID, payload)
+	if err != nil {
+		log.Printf("[chat] send friend control queued kind=%s id=%s peer=%s err=%v", kind, msgID, peerID, err)
+		if scheduleRetryOnSendError {
+			if retryErr := s.scheduleFriendRequestRetry(msgID, peerID, 0); retryErr != nil {
+				log.Printf("[chat] schedule friend request retry failed kind=%s id=%s peer=%s err=%v", kind, msgID, peerID, retryErr)
+			}
+		}
+		return
+	}
+	log.Printf("[chat] friend control send ok kind=%s id=%s peer=%s used_relay=%t", kind, msgID, peerID, usedRelay)
+}
+
+func (s *Service) sendFriendControlTransport(peerID string, v any) (usedRelay bool, err error) {
+	if s != nil && s.friendRequestTransportFn != nil {
+		return s.friendRequestTransportFn(peerID, v)
+	}
+	return s.sendEnvelopeDirectOrRelay(peerID, v)
+}
+
+func (s *Service) submitFriendControlToOfflineStore(kind, recipientPeer, msgID string, payload any, quiet bool) error {
+	if s != nil && s.friendRequestStoreSubmitFn != nil {
+		return s.friendRequestStoreSubmitFn(kind, recipientPeer, msgID, payload, quiet)
+	}
+	return s.tryOfflineFriendStoreSubmit(kind, recipientPeer, msgID, payload, quiet)
 }
 
 func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
@@ -1156,26 +1200,9 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 			ChatKexPub:       profile.ChatKexPub,
 			SentAtUnix:       time.Now().UnixMilli(),
 		}
-		if err := s.ensurePeerConnected(req.FromPeerID); err == nil {
-			if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionAccept, req.RequestID); err != nil {
-				log.Printf("[chat] send accept for existing conversation failed request=%s err=%v", requestID, err)
-				// Schedule retry for up to friendRequestRetryDeadline.
-				if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
-					log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
-				}
-			} else {
-				// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
-				_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
-			}
-		} else {
-			if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire, false); subErr != nil {
-				log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
-			}
-			// Can't connect now: schedule accept retry.
-			if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
-				log.Printf("[chat] schedule friend accept retry (existing conv, connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
-			}
-		}
+		// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
+		_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
+		s.dispatchOutgoingFriendControl(req.RequestID, req.FromPeerID, MessageTypeSessionAccept, wire, false)
 		return existingConv, nil
 	} else if err != sql.ErrNoRows {
 		return Conversation{}, err
@@ -1218,26 +1245,9 @@ func (s *Service) AcceptRequest(requestID string) (Conversation, error) {
 		ChatKexPub:       profile.ChatKexPub,
 		SentAtUnix:       time.Now().UnixMilli(),
 	}
-	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionAccept, req.FromPeerID, req.RequestID, wire, false); subErr != nil {
-			log.Printf("[chat] offline friend store (accept, no connect) request=%s err=%v", requestID, subErr)
-		}
-		// Connection not currently available: schedule retry of SessionAccept.
-		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
-			log.Printf("[chat] schedule friend accept retry (connect failed) request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
-		}
-		return conv, nil
-	}
-	if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionAccept, req.RequestID); err != nil {
-		log.Printf("[chat] send accept failed request=%s err=%v", requestID, err)
-		// Schedule retry for up to friendRequestRetryDeadline.
-		if retryErr := s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0); retryErr != nil {
-			log.Printf("[chat] schedule friend accept retry failed request=%s peer=%s err=%v", requestID, req.FromPeerID, retryErr)
-		}
-	} else {
-		// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
-		_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
-	}
+	// Wait for SessionAcceptAck: sender side keep retry job alive until receiver confirms.
+	_ = s.scheduleFriendRequestRetry(req.RequestID, req.FromPeerID, 0)
+	s.dispatchOutgoingFriendControl(req.RequestID, req.FromPeerID, MessageTypeSessionAccept, wire, false)
 	return conv, nil
 }
 
@@ -1259,15 +1269,7 @@ func (s *Service) RejectRequest(requestID string) error {
 		ToPeerID:   req.FromPeerID,
 		SentAtUnix: time.Now().UnixMilli(),
 	}
-	if err := s.ensurePeerConnected(req.FromPeerID); err != nil {
-		if subErr := s.tryOfflineFriendStoreSubmit(MessageTypeSessionReject, req.FromPeerID, requestID, wire, false); subErr != nil {
-			log.Printf("[chat] offline friend store (reject, no connect) request=%s err=%v", requestID, subErr)
-		}
-		return nil
-	}
-	if err := s.sendFriendControlEnvelope(req.FromPeerID, wire, MessageTypeSessionReject, requestID); err != nil {
-		log.Printf("[chat] send reject failed request=%s err=%v", requestID, err)
-	}
+	s.dispatchOutgoingFriendControl(requestID, req.FromPeerID, MessageTypeSessionReject, wire, false)
 	return nil
 }
 
