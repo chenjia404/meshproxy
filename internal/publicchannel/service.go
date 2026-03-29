@@ -92,7 +92,7 @@ func defaultServiceConfig() serviceConfig {
 		provideRetryBackoffs:    []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute},
 		provideSuccessInterval:  20 * time.Minute,
 		provideLoopInterval:     time.Second,
-		provideTimeout:          10 * time.Second,
+		provideTimeout:          30 * time.Second,
 		provideSuccessLogMinGap: time.Minute,
 		nowFn:                   time.Now,
 	}
