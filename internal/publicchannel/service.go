@@ -1380,10 +1380,16 @@ func isPlaceholderChannelProfile(profile ChannelProfile) bool {
 
 func (s *Service) verifyMessageAgainstProfile(profile ChannelProfile, message ChannelMessage) error {
 	if message.AuthorPeerID != profile.OwnerPeerID {
-		return errors.New("author_peer_id must equal current owner_peer_id")
+		log.Printf("[publicchannel] verify message author mismatch channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
+		return fmt.Errorf("author_peer_id must equal current owner_peer_id channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
 	}
 	if message.OwnerVersion != profile.OwnerVersion {
-		return errors.New("message owner_version mismatch")
+		log.Printf("[publicchannel] verify message owner version mismatch channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
+		return fmt.Errorf("message owner_version mismatch channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
 	}
 	return verifyMessage(profile.OwnerPeerID, message)
 }

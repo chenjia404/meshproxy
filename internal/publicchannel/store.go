@@ -598,10 +598,12 @@ func (s *Store) ApplyMessage(message ChannelMessage) error {
 		return err
 	}
 	if message.AuthorPeerID != profile.OwnerPeerID {
-		return fmt.Errorf("author peer must equal owner peer")
+		return fmt.Errorf("author peer must equal owner peer channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
 	}
 	if message.OwnerVersion != profile.OwnerVersion {
-		return fmt.Errorf("owner_version mismatch")
+		return fmt.Errorf("owner_version mismatch channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
+			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
 	}
 	var existingVersion int64
 	var existingSignature string
