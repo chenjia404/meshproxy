@@ -82,8 +82,9 @@ type App struct {
 	autoUpdate           bool
 	traffic              *traffic.Recorder
 
-	peerExchangeOnce sync.Map
-	peerExchangeDial sync.Map
+	peerExchangeOnce          sync.Map
+	peerExchangeDial          sync.Map
+	publicChannelExchangeOnce sync.Map
 
 	closeOnce sync.Once
 	closeErr  error
@@ -2056,6 +2057,11 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	if a.chat != nil {
 		a.chat.OnPeerConnected(pid.String())
 	}
+	if a.publicChannels != nil {
+		if _, loaded := a.publicChannelExchangeOnce.LoadOrStore(pid.String(), struct{}{}); !loaded {
+			safe.Go("app.exchangePublicChannelSubscriptions", func() { a.exchangePublicChannelSubscriptions(pid) })
+		}
+	}
 	if _, loaded := a.peerExchangeOnce.LoadOrStore(pid.String(), struct{}{}); loaded {
 		return
 	}
@@ -2142,6 +2148,34 @@ func (a *App) exchangePeerSnapshot(pid peer.ID) {
 		return
 	}
 	a.applyPeerExchange(&resp)
+}
+
+func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
+	if a == nil || a.host == nil || a.publicChannels == nil || pid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
+	defer cancel()
+	// Wait briefly for identify to populate supported protocols before using the public-channel RPC.
+	for attempt := 0; attempt < 3; attempt++ {
+		supported, err := a.Host().Peerstore().SupportsProtocols(pid, publicchannel.ProtocolRPC)
+		if err == nil && len(supported) > 0 {
+			break
+		}
+		if attempt == 2 {
+			return
+		}
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+	if err := a.publicChannels.SyncPeerSubscriptions(ctx, pid.String(), 50); err != nil {
+		log.Printf("[publicchannel] exchange subscriptions peer=%s err=%v", pid.String(), err)
+	}
 }
 
 func (a *App) handlePeerExchangeStream(stream network.Stream) {

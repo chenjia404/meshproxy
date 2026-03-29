@@ -164,6 +164,19 @@ type SubscribeResult struct {
 	Providers []ChannelProvider `json:"providers,omitempty"`
 }
 
+type ChannelSubscriptionDigest struct {
+	ChannelID string `json:"channel_id"`
+	LastSeq   int64  `json:"last_seq"`
+}
+
+type ExchangeSubscriptionsRequest struct {
+	Items []ChannelSubscriptionDigest `json:"items"`
+}
+
+type ExchangeSubscriptionsResponse struct {
+	Items []ChannelSubscriptionDigest `json:"items"`
+}
+
 type CreateChannelInput struct {
 	Name                    string `json:"name"`
 	Bio                     string `json:"bio"`

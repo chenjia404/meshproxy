@@ -271,6 +271,127 @@ func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
 	return s.store.ListSubscribedChannels(s.localPeer)
 }
 
+func (s *Service) ListSubscribedChannelDigests(limit int) ([]ChannelSubscriptionDigest, error) {
+	items, err := s.ListSubscribedChannels()
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]ChannelSubscriptionDigest, 0, len(items))
+	for _, item := range items {
+		out = append(out, ChannelSubscriptionDigest{
+			ChannelID: item.Profile.ChannelID,
+			LastSeq:   item.Head.LastSeq,
+		})
+	}
+	return out, nil
+}
+
+func (s *Service) CompareSubscribedChannelDigests(remote []ChannelSubscriptionDigest, limit int) ([]ChannelSubscriptionDigest, error) {
+	if len(remote) == 0 {
+		return nil, nil
+	}
+	remoteSeqs := make(map[string]int64, len(remote))
+	for _, item := range remote {
+		channelID := strings.TrimSpace(item.ChannelID)
+		if channelID == "" {
+			continue
+		}
+		remoteSeqs[channelID] = item.LastSeq
+	}
+	items, err := s.ListSubscribedChannels()
+	if err != nil {
+		return nil, err
+	}
+	outCap := len(items)
+	if limit > 0 && limit < outCap {
+		outCap = limit
+	}
+	out := make([]ChannelSubscriptionDigest, 0, outCap)
+	for _, item := range items {
+		channelID := strings.TrimSpace(item.Profile.ChannelID)
+		if channelID == "" {
+			continue
+		}
+		remoteLastSeq, ok := remoteSeqs[channelID]
+		if !ok {
+			continue
+		}
+		if item.Head.LastSeq <= remoteLastSeq {
+			continue
+		}
+		out = append(out, ChannelSubscriptionDigest{ChannelID: channelID, LastSeq: item.Head.LastSeq})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) SyncPeerSubscriptions(ctx context.Context, peerID string, limit int) error {
+	if limit <= 0 {
+		limit = 50
+	}
+	items, err := s.ListSubscribedChannelDigests(limit)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	log.Printf("[publicchannel] exchange subscriptions peer=%s items=%d", peerID, len(items))
+	var resp ExchangeSubscriptionsResponse
+	if err := s.rpcCall(ctx, peerID, MethodExchangeSubscriptions, ExchangeSubscriptionsRequest{Items: items}, &resp); err != nil {
+		log.Printf("[publicchannel] exchange subscriptions request failed peer=%s err=%v", peerID, err)
+		return err
+	}
+	log.Printf("[publicchannel] exchange subscriptions response peer=%s updates=%d", peerID, len(resp.Items))
+	return s.syncPeerSubscriptionDigests(ctx, peerID, resp.Items)
+}
+
+func (s *Service) syncPeerSubscriptionDigests(ctx context.Context, peerID string, items []ChannelSubscriptionDigest) error {
+	if len(items) == 0 {
+		log.Printf("[publicchannel] sync peer subscriptions peer=%s updates=0", peerID)
+		return nil
+	}
+	var (
+		firstErr   error
+		hadSuccess bool
+	)
+	for _, item := range items {
+		summary, err := s.GetChannelSummary(item.ChannelID)
+		if err != nil {
+			continue
+		}
+		if !summary.Sync.Subscribed && summary.Profile.OwnerPeerID != s.localPeer {
+			continue
+		}
+		if summary.Head.LastSeq >= item.LastSeq {
+			continue
+		}
+		log.Printf("[publicchannel] sync peer subscription channel=%s peer=%s local_last_seq=%d remote_last_seq=%d", item.ChannelID, peerID, summary.Head.LastSeq, item.LastSeq)
+		if _, err := s.syncAfterWithPeer(ctx, peerID, item.ChannelID, summary.Head.LastSeq); err != nil {
+			s.recordProviderSyncFailure(item.ChannelID, peerID)
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Printf("[publicchannel] sync peer subscription failed channel=%s peer=%s err=%v", item.ChannelID, peerID, err)
+			continue
+		}
+		s.recordProviderSyncSuccess(item.ChannelID, peerID)
+		log.Printf("[publicchannel] sync peer subscription ok channel=%s peer=%s local_last_seq=%d remote_last_seq=%d", item.ChannelID, peerID, summary.Head.LastSeq, item.LastSeq)
+		hadSuccess = true
+	}
+	if firstErr != nil && !hadSuccess {
+		log.Printf("[publicchannel] sync peer subscriptions all failed peer=%s err=%v", peerID, firstErr)
+		return firstErr
+	}
+	log.Printf("[publicchannel] sync peer subscriptions done peer=%s had_success=%t", peerID, hadSuccess)
+	return nil
+}
+
 func (s *Service) ClearChannelUnreadCount(channelID string) (ChannelSummary, error) {
 	now := time.Now().Unix()
 	if err := s.store.ClearChannelUnreadCount(channelID, now); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -93,6 +95,30 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.ListChannelsByOwner(body.OwnerPeerID)
+	case MethodExchangeSubscriptions:
+		var body ExchangeSubscriptionsRequest
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, err
+		}
+		log.Printf("[publicchannel] exchange subscriptions request peer=%s items=%d", remotePeerID, len(body.Items))
+		items, err := s.CompareSubscribedChannelDigests(body.Items, 50)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("[publicchannel] exchange subscriptions compare peer=%s updates=%d", remotePeerID, len(items))
+		if remotePeerID != "" && len(body.Items) > 0 {
+			safe.Go("publicchannel.exchange_subscriptions.sync_back."+remotePeerID, func() {
+				ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+				defer cancel()
+				log.Printf("[publicchannel] exchange subscriptions sync-back peer=%s items=%d", remotePeerID, len(body.Items))
+				if err := s.syncPeerSubscriptionDigests(ctx, remotePeerID, body.Items); err != nil {
+					log.Printf("[publicchannel] sync back peer subscriptions peer=%s err=%v", remotePeerID, err)
+					return
+				}
+				log.Printf("[publicchannel] exchange subscriptions sync-back done peer=%s", remotePeerID)
+			})
+		}
+		return ExchangeSubscriptionsResponse{Items: items}, nil
 	case MethodCreateChannel:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")

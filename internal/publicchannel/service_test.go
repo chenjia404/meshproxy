@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -22,6 +23,8 @@ import (
 	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
+
+	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
 func TestApplyMessageRejectsSameVersionDifferentSignature(t *testing.T) {
@@ -1356,6 +1359,318 @@ func TestProviderPeerIDsPrefersRecentlySuccessfulPeer(t *testing.T) {
 	}
 	if providers[1].PeerID != stalePeer || providers[1].LastFailureAt != now || providers[1].FailureCount != 1 {
 		t.Fatalf("unexpected second provider score: %+v", providers[1])
+	}
+}
+
+func TestSyncPeerSubscriptionsPullsRemoteUpdates(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12071")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12072")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-subscription-exchange.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-subscription-exchange.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "subscription-exchange"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+	for i := 1; i <= 5; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("seed-%02d", i)}); err != nil {
+			t.Fatalf("create initial message %d: %v", i, err)
+		}
+	}
+	if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatal(err)
+	}
+	for i := 6; i <= 10; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("seed-%02d", i)}); err != nil {
+			t.Fatalf("create remote message %d: %v", i, err)
+		}
+	}
+
+	if err := readerSvc.SyncPeerSubscriptions(ctx, ownerPeerID, 50); err != nil {
+		t.Fatal(err)
+	}
+	msg10, err := readerSvc.GetChannelMessage(channelID, 10)
+	if err != nil {
+		t.Fatalf("reader should sync message 10 from peer subscription exchange: %v", err)
+	}
+	if msg10.MessageID != 10 {
+		t.Fatalf("want message 10, got %d", msg10.MessageID)
+	}
+}
+
+func TestSyncPeerSubscriptionsAlsoSyncsResponderBack(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12073")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12074")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-subscription-bidirectional.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-subscription-bidirectional.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "subscription-bidirectional"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+	for i := 1; i <= 5; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("seed-%02d", i)}); err != nil {
+			t.Fatalf("create initial message %d: %v", i, err)
+		}
+	}
+	if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerHost.Network().ClosePeer(readerHost.ID()); err != nil {
+		t.Fatalf("disconnect owner->reader: %v", err)
+	}
+	if err := readerHost.Network().ClosePeer(ownerHost.ID()); err != nil {
+		t.Fatalf("disconnect reader->owner: %v", err)
+	}
+	for i := 6; i <= 10; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("seed-%02d", i)}); err != nil {
+			t.Fatalf("create remote message %d: %v", i, err)
+		}
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatalf("reconnect peers: %v", err)
+	}
+
+	if err := ownerSvc.SyncPeerSubscriptions(ctx, readerHost.ID().String(), 50); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msg10, err := readerSvc.GetChannelMessage(channelID, 10)
+		if err == nil && msg10.MessageID == 10 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reader should receive responder-side sync back, last err=%v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestSyncPeerSubscriptionsContinuesAfterChannelFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	addr1 := mustMultiaddr(t, "/ip6/::1/tcp/12081")
+	addr2 := mustMultiaddr(t, "/ip6/::1/tcp/12082")
+	ownerHost, err := mn.AddPeer(ownerPriv, addr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, addr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(ownerHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-subscription-partial.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-subscription-partial.db"))
+
+	failSummary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "subscription-fail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	okSummary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "subscription-ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, channelID := range []string{failSummary.Profile.ChannelID, okSummary.Profile.ChannelID} {
+		for i := 1; i <= 3; i++ {
+			if _, err := ownerSvc.CreateChannelMessage(channelID, UpsertMessageInput{Text: fmt.Sprintf("seed-%02d", i)}); err != nil {
+				t.Fatalf("create initial message %d for %s: %v", i, channelID, err)
+			}
+		}
+		if _, err := readerSvc.SubscribeChannel(ctx, channelID, []string{ownerPeerID}, 0); err != nil {
+			t.Fatalf("subscribe %s: %v", channelID, err)
+		}
+	}
+	if err := ownerHost.Network().ClosePeer(readerHost.ID()); err != nil {
+		t.Fatalf("disconnect owner->reader: %v", err)
+	}
+	if err := readerHost.Network().ClosePeer(ownerHost.ID()); err != nil {
+		t.Fatalf("disconnect reader->owner: %v", err)
+	}
+	for i := 4; i <= 6; i++ {
+		if _, err := ownerSvc.CreateChannelMessage(failSummary.Profile.ChannelID, UpsertMessageInput{Text: fmt.Sprintf("fail-%02d", i)}); err != nil {
+			t.Fatalf("create fail message %d: %v", i, err)
+		}
+		if _, err := ownerSvc.CreateChannelMessage(okSummary.Profile.ChannelID, UpsertMessageInput{Text: fmt.Sprintf("ok-%02d", i)}); err != nil {
+			t.Fatalf("create ok message %d: %v", i, err)
+		}
+	}
+	okHead, err := ownerSvc.GetChannelHead(okSummary.Profile.ChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okChanges, err := ownerSvc.GetChannelChanges(okSummary.Profile.ChannelID, 3, DefaultChangesLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okMessages := make(map[int64]ChannelMessage, 3)
+	for _, id := range []int64{4, 5, 6} {
+		msg, err := ownerSvc.GetChannelMessage(okSummary.Profile.ChannelID, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		okMessages[id] = msg
+	}
+
+	ownerHost.SetStreamHandler(ProtocolRPC, func(str network.Stream) {
+		defer str.Close()
+		_ = str.SetDeadline(time.Now().Add(10 * time.Second))
+		var req RPCRequest
+		if err := tunnel.ReadJSONFrame(str, &req); err != nil {
+			_ = tunnel.WriteJSONFrame(str, RPCResponse{RequestID: req.RequestID, OK: false, Error: err.Error()})
+			return
+		}
+		resp := RPCResponse{RequestID: req.RequestID, OK: true}
+		switch req.Method {
+		case MethodExchangeSubscriptions:
+			resp.Body = ExchangeSubscriptionsResponse{Items: []ChannelSubscriptionDigest{
+				{ChannelID: failSummary.Profile.ChannelID, LastSeq: 6},
+				{ChannelID: okSummary.Profile.ChannelID, LastSeq: 6},
+			}}
+		case MethodGetChannelChanges:
+			var body struct {
+				ChannelID string `json:"channel_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				resp.OK = false
+				resp.Error = err.Error()
+				break
+			}
+			if body.ChannelID == failSummary.Profile.ChannelID {
+				resp.OK = false
+				resp.Error = "injected get_channel_changes failure"
+				break
+			}
+			resp.Body = okChanges
+		case MethodGetChannelMessage:
+			var body struct {
+				ChannelID string `json:"channel_id"`
+				MessageID int64  `json:"message_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				resp.OK = false
+				resp.Error = err.Error()
+				break
+			}
+			msg, ok := okMessages[body.MessageID]
+			if !ok || body.ChannelID != okSummary.Profile.ChannelID {
+				resp.OK = false
+				resp.Error = "message not found"
+				break
+			}
+			resp.Body = msg
+		case MethodGetChannelHead:
+			resp.Body = okHead
+		default:
+			resp.OK = false
+			resp.Error = "unsupported in test handler"
+		}
+		_ = tunnel.WriteJSONFrame(str, resp)
+	})
+
+	if err := readerSvc.SyncPeerSubscriptions(ctx, ownerPeerID, 50); err != nil {
+		t.Fatalf("sync peer subscriptions should continue after one channel failure: %v", err)
+	}
+	if _, err := readerSvc.GetChannelMessage(okSummary.Profile.ChannelID, 6); err != nil {
+		t.Fatalf("ok channel should still sync latest message: %v", err)
+	}
+	if _, err := readerSvc.GetChannelMessage(failSummary.Profile.ChannelID, 6); err == nil {
+		t.Fatal("fail channel should remain unsynced after injected error")
 	}
 }
 
