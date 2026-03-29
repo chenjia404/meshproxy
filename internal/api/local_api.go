@@ -38,7 +38,7 @@ import (
 var consoleFS embed.FS
 
 // ChatPageCID 是 /chat 前端的 IPFS CID。請直接在程式碼中更新這個常量。
-const ChatPageCID = "QmZyE9d7Th3Eae4P3qK2p6zyGMS7c4aBPG6c7yq1172pp7"
+const ChatPageCID = "QmQmAf4B4kwpKavdhbyKFDev7Mohcbn1BP4ACCyRYSdadm"
 
 // StatusProvider defines the subset of application state required by the local API.
 type StatusProvider interface {
