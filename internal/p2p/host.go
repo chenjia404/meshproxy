@@ -53,9 +53,8 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 		libp2p.Security(libp2ptls.ID, libp2ptls.New),
 		libp2p.Security(noise.ID, noise.New),
 		// 中繼功能配置
-		libp2p.EnableRelay(),             // 啟用中繼功能
-		libp2p.EnableRelayService(),      // 啟用中繼服務
-		libp2p.ForceReachabilityPublic(), // 強制設為公網可達
+		libp2p.EnableRelay(),        // 啟用中繼功能
+		libp2p.EnableRelayService(), // 啟用中繼服務
 
 		libp2p.DefaultPeerstore,
 
