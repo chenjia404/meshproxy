@@ -211,7 +211,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		}
 		a.ownsHost = opts.CloseHost
 	} else {
-		h, err = p2p.NewHost(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs, cfg.P2P.BootstrapPeers, cfg.P2P.PublicIP)
+		h, err = p2p.NewHost(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs, relayPeerSourceFromCache(a.relayCache), cfg.P2P.PublicIP)
 		if err != nil {
 			return nil, fmt.Errorf("init p2p host: %w", err)
 		}

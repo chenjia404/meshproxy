@@ -128,6 +128,7 @@ func (c *Cache) Records() []*Record {
 		out = append(out, &Record{
 			PeerID: rec.PeerID,
 			Addrs:  addrs,
+			SeenAt: rec.SeenAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

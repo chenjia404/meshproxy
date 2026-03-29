@@ -12,8 +12,8 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
-	peer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	autorelay "github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	connmgr "github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
@@ -27,8 +27,11 @@ type Host struct {
 	ListenAddrs []multiaddr.Multiaddr
 }
 
+// PeerSource supplies relay candidates to libp2p AutoRelay.
+type PeerSource = autorelay.PeerSource
+
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
-func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, bootstrapPeers []string, publicIP string) (*Host, error) {
+func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, relayPeerSource PeerSource, publicIP string) (*Host, error) {
 	var hostRouting routing.Routing
 
 	connmgr_, _ := connmgr.NewConnManager(
@@ -66,11 +69,10 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, boo
 		libp2p.ConnectionManager(connmgr_),
 	}
 
-	peerSource := bootstrapPeerSource(bootstrapPeers)
-	if peerSource != nil {
-		// AutoRelay can use the configured bootstrap peers as relay candidates when the node
-		// is not directly reachable. This keeps relay discovery aligned with deployment config.
-		opts = append(opts, libp2p.EnableAutoRelayWithPeerSource(peerSource))
+	if relayPeerSource != nil {
+		// AutoRelay reads candidates from relays.json via the caller-provided peer source.
+		// This keeps relay discovery aligned with the actual relay cache rather than bootstrap peers.
+		opts = append(opts, libp2p.EnableAutoRelayWithPeerSource(relayPeerSource))
 	}
 
 	if publicIP != "" {
@@ -136,47 +138,6 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, boo
 // Close shuts down the underlying libp2p host.
 func (h *Host) Close() error {
 	return h.Host.Close()
-}
-
-// bootstrapPeerSource turns configured bootstrap peers into AutoRelay candidates.
-// Invalid entries are skipped so one bad address does not block the whole host.
-func bootstrapPeerSource(bootstrapPeers []string) func(ctx context.Context, num int) <-chan peer.AddrInfo {
-	candidates := make([]peer.AddrInfo, 0, len(bootstrapPeers))
-	for _, addrStr := range bootstrapPeers {
-		addrStr = strings.TrimSpace(addrStr)
-		if addrStr == "" {
-			continue
-		}
-		maddr, err := multiaddr.NewMultiaddr(addrStr)
-		if err != nil {
-			continue
-		}
-		info, err := peer.AddrInfoFromP2pAddr(maddr)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, *info)
-	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	return func(ctx context.Context, num int) <-chan peer.AddrInfo {
-		if num <= 0 || num > len(candidates) {
-			num = len(candidates)
-		}
-		ch := make(chan peer.AddrInfo, num)
-		go func() {
-			defer close(ch)
-			for i := 0; i < num; i++ {
-				select {
-				case <-ctx.Done():
-					return
-				case ch <- candidates[i]:
-				}
-			}
-		}()
-		return ch
-	}
 }
 
 // rewriteAdvertisedAddrs rewrites the advertised multiaddrs to use the configured public IP.
