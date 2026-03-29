@@ -112,6 +112,8 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 	}
 
 	for _, addrStr := range listenAddrs {
+		// 先打印配置中的监听地址，便于区分容器内绑定地址和对外广播地址。
+		log.Printf("[p2p] listen configured: %s", addrStr)
 		maddr, err := multiaddr.NewMultiaddr(addrStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid listen multiaddr %q: %w", addrStr, err)
@@ -124,14 +126,15 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
 
-	for _, addr := range h.Addrs() {
-		log.Printf("[p2p] listening on %s", addr.String())
+	advertisedAddrs := h.Addrs()
+	for _, addr := range advertisedAddrs {
+		log.Printf("[p2p] advertised addr: %s", addr.String())
 	}
 
 	return &Host{
 		Host:        h,
 		Routing:     hostRouting,
-		ListenAddrs: h.Addrs(),
+		ListenAddrs: advertisedAddrs,
 	}, nil
 }
 
