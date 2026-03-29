@@ -17,6 +17,7 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
+	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
@@ -1226,6 +1227,67 @@ func TestSubscribeChannelAsyncRetriesBootstrapSnapshot(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("bootstrap retry did not fetch channel profile in time, last err=%v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestSubscribeChannelAsyncProactivelyConnectsSeedPeer(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	ownerAddr := mustMultiaddr(t, "/ip6/::1/tcp/12051")
+	readerAddr := mustMultiaddr(t, "/ip6/::1/tcp/12052")
+	ownerHost, err := mn.AddPeer(ownerPriv, ownerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, readerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-join-mesh.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-join-mesh.db"))
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "join-mesh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	// 预先注入 seed 地址，但不手工 Connect，订阅逻辑应主动完成连接。
+	readerHost.Peerstore().AddAddrs(ownerHost.ID(), ownerHost.Addrs(), time.Hour)
+	if _, err := readerSvc.SubscribeChannelAsync(channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if readerHost.Network().Connectedness(ownerHost.ID()) == network.Connected {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reader did not proactively connect to seed peer %s", ownerPeerID)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

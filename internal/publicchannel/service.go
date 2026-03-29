@@ -17,6 +17,7 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
+	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	corerouting "github.com/libp2p/go-libp2p/core/routing"
 	"github.com/multiformats/go-multihash"
@@ -654,6 +655,8 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	// 订阅 topic 后主动连接 seed/provider，确保新节点尽快进入 pubsub mesh。
+	s.proactivelyJoinTopicMesh(ctx, channelID, seedPeerIDs)
 	remoteProfile, remoteHead, remoteMessages, providers, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
 	if err != nil {
 		log.Printf("[publicchannel] initial subscribe snapshot %s: %v", channelID, err)
@@ -689,6 +692,12 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	// 异步订阅同样需要先尝试连上种子节点，否则只 Join topic 不足以进入 gossip mesh。
+	joinCtx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	safe.Go("publicchannel.joinmesh."+channelID, func() {
+		defer cancel()
+		s.proactivelyJoinTopicMesh(joinCtx, channelID, seedPeerIDs)
+	})
 	s.bootstrapSubscriptionAsync(channelID, append([]string(nil), seedPeerIDs...), lastSeenSeq)
 	return s.localSubscribeResult(channelID)
 }
@@ -1612,6 +1621,62 @@ func (s *Service) topicPeerIDs(channelID string) []string {
 		out = append(out, peerID)
 	}
 	return out
+}
+
+func (s *Service) proactivelyJoinTopicMesh(ctx context.Context, channelID string, seedPeerIDs []string) {
+	for _, peerID := range s.mergeChannelPeerIDs(channelID, seedPeerIDs) {
+		if err := s.connectPeer(ctx, peerID); err != nil {
+			log.Printf("[publicchannel] join mesh channel=%s peer=%s err=%v", channelID, peerID, err)
+		}
+	}
+}
+
+func (s *Service) mergeChannelPeerIDs(channelID string, seedPeerIDs []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(seedPeerIDs)+4)
+	appendPeer := func(peerID string) {
+		peerID = strings.TrimSpace(peerID)
+		if peerID == "" || peerID == s.localPeer {
+			return
+		}
+		if _, ok := seen[peerID]; ok {
+			return
+		}
+		seen[peerID] = struct{}{}
+		out = append(out, peerID)
+	}
+	for _, peerID := range seedPeerIDs {
+		appendPeer(peerID)
+	}
+	providers, _ := s.store.ListProviders(channelID)
+	for _, item := range providers {
+		appendPeer(item.PeerID)
+	}
+	return out
+}
+
+func (s *Service) connectPeer(ctx context.Context, peerID string) error {
+	pid, err := peer.Decode(strings.TrimSpace(peerID))
+	if err != nil {
+		return err
+	}
+	if pid == s.host.ID() {
+		return nil
+	}
+	if s.host.Network().Connectedness(pid) == network.Connected {
+		return nil
+	}
+	if s.routing != nil && len(s.host.Peerstore().Addrs(pid)) == 0 {
+		findCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		info, findErr := s.routing.FindPeer(findCtx, pid)
+		cancel()
+		if findErr == nil && len(info.Addrs) > 0 {
+			s.host.Peerstore().AddAddrs(pid, info.Addrs, time.Hour)
+		}
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return s.host.Connect(connectCtx, peer.AddrInfo{ID: pid, Addrs: s.host.Peerstore().Addrs(pid)})
 }
 
 func (s *Service) upsertProviderIfKnown(channelID, peerID, source string, now int64) error {
