@@ -2041,7 +2041,6 @@ func (a *App) installDirectPeerExchange() {
 		return
 	}
 	a.Host().SetStreamHandler(p2p.ProtocolPeerX, a.handlePeerExchangeStream)
-	a.Host().SetStreamHandler(p2p.ProtocolPeerXLegacy, a.handlePeerExchangeStream)
 	a.Host().Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(_ network.Network, conn network.Conn) {
 			a.recordConnectedRelay(conn.RemotePeer(), conn.RemoteMultiaddr())
@@ -2110,7 +2109,6 @@ func (a *App) exchangePeerSnapshot(pid peer.ID) {
 	stream, err := a.Host().NewStream(ctx, pid, p2p.ProtocolPeerX)
 	includeSenderStartup := true
 	if err != nil {
-		stream, err = a.Host().NewStream(ctx, pid, p2p.ProtocolPeerXLegacy)
 		includeSenderStartup = false
 	}
 	if err != nil {
