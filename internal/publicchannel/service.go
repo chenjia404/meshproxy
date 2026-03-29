@@ -869,6 +869,7 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	bestItems := localItems
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_messages", body, &resp); err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
@@ -896,8 +897,10 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 		// 副本节点可能只缓存了部分历史；单个 provider 即便成功响应，也不能把空页或半页
 		// 直接当成“没有更早消息”，需要继续尝试后续 provider 直到凑满当前页。
 		if len(items) >= limit {
+			s.recordProviderSyncSuccess(channelID, peerID)
 			return items, nil
 		}
+		s.recordProviderSyncSuccess(channelID, peerID)
 	}
 	if len(bestItems) > 0 {
 		return bestItems, nil
@@ -936,11 +939,13 @@ func (s *Service) ensureMessageAvailable(ctx context.Context, channelID string, 
 	var msg ChannelMessage
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_message", body, &msg); err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			continue
 		}
 		if err := s.applyVerifiedMessageWithProfile(profile, msg); err != nil {
 			return err
 		}
+		s.recordProviderSyncSuccess(channelID, peerID)
 		_, err := s.store.GetChannelMessage(channelID, messageID)
 		return err
 	}
@@ -986,14 +991,17 @@ func (s *Service) fetchInitialSnapshot(ctx context.Context, channelID string, se
 	}{ChannelID: channelID, Limit: DefaultPageLimit}
 	for _, peerID := range peers {
 		if err := s.rpcCall(ctx, peerID, "get_channel_profile", bodyProfile, &profile); err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
 		if err := s.rpcCall(ctx, peerID, "get_channel_head", bodyProfile, &head); err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
 		if err := s.rpcCall(ctx, peerID, "get_channel_messages", bodyMessages, &msgs); err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
@@ -1008,6 +1016,7 @@ func (s *Service) fetchInitialSnapshot(ctx context.Context, channelID string, se
 				return ChannelProfile{}, ChannelHead{}, nil, nil, err
 			}
 		}
+		s.recordProviderSyncSuccess(channelID, peerID)
 		providers, _ := s.store.ListProviders(channelID)
 		return profile, head, msgs.Items, providers, nil
 	}
@@ -1029,9 +1038,11 @@ func (s *Service) syncAfter(ctx context.Context, channelID string, afterSeq int6
 	for _, peerID := range peers {
 		advanced, err := s.syncAfterWithPeer(ctx, peerID, channelID, afterSeq)
 		if err != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
+		s.recordProviderSyncSuccess(channelID, peerID)
 		hadSuccess = true
 		// provider 成功响应并不代表已经补到新 change；遇到滞后副本时要继续尝试后续 provider。
 		if advanced {
@@ -1207,6 +1218,7 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 	for _, peerID := range peers {
 		var remoteProfile ChannelProfile
 		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_profile", body, &remoteProfile); rpcErr != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = rpcErr
 			continue
 		}
@@ -1215,6 +1227,7 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 		}
 		var remoteHead ChannelHead
 		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_head", body, &remoteHead); rpcErr != nil {
+			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = rpcErr
 			continue
 		}
@@ -1230,6 +1243,7 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 		if err := s.store.ApplyHead(remoteHead); err != nil {
 			return ChannelProfile{}, err
 		}
+		s.recordProviderSyncSuccess(channelID, peerID)
 		return remoteProfile, nil
 	}
 	if lastErr == nil {
@@ -1754,6 +1768,24 @@ func formatPeerIDsForLog(peerIDs []string) string {
 		return "[]"
 	}
 	return "[" + strings.Join(items, ",") + "]"
+}
+
+func (s *Service) recordProviderSyncSuccess(channelID, peerID string) {
+	if s == nil || s.store == nil {
+		return
+	}
+	if err := s.store.RecordProviderSyncSuccess(channelID, peerID, s.nowUnix()); err != nil && err != sql.ErrNoRows {
+		log.Printf("[publicchannel] record provider success channel=%s peer=%s err=%v", channelID, peerID, err)
+	}
+}
+
+func (s *Service) recordProviderSyncFailure(channelID, peerID string) {
+	if s == nil || s.store == nil {
+		return
+	}
+	if err := s.store.RecordProviderSyncFailure(channelID, peerID, s.nowUnix()); err != nil && err != sql.ErrNoRows {
+		log.Printf("[publicchannel] record provider failure channel=%s peer=%s err=%v", channelID, peerID, err)
+	}
 }
 
 func firstNonEmptyString(v, fallback string) string {

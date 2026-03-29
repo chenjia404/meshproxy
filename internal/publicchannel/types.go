@@ -129,10 +129,14 @@ type ChannelSyncState struct {
 }
 
 type ChannelProvider struct {
-	ChannelID string `json:"channel_id"`
-	PeerID    string `json:"peer_id"`
-	Source    string `json:"source"`
-	UpdatedAt int64  `json:"updated_at"`
+	ChannelID     string `json:"channel_id"`
+	PeerID        string `json:"peer_id"`
+	Source        string `json:"source"`
+	UpdatedAt     int64  `json:"updated_at"`
+	LastSuccessAt int64  `json:"last_success_at"`
+	LastFailureAt int64  `json:"last_failure_at"`
+	SuccessCount  int64  `json:"success_count"`
+	FailureCount  int64  `json:"failure_count"`
 }
 
 type ChannelSummary struct {

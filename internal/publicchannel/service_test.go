@@ -1293,6 +1293,72 @@ func TestSubscribeChannelAsyncProactivelyConnectsSeedPeer(t *testing.T) {
 	}
 }
 
+func TestProviderPeerIDsPrefersRecentlySuccessfulPeer(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	priv, _ := mustTestIdentity(t)
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+	h, err := mn.AddPeer(priv, mustMultiaddr(t, "/ip6/::1/tcp/12061"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "provider-score.db"))
+
+	channelID := mustUUIDv7(t)
+	now := time.Now().Unix()
+	if err := svc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertProvider(channelID, "12D3KooWJ4m9bq2oH8pP4r6Y2b5F9e7JzM2s4v8t1x3y5z6a7b8c", "seed", now-2); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertProvider(channelID, "12D3KooWG9n7xv5cT2mQ8pL1rD4sF6hJ9kN3bV7yU2iO5pA8sC1d", "seed", now-1); err != nil {
+		t.Fatal(err)
+	}
+
+	fastPeer := "12D3KooWG9n7xv5cT2mQ8pL1rD4sF6hJ9kN3bV7yU2iO5pA8sC1d"
+	stalePeer := "12D3KooWJ4m9bq2oH8pP4r6Y2b5F9e7JzM2s4v8t1x3y5z6a7b8c"
+	if err := svc.store.RecordProviderSyncFailure(channelID, stalePeer, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.RecordProviderSyncSuccess(channelID, fastPeer, now+1); err != nil {
+		t.Fatal(err)
+	}
+
+	peers := svc.providerPeerIDs(ctx, channelID)
+	if len(peers) < 2 {
+		t.Fatalf("want at least 2 peers, got %d", len(peers))
+	}
+	if peers[0] != fastPeer {
+		t.Fatalf("want recently successful peer first, got %s", peers[0])
+	}
+	if peers[1] != stalePeer {
+		t.Fatalf("want failed peer after successful peer, got %s", peers[1])
+	}
+
+	providers, err := svc.store.ListProviders(channelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) < 2 {
+		t.Fatalf("want at least 2 providers, got %d", len(providers))
+	}
+	if providers[0].PeerID != fastPeer || providers[0].LastSuccessAt != now+1 || providers[0].SuccessCount != 1 {
+		t.Fatalf("unexpected top provider score: %+v", providers[0])
+	}
+	if providers[1].PeerID != stalePeer || providers[1].LastFailureAt != now || providers[1].FailureCount != 1 {
+		t.Fatalf("unexpected second provider score: %+v", providers[1])
+	}
+}
+
 func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
 	t.Parallel()
 

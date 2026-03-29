@@ -111,6 +111,10 @@ func (s *Store) migrate() error {
 			peer_id TEXT NOT NULL,
 			source TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL,
+			last_success_at INTEGER NOT NULL DEFAULT 0,
+			last_failure_at INTEGER NOT NULL DEFAULT 0,
+			success_count INTEGER NOT NULL DEFAULT 0,
+			failure_count INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(channel_db_id, peer_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_public_channels_owner ON public_channels(owner_peer_id)`,
@@ -131,6 +135,18 @@ func (s *Store) migrate() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE public_channel_sync_state ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("migrate public channel db add unread_count: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channel_providers ADD COLUMN last_success_at INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add provider last_success_at: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channel_providers ADD COLUMN last_failure_at INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add provider last_failure_at: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channel_providers ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add provider success_count: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE public_channel_providers ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate public channel db add provider failure_count: %w", err)
 	}
 	if _, err := s.db.Exec(`UPDATE public_channels SET head_updated_at=updated_at WHERE head_updated_at=0`); err != nil {
 		return fmt.Errorf("migrate public channel db backfill head_updated_at: %w", err)
@@ -868,6 +884,42 @@ func (s *Store) UpsertProvider(channelID, peerID, source string, now int64) erro
 	return err
 }
 
+func (s *Store) RecordProviderSyncSuccess(channelID, peerID string, now int64) error {
+	if stringsTrim(peerID) == "" {
+		return nil
+	}
+	channelDBID, err := s.getChannelDBID(channelID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		UPDATE public_channel_providers
+		SET updated_at=?,
+			last_success_at=?,
+			success_count=success_count+1
+		WHERE channel_db_id=? AND peer_id=?
+	`, now, now, channelDBID, stringsTrim(peerID))
+	return err
+}
+
+func (s *Store) RecordProviderSyncFailure(channelID, peerID string, now int64) error {
+	if stringsTrim(peerID) == "" {
+		return nil
+	}
+	channelDBID, err := s.getChannelDBID(channelID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		UPDATE public_channel_providers
+		SET updated_at=?,
+			last_failure_at=?,
+			failure_count=failure_count+1
+		WHERE channel_db_id=? AND peer_id=?
+	`, now, now, channelDBID, stringsTrim(peerID))
+	return err
+}
+
 func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
 	var (
 		profile    ChannelProfile
@@ -1130,10 +1182,15 @@ func (s *Store) ListProviders(channelID string) ([]ChannelProvider, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-		SELECT peer_id, source, updated_at
+		SELECT peer_id, source, updated_at, last_success_at, last_failure_at, success_count, failure_count
 		FROM public_channel_providers
 		WHERE channel_db_id=?
-		ORDER BY updated_at DESC, peer_id ASC
+		ORDER BY
+			last_success_at DESC,
+			(success_count - failure_count) DESC,
+			updated_at DESC,
+			last_failure_at ASC,
+			peer_id ASC
 	`, channelDBID)
 	if err != nil {
 		return nil, err
@@ -1142,7 +1199,7 @@ func (s *Store) ListProviders(channelID string) ([]ChannelProvider, error) {
 	var out []ChannelProvider
 	for rows.Next() {
 		var item ChannelProvider
-		if err := rows.Scan(&item.PeerID, &item.Source, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.PeerID, &item.Source, &item.UpdatedAt, &item.LastSuccessAt, &item.LastFailureAt, &item.SuccessCount, &item.FailureCount); err != nil {
 			return nil, err
 		}
 		item.ChannelID = channelID
