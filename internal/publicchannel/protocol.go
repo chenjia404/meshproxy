@@ -5,11 +5,28 @@ import (
 	"fmt"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/protocol"
 
 	"github.com/chenjia404/meshproxy/internal/binding"
 )
 
 const (
+	// ProtocolRPC is the single public-channel RPC protocol.
+	// Multiple logical methods are multiplexed over this one stream.
+	ProtocolRPC protocol.ID = "/meshchat/public-channel/0.1.0"
+
+	MethodGetChannelProfile   = "channel.get_profile"
+	MethodGetChannelHead      = "channel.get_head"
+	MethodGetChannelMessages  = "channel.get_messages"
+	MethodGetChannelMessage   = "channel.get_message"
+	MethodGetChannelChanges   = "channel.get_changes"
+	MethodListChannelsByOwner = "channel.list_by_owner"
+	MethodCreateChannel       = "channel.create"
+	MethodUpdateChannel       = "channel.update_profile"
+	MethodCreateMessage       = "channel.create_message"
+	MethodUpdateMessage       = "channel.update_message"
+	MethodDeleteMessage       = "channel.delete_message"
+
 	signPrefixProfile = "meshchat/public-channel/profile/v1:"
 	signPrefixHead    = "meshchat/public-channel/head/v1:"
 	signPrefixMessage = "meshchat/public-channel/message/v1:"

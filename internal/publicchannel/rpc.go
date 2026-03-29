@@ -12,7 +12,6 @@ import (
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -37,7 +36,7 @@ func (s *Service) handleRPCStream(str network.Stream) {
 
 func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) (any, error) {
 	switch method {
-	case "get_channel_profile":
+	case MethodGetChannelProfile:
 		var body struct {
 			ChannelID string `json:"channel_id"`
 		}
@@ -45,7 +44,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.GetChannelProfile(body.ChannelID)
-	case "get_channel_head":
+	case MethodGetChannelHead:
 		var body struct {
 			ChannelID string `json:"channel_id"`
 		}
@@ -53,7 +52,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.GetChannelHead(body.ChannelID)
-	case "get_channel_messages":
+	case MethodGetChannelMessages:
 		var body struct {
 			ChannelID       string `json:"channel_id"`
 			BeforeMessageID int64  `json:"before_message_id,omitempty"`
@@ -67,7 +66,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return GetMessagesResponse{ChannelID: body.ChannelID, Items: items}, nil
-	case "get_channel_message":
+	case MethodGetChannelMessage:
 		var body struct {
 			ChannelID string `json:"channel_id"`
 			MessageID int64  `json:"message_id"`
@@ -76,7 +75,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.GetChannelMessage(body.ChannelID, body.MessageID)
-	case "get_channel_changes":
+	case MethodGetChannelChanges:
 		var body struct {
 			ChannelID string `json:"channel_id"`
 			AfterSeq  int64  `json:"after_seq"`
@@ -86,7 +85,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.GetChannelChanges(body.ChannelID, body.AfterSeq, body.Limit)
-	case "list_channels_by_owner":
+	case MethodListChannelsByOwner:
 		var body struct {
 			OwnerPeerID string `json:"owner_peer_id"`
 		}
@@ -94,7 +93,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.ListChannelsByOwner(body.OwnerPeerID)
-	case "create_channel":
+	case MethodCreateChannel:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")
 		}
@@ -103,7 +102,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.CreateChannel(body)
-	case "update_channel_profile":
+	case MethodUpdateChannel:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")
 		}
@@ -115,7 +114,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.UpdateChannelProfile(body.ChannelID, body.UpdateChannelProfileInput)
-	case "create_channel_message":
+	case MethodCreateMessage:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")
 		}
@@ -127,7 +126,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.CreateChannelMessage(body.ChannelID, body.UpsertMessageInput)
-	case "update_channel_message":
+	case MethodUpdateMessage:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")
 		}
@@ -140,7 +139,7 @@ func (s *Service) dispatchRPC(remotePeerID, method string, raw json.RawMessage) 
 			return nil, err
 		}
 		return s.UpdateChannelMessage(context.Background(), body.ChannelID, body.MessageID, body.UpsertMessageInput)
-	case "delete_channel_message":
+	case MethodDeleteMessage:
 		if remotePeerID != s.localPeer {
 			return nil, errors.New("write rpc is local-only")
 		}
@@ -180,7 +179,7 @@ func (s *Service) rpcCall(ctx context.Context, peerID, method string, body any, 
 		}
 		cancel()
 	}
-	stream, err := s.host.NewStream(ctx, pid, p2p.ProtocolPublicChannelRPC)
+	stream, err := s.host.NewStream(ctx, pid, ProtocolRPC)
 	if err != nil {
 		return err
 	}

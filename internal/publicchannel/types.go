@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	ProtocolRPC = "/meshchat/public-channel/rpc/1.0.0"
 	TopicPrefix = "/meshchat/public-channel/"
 	TopicSuffix = "/v1"
 )
@@ -191,12 +190,14 @@ type UploadFileInput struct {
 	Data     []byte
 }
 
+// RPCRequest is the single-stream multi-method public-channel RPC request.
 type RPCRequest struct {
 	RequestID string          `json:"request_id"`
 	Method    string          `json:"method"`
 	Body      json.RawMessage `json:"body"`
 }
 
+// RPCResponse is the single-stream multi-method public-channel RPC response.
 type RPCResponse struct {
 	RequestID string `json:"request_id"`
 	OK        bool   `json:"ok"`

@@ -23,7 +23,6 @@ import (
 	"github.com/multiformats/go-multihash"
 
 	"github.com/chenjia404/meshproxy/internal/chat"
-	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/safe"
 )
 
@@ -153,7 +152,7 @@ func newServiceWithConfig(ctx context.Context, dbPath string, h host.Host, routi
 		provideSuccessLogMinGap: cfg.provideSuccessLogMinGap,
 		nowFn:                   cfg.nowFn,
 	}
-	h.SetStreamHandler(p2p.ProtocolPublicChannelRPC, s.handleRPCStream)
+	h.SetStreamHandler(ProtocolRPC, s.handleRPCStream)
 	s.runRetentionSweep(time.Now().UTC())
 	safe.Go("publicchannel.retentionLoop", func() { s.runRetentionLoop() })
 	safe.Go("publicchannel.reprovideLoop", func() { s.runProvideLoop() })
@@ -868,7 +867,7 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 	var lastErr error
 	bestItems := localItems
 	for _, peerID := range peers {
-		if err := s.rpcCall(ctx, peerID, "get_channel_messages", body, &resp); err != nil {
+		if err := s.rpcCall(ctx, peerID, MethodGetChannelMessages, body, &resp); err != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
@@ -938,7 +937,7 @@ func (s *Service) ensureMessageAvailable(ctx context.Context, channelID string, 
 	}{ChannelID: channelID, MessageID: messageID}
 	var msg ChannelMessage
 	for _, peerID := range peers {
-		if err := s.rpcCall(ctx, peerID, "get_channel_message", body, &msg); err != nil {
+		if err := s.rpcCall(ctx, peerID, MethodGetChannelMessage, body, &msg); err != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			continue
 		}
@@ -990,17 +989,17 @@ func (s *Service) fetchInitialSnapshot(ctx context.Context, channelID string, se
 		Limit     int    `json:"limit"`
 	}{ChannelID: channelID, Limit: DefaultPageLimit}
 	for _, peerID := range peers {
-		if err := s.rpcCall(ctx, peerID, "get_channel_profile", bodyProfile, &profile); err != nil {
+		if err := s.rpcCall(ctx, peerID, MethodGetChannelProfile, bodyProfile, &profile); err != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
-		if err := s.rpcCall(ctx, peerID, "get_channel_head", bodyProfile, &head); err != nil {
+		if err := s.rpcCall(ctx, peerID, MethodGetChannelHead, bodyProfile, &head); err != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
 		}
-		if err := s.rpcCall(ctx, peerID, "get_channel_messages", bodyMessages, &msgs); err != nil {
+		if err := s.rpcCall(ctx, peerID, MethodGetChannelMessages, bodyMessages, &msgs); err != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = err
 			continue
@@ -1065,7 +1064,7 @@ func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID
 			Limit     int    `json:"limit"`
 		}{ChannelID: channelID, AfterSeq: nextAfter, Limit: DefaultChangesLimit}
 		var resp GetChangesResponse
-		if err := s.rpcCall(ctx, sourcePeerID, "get_channel_changes", body, &resp); err != nil {
+		if err := s.rpcCall(ctx, sourcePeerID, MethodGetChannelChanges, body, &resp); err != nil {
 			return false, err
 		}
 		if err := s.applyChanges(ctx, sourcePeerID, channelID, resp); err != nil {
@@ -1098,7 +1097,7 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 		switch change.ChangeType {
 		case ChangeTypeProfile:
 			var remoteProfile ChannelProfile
-			if err := s.rpcCall(ctx, sourcePeerID, "get_channel_profile", struct {
+			if err := s.rpcCall(ctx, sourcePeerID, MethodGetChannelProfile, struct {
 				ChannelID string `json:"channel_id"`
 			}{ChannelID: channelID}, &remoteProfile); err != nil {
 				return err
@@ -1122,7 +1121,7 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 				return err
 			}
 			var remoteMsg ChannelMessage
-			if err := s.rpcCall(ctx, sourcePeerID, "get_channel_message", struct {
+			if err := s.rpcCall(ctx, sourcePeerID, MethodGetChannelMessage, struct {
 				ChannelID string `json:"channel_id"`
 				MessageID int64  `json:"message_id"`
 			}{ChannelID: channelID, MessageID: *change.MessageID}, &remoteMsg); err != nil {
@@ -1161,7 +1160,7 @@ func (s *Service) applyChanges(ctx context.Context, sourcePeerID, channelID stri
 		}
 	}
 	var head ChannelHead
-	if err := s.rpcCall(ctx, sourcePeerID, "get_channel_head", struct {
+	if err := s.rpcCall(ctx, sourcePeerID, MethodGetChannelHead, struct {
 		ChannelID string `json:"channel_id"`
 	}{ChannelID: channelID}, &head); err == nil {
 		if err := verifyHead(head); err == nil {
@@ -1217,7 +1216,7 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 	var lastErr error
 	for _, peerID := range peers {
 		var remoteProfile ChannelProfile
-		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_profile", body, &remoteProfile); rpcErr != nil {
+		if rpcErr := s.rpcCall(ctx, peerID, MethodGetChannelProfile, body, &remoteProfile); rpcErr != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = rpcErr
 			continue
@@ -1226,7 +1225,7 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 			return ChannelProfile{}, err
 		}
 		var remoteHead ChannelHead
-		if rpcErr := s.rpcCall(ctx, peerID, "get_channel_head", body, &remoteHead); rpcErr != nil {
+		if rpcErr := s.rpcCall(ctx, peerID, MethodGetChannelHead, body, &remoteHead); rpcErr != nil {
 			s.recordProviderSyncFailure(channelID, peerID)
 			lastErr = rpcErr
 			continue

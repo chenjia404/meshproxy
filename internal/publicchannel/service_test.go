@@ -796,7 +796,7 @@ func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 	}
 
 	var remoteProfile ChannelProfile
-	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_profile", struct {
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, MethodGetChannelProfile, struct {
 		ChannelID string `json:"channel_id"`
 	}{ChannelID: channelID}, &remoteProfile); err != nil {
 		t.Fatalf("rpc profile: %v", err)
@@ -805,7 +805,7 @@ func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 		t.Fatalf("verify profile: %v", err)
 	}
 	var remoteHead ChannelHead
-	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_head", struct {
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, MethodGetChannelHead, struct {
 		ChannelID string `json:"channel_id"`
 	}{ChannelID: channelID}, &remoteHead); err != nil {
 		t.Fatalf("rpc head: %v", err)
@@ -814,7 +814,7 @@ func TestSubscribeChannelResumesFromLastSeenSeq(t *testing.T) {
 		t.Fatalf("verify head: %v", err)
 	}
 	var remoteMsgs GetMessagesResponse
-	if err := readerSvc.rpcCall(ctx, ownerPeerID, "get_channel_messages", struct {
+	if err := readerSvc.rpcCall(ctx, ownerPeerID, MethodGetChannelMessages, struct {
 		ChannelID string `json:"channel_id"`
 		Limit     int    `json:"limit"`
 	}{ChannelID: channelID, Limit: DefaultPageLimit}, &remoteMsgs); err != nil {
