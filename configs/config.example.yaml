@@ -13,6 +13,7 @@ p2p:
     - "/ip6/::/tcp/4001"
     - /ip4/0.0.0.0/udp/4001/quic-v1
     - /ip6/::/udp/4001/quic-v1
+  # public_ip: "203.0.113.10"   # 指定公网 IP 后，libp2p 会对外广播这个 IP，并关闭 identify 地址发现
   bootstrap_peers: []
   # nodisc: true               # 为 true 时禁用 DHT Advertise/FindPeers 节点发现，仅使用 bootstrap、已连接节点 gossip 和 peer exchange
 

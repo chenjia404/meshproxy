@@ -19,6 +19,7 @@ func TestRegisterFlagsMapsNestedConfigFields(t *testing.T) {
 	args := []string{
 		"--mode=relay+exit",
 		"--data_dir=/tmp/meshproxy",
+		"--p2p.public_ip=203.0.113.10",
 		"--p2p.nodisc",
 		"--p2p.bootstrap_peers=/ip4/1.2.3.4/tcp/1234/p2p/QmTest,/dnsaddr/bootstrap.libp2p.io/p2p/QmFoo",
 		"--socks5.listen=127.0.0.1:1089",
@@ -39,6 +40,9 @@ func TestRegisterFlagsMapsNestedConfigFields(t *testing.T) {
 	}
 	if !cfg.P2P.NoDiscovery {
 		t.Fatalf("cfg.P2P.NoDiscovery = false, want true")
+	}
+	if cfg.P2P.PublicIP != "203.0.113.10" {
+		t.Fatalf("cfg.P2P.PublicIP = %q, want %q", cfg.P2P.PublicIP, "203.0.113.10")
 	}
 	if got, want := cfg.P2P.BootstrapPeers, []string{"/ip4/1.2.3.4/tcp/1234/p2p/QmTest", "/dnsaddr/bootstrap.libp2p.io/p2p/QmFoo"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("cfg.P2P.BootstrapPeers = %#v, want %#v", got, want)
@@ -102,5 +106,14 @@ func TestRegisterFlagsAliasesRemainWorking(t *testing.T) {
 	}
 	if cfg.P2P.NoDiscovery {
 		t.Fatalf("cfg.P2P.NoDiscovery = true, want false")
+	}
+}
+
+func TestValidateRejectsInvalidPublicIP(t *testing.T) {
+	cfg := Default()
+	cfg.P2P.PublicIP = "not-an-ip"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want error")
 	}
 }

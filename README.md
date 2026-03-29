@@ -116,6 +116,7 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 - **`data_dir`**：用于存放身份密钥等持久化数据。
 - **`identity_key_path`**：如为空，默认值为 `${data_dir}/identity.key`。
 - **`p2p.listen_addrs`**：libp2p 监听 multiaddr 列表，例如 `"/ip4/0.0.0.0/tcp/0"`。
+- **`p2p.public_ip`**：手动指定对外广播的公网 IP。设置后，libp2p 会把监听地址里的内网/任意地址改写成这个公网 IP，并关闭 identify 地址发现，避免广播大量内网地址。
 - **`p2p.bootstrap_peers`**：其他节点的 multiaddr，用于启动时连接引导。
 - **`p2p.nodisc`**：是否禁用 DHT 节点发现。为 `true` 时不会执行 rendezvous `Advertise/FindPeers`，只依赖 `bootstrap_peers`、已连接节点的 gossip descriptor 与 peer exchange。
 - **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。

@@ -73,7 +73,7 @@ type Config struct {
 // ChatConfig 私聊；OfflineStorePeers 與 p2p.bootstrap_peers 相同，為 multiaddr 字符串列表（含 /p2p/<peerID>）；亦可僅填 peer_id 走 DHT。
 // OfflineStoreNodes 由 Normalize 從 OfflineStorePeers 解析得到，不參與 YAML 反序列化。
 type ChatConfig struct {
-	OfflineStorePeers []string `yaml:"offline_store_peers"`
+	OfflineStorePeers []string                        `yaml:"offline_store_peers"`
 	OfflineStoreNodes []offlinestore.OfflineStoreNode `yaml:"-"`
 }
 
@@ -250,6 +250,11 @@ type P2PConfig struct {
 	// ListenAddrs is a list of multiaddrs to listen on.
 	ListenAddrs []string `yaml:"listen_addrs"`
 
+	// PublicIP is the public IP address that libp2p should advertise.
+	// When set, the host will rewrite listen addrs to use this IP for address announcement
+	// and disable identify-based address discovery to avoid leaking private IPs.
+	PublicIP string `yaml:"public_ip"`
+
 	// BootstrapPeers are the multiaddrs of peers to connect to on startup.
 	BootstrapPeers []string `yaml:"bootstrap_peers"`
 
@@ -410,6 +415,7 @@ func (c *Config) postProcess() error {
 	if c.DataDir == "" {
 		c.DataDir = "data"
 	}
+	c.P2P.PublicIP = strings.TrimSpace(c.P2P.PublicIP)
 	if c.IdentityKeyPath == "" {
 		c.IdentityKeyPath = filepath.Join(c.DataDir, "identity.key")
 	}
@@ -626,6 +632,9 @@ func (c *Config) Validate() error {
 	}
 	if c.API.Listen == "" {
 		return errors.New("api.listen must not be empty")
+	}
+	if c.P2P.PublicIP != "" && net.ParseIP(c.P2P.PublicIP) == nil {
+		return fmt.Errorf("invalid p2p.public_ip %q", c.P2P.PublicIP)
 	}
 
 	switch c.Client.ExitSelection.Mode {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
@@ -26,7 +28,7 @@ type Host struct {
 }
 
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
-func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*Host, error) {
+func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, bootstrapPeers []string, publicIP string) (*Host, error) {
 	var hostRouting routing.Routing
 
 	connmgr_, _ := connmgr.NewConnManager(
@@ -64,6 +66,49 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 		libp2p.ConnectionManager(connmgr_),
 	}
 
+	peerSource := bootstrapPeerSource(bootstrapPeers)
+	if peerSource != nil {
+		// AutoRelay can use the configured bootstrap peers as relay candidates when the node
+		// is not directly reachable. This keeps relay discovery aligned with deployment config.
+		opts = append(opts, libp2p.EnableAutoRelayWithPeerSource(peerSource))
+	}
+
+	if publicIP != "" {
+		// When the public IP is known upfront, advertise only rewritten public addresses
+		// and skip identify-based address discovery to avoid leaking private addrs.
+		opts = append(opts,
+			libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+				return rewriteAdvertisedAddrs(addrs, publicIP)
+			}),
+			libp2p.DisableIdentifyAddressDiscovery(),
+		)
+	} else {
+		// 过滤对外宣告地址
+		opts = append(opts,
+			libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+				out := make([]multiaddr.Multiaddr, 0, len(addrs))
+				for _, a := range addrs {
+					s := a.String()
+					// 按你的场景过滤 Docker/私网/链路本地地址
+					if strings.Contains(s, "/ip4/127.") ||
+						strings.Contains(s, "/ip4/10.") ||
+						strings.Contains(s, "/ip4/172.16.") ||
+						strings.Contains(s, "/ip4/172.17.") ||
+						strings.Contains(s, "/ip4/172.18.") ||
+						strings.Contains(s, "/ip4/172.19.") ||
+						strings.Contains(s, "/ip4/192.168.") {
+						continue
+					}
+					out = append(out, a)
+				}
+
+				// 也可以直接只返回你手工指定的公网/域名地址
+				// return []ma.Multiaddr{mustMA("/dns4/example.com/tcp/4001")}
+				return out
+			}),
+		)
+	}
+
 	for _, addrStr := range listenAddrs {
 		maddr, err := multiaddr.NewMultiaddr(addrStr)
 		if err != nil {
@@ -78,13 +123,7 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 	}
 
 	for _, addr := range h.Addrs() {
-		info := peer.AddrInfo{
-			ID:    h.ID(),
-			Addrs: []multiaddr.Multiaddr{addr},
-		}
-		for _, a := range info.Addrs {
-			log.Printf("[p2p] listening on %s", a.String())
-		}
+		log.Printf("[p2p] listening on %s", addr.String())
 	}
 
 	return &Host{
@@ -97,4 +136,114 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string) (*H
 // Close shuts down the underlying libp2p host.
 func (h *Host) Close() error {
 	return h.Host.Close()
+}
+
+// bootstrapPeerSource turns configured bootstrap peers into AutoRelay candidates.
+// Invalid entries are skipped so one bad address does not block the whole host.
+func bootstrapPeerSource(bootstrapPeers []string) func(ctx context.Context, num int) <-chan peer.AddrInfo {
+	candidates := make([]peer.AddrInfo, 0, len(bootstrapPeers))
+	for _, addrStr := range bootstrapPeers {
+		addrStr = strings.TrimSpace(addrStr)
+		if addrStr == "" {
+			continue
+		}
+		maddr, err := multiaddr.NewMultiaddr(addrStr)
+		if err != nil {
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, *info)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, num int) <-chan peer.AddrInfo {
+		if num <= 0 || num > len(candidates) {
+			num = len(candidates)
+		}
+		ch := make(chan peer.AddrInfo, num)
+		go func() {
+			defer close(ch)
+			for i := 0; i < num; i++ {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- candidates[i]:
+				}
+			}
+		}()
+		return ch
+	}
+}
+
+// rewriteAdvertisedAddrs rewrites the advertised multiaddrs to use the configured public IP.
+// Private listen addresses such as 0.0.0.0/:: are mapped to the public IP while preserving the
+// rest of the transport suffix. Addrs with a different IP family are dropped.
+func rewriteAdvertisedAddrs(addrs []multiaddr.Multiaddr, publicIP string) []multiaddr.Multiaddr {
+	ip := net.ParseIP(strings.TrimSpace(publicIP))
+	if ip == nil {
+		return addrs
+	}
+
+	out := make([]multiaddr.Multiaddr, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		rewritten, ok := rewriteAdvertisedAddr(addr, ip)
+		if !ok {
+			continue
+		}
+		key := rewritten.String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, rewritten)
+	}
+	return out
+}
+
+// rewriteAdvertisedAddr rewrites one listen addr into its public counterpart.
+// If the addr has an IP component with a different family than publicIP, it is dropped.
+func rewriteAdvertisedAddr(addr multiaddr.Multiaddr, publicIP net.IP) (multiaddr.Multiaddr, bool) {
+	if addr == nil {
+		return nil, false
+	}
+
+	if ip4, err := addr.ValueForProtocol(multiaddr.P_IP4); err == nil {
+		if publicIP.To4() == nil {
+			return nil, false
+		}
+		oldComp := "/ip4/" + ip4
+		newComp := "/ip4/" + publicIP.To4().String()
+		if oldComp == newComp {
+			return addr, true
+		}
+		rewritten, err := multiaddr.NewMultiaddr(strings.Replace(addr.String(), oldComp, newComp, 1))
+		if err != nil {
+			return nil, false
+		}
+		return rewritten, true
+	}
+
+	if ip6, err := addr.ValueForProtocol(multiaddr.P_IP6); err == nil {
+		if publicIP.To4() != nil {
+			return nil, false
+		}
+		oldComp := "/ip6/" + ip6
+		newComp := "/ip6/" + publicIP.String()
+		if oldComp == newComp {
+			return addr, true
+		}
+		rewritten, err := multiaddr.NewMultiaddr(strings.Replace(addr.String(), oldComp, newComp, 1))
+		if err != nil {
+			return nil, false
+		}
+		return rewritten, true
+	}
+
+	// Addresses without an IP component are kept unchanged.
+	return addr, true
 }
