@@ -311,6 +311,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.chatRelayV1Table = relay.NewChatRelayV1Table()
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	publicChannelSvc.SetNodePrivateKey(idMgr.PrivateKey())
+	safe.Go("app.syncExistingPublicChannelPeers", func() { a.syncExistingPublicChannelPeers() })
 	safe.Go("chat.offlineStoreInitialSync", func() { chatSvc.SyncOfflineStoresNow() })
 	if a.ipfsEmb != nil {
 		chatSvc.SetIPFSAvatarPinner(newChatIPFSAvatarPinner(a.ipfsEmb))
@@ -2154,6 +2155,7 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 	if a == nil || a.host == nil || a.publicChannels == nil || pid == "" {
 		return
 	}
+	log.Printf("[publicchannel] exchange subscriptions start peer=%s", pid.String())
 	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 	defer cancel()
 	// Wait briefly for identify to populate supported protocols before using the public-channel RPC.
@@ -2163,6 +2165,7 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 			break
 		}
 		if attempt == 2 {
+			log.Printf("[publicchannel] exchange subscriptions skip peer=%s reason=protocol_not_supported", pid.String())
 			return
 		}
 		timer := time.NewTimer(2 * time.Second)
@@ -2175,6 +2178,25 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 	}
 	if err := a.publicChannels.SyncPeerSubscriptions(ctx, pid.String(), 50); err != nil {
 		log.Printf("[publicchannel] exchange subscriptions peer=%s err=%v", pid.String(), err)
+	}
+}
+
+func (a *App) syncExistingPublicChannelPeers() {
+	if a == nil || a.host == nil || a.publicChannels == nil {
+		return
+	}
+	peers := a.Host().Network().Peers()
+	log.Printf("[publicchannel] sync existing peers count=%d", len(peers))
+	for _, pid := range peers {
+		if pid == "" || pid == a.Host().ID() {
+			continue
+		}
+		if _, loaded := a.publicChannelExchangeOnce.LoadOrStore(pid.String(), struct{}{}); loaded {
+			continue
+		}
+		pid := pid
+		log.Printf("[publicchannel] sync existing peer peer=%s", pid.String())
+		safe.Go("app.exchangePublicChannelSubscriptions.existing", func() { a.exchangePublicChannelSubscriptions(pid) })
 	}
 }
 
