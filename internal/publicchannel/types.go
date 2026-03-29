@@ -222,15 +222,47 @@ func TopicForChannel(channelID string) string {
 	return TopicPrefix + strings.TrimSpace(channelID) + TopicSuffix
 }
 
-func ValidateChannelID(channelID string) error {
-	parsed, err := uuid.Parse(strings.TrimSpace(channelID))
-	if err != nil {
-		return fmt.Errorf("invalid channel_id: %w", err)
+// BuildChannelID binds the owner peer ID to the random UUID, so the owner is part of
+// the canonical channel identifier rather than a separate mutable field.
+func BuildChannelID(ownerPeerID string, channelUUID uuid.UUID) string {
+	return strings.TrimSpace(ownerPeerID) + ":" + channelUUID.String()
+}
+
+// ParseChannelID accepts both canonical "ownerPeerID:uuidv7" IDs and legacy plain uuidv7 IDs.
+// Legacy IDs return an empty ownerPeerID so callers can decide whether a migration is needed.
+func ParseChannelID(channelID string) (ownerPeerID string, channelUUID uuid.UUID, err error) {
+	trimmed := strings.TrimSpace(channelID)
+	if trimmed == "" {
+		return "", uuid.Nil, errors.New("channel_id is required")
+	}
+	parts := strings.SplitN(trimmed, ":", 2)
+	if len(parts) == 1 {
+		parsed, parseErr := uuid.Parse(parts[0])
+		if parseErr != nil {
+			return "", uuid.Nil, fmt.Errorf("invalid channel_id: %w", parseErr)
+		}
+		if parsed.Version() != 7 {
+			return "", uuid.Nil, fmt.Errorf("channel_id must be uuidv7")
+		}
+		return "", parsed, nil
+	}
+	ownerPeerID = strings.TrimSpace(parts[0])
+	if ownerPeerID == "" {
+		return "", uuid.Nil, errors.New("channel_id owner_peer_id is required")
+	}
+	parsed, parseErr := uuid.Parse(strings.TrimSpace(parts[1]))
+	if parseErr != nil {
+		return "", uuid.Nil, fmt.Errorf("invalid channel_id uuid: %w", parseErr)
 	}
 	if parsed.Version() != 7 {
-		return fmt.Errorf("channel_id must be uuidv7")
+		return "", uuid.Nil, fmt.Errorf("channel_id uuid must be uuidv7")
 	}
-	return nil
+	return ownerPeerID, parsed, nil
+}
+
+func ValidateChannelID(channelID string) error {
+	_, _, err := ParseChannelID(channelID)
+	return err
 }
 
 func NormalizeMessageContent(text string, files []File) MessageContent {

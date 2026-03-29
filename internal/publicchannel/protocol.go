@@ -13,7 +13,7 @@ import (
 const (
 	// ProtocolRPC is the single public-channel RPC protocol.
 	// Multiple logical methods are multiplexed over this one stream.
-	ProtocolRPC protocol.ID = "/meshchat/public-channel/0.1.0"
+	ProtocolRPC protocol.ID = "/meshchat/public-channel/0.1.1"
 
 	MethodGetChannelProfile     = "channel.get_profile"
 	MethodGetChannelHead        = "channel.get_head"
@@ -75,6 +75,11 @@ func canonicalizeProfile(profile ChannelProfile) ([]byte, error) {
 	if err := ValidateChannelID(profile.ChannelID); err != nil {
 		return nil, err
 	}
+	if boundOwner, _, err := ParseChannelID(profile.ChannelID); err != nil {
+		return nil, err
+	} else if boundOwner != "" && boundOwner != profile.OwnerPeerID {
+		return nil, fmt.Errorf("channel_id owner mismatch: channel owner=%s profile owner=%s", boundOwner, profile.OwnerPeerID)
+	}
 	payload, err := json.Marshal(canonicalProfile{
 		ChannelID:               profile.ChannelID,
 		OwnerPeerID:             profile.OwnerPeerID,
@@ -96,6 +101,11 @@ func canonicalizeProfile(profile ChannelProfile) ([]byte, error) {
 func canonicalizeHead(head ChannelHead) ([]byte, error) {
 	if err := ValidateChannelID(head.ChannelID); err != nil {
 		return nil, err
+	}
+	if boundOwner, _, err := ParseChannelID(head.ChannelID); err != nil {
+		return nil, err
+	} else if boundOwner != "" && boundOwner != head.OwnerPeerID {
+		return nil, fmt.Errorf("channel_id owner mismatch: channel owner=%s head owner=%s", boundOwner, head.OwnerPeerID)
 	}
 	payload, err := json.Marshal(canonicalHead{
 		ChannelID:      head.ChannelID,

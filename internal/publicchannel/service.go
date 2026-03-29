@@ -38,8 +38,9 @@ type Service struct {
 	nodePriv  crypto.PrivKey
 	ipfs      ipfsFilePinner
 
-	subMu sync.Mutex
-	subs  map[string]*channelSubscription
+	subMu       sync.Mutex
+	subs        map[string]*channelSubscription
+	migrateOnce sync.Once
 
 	provideMu               sync.Mutex
 	provideStates           map[string]*provideState
@@ -190,6 +191,12 @@ func (s *Service) Close() error {
 
 func (s *Service) SetNodePrivateKey(priv crypto.PrivKey) {
 	s.nodePriv = priv
+	if priv == nil {
+		return
+	}
+	s.migrateOnce.Do(func() {
+		safe.Go("publicchannel.migrateOwnedLegacyChannelIDs", func() { s.migrateOwnedLegacyChannelIDs() })
+	})
 }
 
 func (s *Service) SetIPFSFilePinner(p ipfsFilePinner) {
@@ -205,6 +212,17 @@ func (s *Service) now() time.Time {
 
 func (s *Service) nowUnix() int64 {
 	return s.now().Unix()
+}
+
+func (s *Service) resolveCanonicalChannelID(channelID string) string {
+	if s == nil || s.store == nil {
+		return strings.TrimSpace(channelID)
+	}
+	canonicalChannelID, err := s.store.ResolveCanonicalChannelID(channelID)
+	if err != nil {
+		return strings.TrimSpace(channelID)
+	}
+	return canonicalChannelID
 }
 
 func (s *Service) buildPinnedAvatar(fileName, mimeType string, data []byte) (Avatar, error) {
@@ -241,27 +259,27 @@ func (s *Service) buildPinnedAvatar(fileName, mimeType string, data []byte) (Ava
 }
 
 func (s *Service) GetChannelProfile(channelID string) (ChannelProfile, error) {
-	return s.store.GetChannelProfile(channelID)
+	return s.store.GetChannelProfile(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelHead(channelID string) (ChannelHead, error) {
-	return s.store.GetChannelHead(channelID)
+	return s.store.GetChannelHead(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelSummary(channelID string) (ChannelSummary, error) {
-	return s.store.GetChannelSummary(channelID)
+	return s.store.GetChannelSummary(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelMessage(channelID string, messageID int64) (ChannelMessage, error) {
-	return s.store.GetChannelMessage(channelID, messageID)
+	return s.store.GetChannelMessage(s.resolveCanonicalChannelID(channelID), messageID)
 }
 
 func (s *Service) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]ChannelMessage, error) {
-	return s.store.GetChannelMessages(channelID, beforeMessageID, limit)
+	return s.store.GetChannelMessages(s.resolveCanonicalChannelID(channelID), beforeMessageID, limit)
 }
 
 func (s *Service) GetChannelChanges(channelID string, afterSeq int64, limit int) (GetChangesResponse, error) {
-	return s.store.GetChannelChanges(channelID, afterSeq, limit)
+	return s.store.GetChannelChanges(s.resolveCanonicalChannelID(channelID), afterSeq, limit)
 }
 
 func (s *Service) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, error) {
@@ -402,7 +420,122 @@ func (s *Service) ClearChannelUnreadCount(channelID string) (ChannelSummary, err
 }
 
 func (s *Service) ListProviders(channelID string) ([]ChannelProvider, error) {
-	return s.store.ListProviders(channelID)
+	return s.store.ListProviders(s.resolveCanonicalChannelID(channelID))
+}
+
+func (s *Service) migrateOwnedLegacyChannelIDs() {
+	if s == nil || s.store == nil || s.nodePriv == nil || s.localPeer == "" {
+		return
+	}
+	channelIDs, err := s.store.ListOwnedChannelIDs(s.localPeer)
+	if err != nil {
+		log.Printf("[publicchannel] migrate owned legacy channel ids: %v", err)
+		return
+	}
+	for _, channelID := range channelIDs {
+		boundOwner, channelUUID, err := ParseChannelID(channelID)
+		if err != nil {
+			log.Printf("[publicchannel] skip invalid owned channel id=%s err=%v", channelID, err)
+			continue
+		}
+		if boundOwner != "" {
+			continue
+		}
+		newChannelID := BuildChannelID(s.localPeer, channelUUID)
+		if err := s.migrateOwnedChannelID(channelID, newChannelID); err != nil {
+			log.Printf("[publicchannel] migrate owned legacy channel old=%s new=%s err=%v", channelID, newChannelID, err)
+			continue
+		}
+		log.Printf("[publicchannel] migrated owned legacy channel old=%s new=%s", channelID, newChannelID)
+		s.scheduleOwnedProvide(newChannelID)
+	}
+}
+
+func (s *Service) migrateOwnedChannelID(oldChannelID, newChannelID string) error {
+	summary, err := s.store.GetChannelSummary(oldChannelID)
+	if err != nil {
+		return err
+	}
+	if summary.Profile.OwnerPeerID != s.localPeer {
+		return errors.New("channel is not owned by local peer")
+	}
+	now := s.nowUnix()
+	profile := summary.Profile
+	head := summary.Head
+	profile.ChannelID = newChannelID
+	profile.ProfileVersion++
+	profile.UpdatedAt = now
+	if err := signProfile(s.nodePriv, &profile); err != nil {
+		return err
+	}
+	head.ChannelID = newChannelID
+	head.OwnerPeerID = profile.OwnerPeerID
+	head.OwnerVersion = profile.OwnerVersion
+	head.ProfileVersion = profile.ProfileVersion
+	head.LastSeq++
+	head.UpdatedAt = now
+	if err := signHead(s.nodePriv, &head); err != nil {
+		return err
+	}
+	var messages []ChannelMessage
+	beforeMessageID := int64(0)
+	for {
+		page, pageErr := s.store.GetChannelMessages(oldChannelID, beforeMessageID, 200)
+		if pageErr != nil {
+			return pageErr
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, item := range page {
+			item.ChannelID = newChannelID
+			if err := signMessage(s.nodePriv, &item); err != nil {
+				return err
+			}
+			messages = append(messages, item)
+		}
+		beforeMessageID = page[len(page)-1].MessageID
+	}
+	change := ChannelChange{
+		ChannelID:      newChannelID,
+		Seq:            head.LastSeq,
+		ChangeType:     ChangeTypeProfile,
+		ProfileVersion: ptrInt64(profile.ProfileVersion),
+		CreatedAt:      now,
+		ProviderPeerID: s.localPeer,
+	}
+	if err := s.store.MigrateOwnedChannelID(oldChannelID, profile, head, messages, change, now); err != nil {
+		return err
+	}
+	if err := s.switchSubscriptionChannelID(oldChannelID, newChannelID); err != nil && s.pubsub != nil {
+		log.Printf("[publicchannel] switch migrated topic old=%s new=%s err=%v", oldChannelID, newChannelID, err)
+	}
+	s.publishChange(change)
+	return nil
+}
+
+func (s *Service) switchSubscriptionChannelID(oldChannelID, newChannelID string) error {
+	if oldChannelID == newChannelID {
+		return nil
+	}
+	s.subMu.Lock()
+	item, ok := s.subs[oldChannelID]
+	if ok {
+		delete(s.subs, oldChannelID)
+	}
+	s.subMu.Unlock()
+	if ok {
+		if item.cancel != nil {
+			item.cancel()
+		}
+		if item.sub != nil {
+			item.sub.Cancel()
+		}
+		if item.topic != nil {
+			_ = item.topic.Close()
+		}
+	}
+	return s.subscribeTopic(newChannelID)
 }
 
 func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error) {
@@ -423,7 +556,7 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 	}
 	now := time.Now().Unix()
 	profile := ChannelProfile{
-		ChannelID:               channelUUID.String(),
+		ChannelID:               BuildChannelID(s.localPeer, channelUUID),
 		OwnerPeerID:             s.localPeer,
 		OwnerVersion:            1,
 		Name:                    name,
@@ -766,6 +899,7 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 	if err := ValidateChannelID(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	channelID = s.resolveCanonicalChannelID(channelID)
 	now := time.Now().Unix()
 	if err := s.store.EnsureSubscribedChannel(channelID, lastSeenSeq, now); err != nil {
 		return SubscribeResult{}, err
@@ -784,6 +918,10 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 		log.Printf("[publicchannel] initial subscribe snapshot %s: %v", channelID, err)
 		s.bootstrapSubscriptionAsync(channelID, append([]string(nil), seedPeerIDs...), lastSeenSeq)
 		return s.localSubscribeResult(channelID)
+	}
+	channelID, err = s.resolveSnapshotChannelID(channelID, remoteProfile, now)
+	if err != nil {
+		return SubscribeResult{}, err
 	}
 	if err := s.applyInitialSnapshot(ctx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now); err != nil {
 		return SubscribeResult{}, err
@@ -804,6 +942,7 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 	if err := ValidateChannelID(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	channelID = s.resolveCanonicalChannelID(channelID)
 	now := time.Now().Unix()
 	if err := s.store.EnsureSubscribedChannel(channelID, lastSeenSeq, now); err != nil {
 		return SubscribeResult{}, err
@@ -826,6 +965,11 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 }
 
 func (s *Service) applyInitialSnapshot(ctx context.Context, channelID string, remoteProfile ChannelProfile, remoteHead ChannelHead, remoteMessages []ChannelMessage, seedPeerIDs []string, lastSeenSeq, now int64) error {
+	var err error
+	channelID, err = s.resolveSnapshotChannelID(channelID, remoteProfile, now)
+	if err != nil {
+		return err
+	}
 	if err := s.store.ApplyProfile(remoteProfile); err != nil {
 		return err
 	}
@@ -897,6 +1041,28 @@ func (s *Service) bootstrapSubscriptionAsync(channelID string, seedPeerIDs []str
 			return
 		}
 	})
+}
+
+func (s *Service) resolveSnapshotChannelID(requestedChannelID string, remoteProfile ChannelProfile, now int64) (string, error) {
+	requestedChannelID = strings.TrimSpace(requestedChannelID)
+	canonicalChannelID := strings.TrimSpace(remoteProfile.ChannelID)
+	if canonicalChannelID == "" {
+		return requestedChannelID, nil
+	}
+	if requestedChannelID == canonicalChannelID {
+		return canonicalChannelID, nil
+	}
+	if err := s.store.AddChannelAlias(requestedChannelID, canonicalChannelID, now); err != nil {
+		return "", err
+	}
+	if err := s.store.EnsureSubscribedChannel(canonicalChannelID, 0, now); err != nil {
+		return "", err
+	}
+	if err := s.switchSubscriptionChannelID(requestedChannelID, canonicalChannelID); err != nil && s.pubsub != nil {
+		return "", err
+	}
+	log.Printf("[publicchannel] resolved legacy channel alias old=%s new=%s", requestedChannelID, canonicalChannelID)
+	return canonicalChannelID, nil
 }
 
 func (s *Service) localSubscribeResult(channelID string) (SubscribeResult, error) {
@@ -1137,8 +1303,12 @@ func (s *Service) fetchInitialSnapshot(ctx context.Context, channelID string, se
 				return ChannelProfile{}, ChannelHead{}, nil, nil, err
 			}
 		}
-		s.recordProviderSyncSuccess(channelID, peerID)
-		providers, _ := s.store.ListProviders(channelID)
+		canonicalChannelID := channelID
+		if strings.TrimSpace(profile.ChannelID) != "" {
+			canonicalChannelID = profile.ChannelID
+		}
+		s.recordProviderSyncSuccess(canonicalChannelID, peerID)
+		providers, _ := s.store.ListProviders(canonicalChannelID)
 		return profile, head, msgs.Items, providers, nil
 	}
 	if lastErr == nil {
@@ -1177,6 +1347,7 @@ func (s *Service) syncAfter(ctx context.Context, channelID string, afterSeq int6
 }
 
 func (s *Service) syncAfterWithPeer(ctx context.Context, sourcePeerID, channelID string, afterSeq int64) (bool, error) {
+	channelID = s.resolveCanonicalChannelID(channelID)
 	nextAfter := afterSeq
 	currentLastSeq := afterSeq
 	for {
@@ -1318,6 +1489,7 @@ func (s *Service) applyVerifiedMessageWithProfile(profile ChannelProfile, messag
 }
 
 func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID string) (ChannelProfile, error) {
+	channelID = s.resolveCanonicalChannelID(channelID)
 	profile, err := s.store.GetChannelProfile(channelID)
 	switch {
 	case err == nil && !isPlaceholderChannelProfile(profile):
@@ -1358,6 +1530,13 @@ func (s *Service) ensureChannelProfileAvailable(ctx context.Context, channelID s
 		if remoteHead.OwnerPeerID != remoteProfile.OwnerPeerID {
 			return ChannelProfile{}, errors.New("channel head owner mismatch")
 		}
+		if remoteProfile.ChannelID != "" && remoteProfile.ChannelID != channelID {
+			if aliasErr := s.store.AddChannelAlias(channelID, remoteProfile.ChannelID, s.nowUnix()); aliasErr == nil {
+				channelID = remoteProfile.ChannelID
+			} else {
+				return ChannelProfile{}, aliasErr
+			}
+		}
 		if err := s.store.ApplyProfile(remoteProfile); err != nil {
 			return ChannelProfile{}, err
 		}
@@ -1380,6 +1559,14 @@ func isPlaceholderChannelProfile(profile ChannelProfile) bool {
 }
 
 func (s *Service) verifyMessageAgainstProfile(profile ChannelProfile, message ChannelMessage) error {
+	if boundOwner, _, err := ParseChannelID(message.ChannelID); err != nil {
+		return err
+	} else if boundOwner != "" && boundOwner != profile.OwnerPeerID {
+		log.Printf("[publicchannel] verify message channel owner mismatch channel=%s message_id=%d channel_owner=%s profile_owner=%s",
+			message.ChannelID, message.MessageID, boundOwner, profile.OwnerPeerID)
+		return fmt.Errorf("channel_id owner must equal current owner_peer_id channel=%s message_id=%d channel_owner=%s owner=%s",
+			message.ChannelID, message.MessageID, boundOwner, profile.OwnerPeerID)
+	}
 	if message.AuthorPeerID != profile.OwnerPeerID {
 		log.Printf("[publicchannel] verify message author mismatch channel=%s message_id=%d author=%s owner=%s message_owner_version=%d profile_owner_version=%d",
 			message.ChannelID, message.MessageID, message.AuthorPeerID, profile.OwnerPeerID, message.OwnerVersion, profile.OwnerVersion)
@@ -1448,6 +1635,7 @@ func (s *Service) ensureTopic(channelID string, subscribe bool) (*pubsub.Topic, 
 	if s.pubsub == nil {
 		return nil, errors.New("pubsub not configured")
 	}
+	channelID = s.resolveCanonicalChannelID(channelID)
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
 	if existing, ok := s.subs[channelID]; ok && existing.topic != nil {
@@ -1465,6 +1653,7 @@ func (s *Service) ensureTopic(channelID string, subscribe bool) (*pubsub.Topic, 
 }
 
 func (s *Service) subscribeTopic(channelID string) error {
+	channelID = s.resolveCanonicalChannelID(channelID)
 	topic, err := s.ensureTopic(channelID, true)
 	if err != nil {
 		return err

@@ -2005,6 +2005,111 @@ func TestCreateChannelDefaultsToSubscribed(t *testing.T) {
 	}
 }
 
+func TestMigrateOwnedLegacyChannelID(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	priv, ownerPeerID := mustTestIdentity(t)
+	addr := mustMultiaddr(t, "/ip6/::1/tcp/13008")
+	h, err := mn.AddPeer(priv, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "legacy-migrate.db"))
+
+	legacyUUID := mustUUIDv7(t)
+	now := time.Now().Unix()
+	profile := ChannelProfile{
+		ChannelID:      legacyUUID,
+		OwnerPeerID:    ownerPeerID,
+		OwnerVersion:   1,
+		Name:           "legacy-owned",
+		ProfileVersion: 1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := signProfile(priv, &profile); err != nil {
+		t.Fatal(err)
+	}
+	head := ChannelHead{
+		ChannelID:      legacyUUID,
+		OwnerPeerID:    ownerPeerID,
+		OwnerVersion:   1,
+		LastMessageID:  1,
+		ProfileVersion: 1,
+		LastSeq:        1,
+		UpdatedAt:      now,
+	}
+	if err := signHead(priv, &head); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.CreateOwnedChannel(profile, head, now, ownerPeerID); err != nil {
+		t.Fatal(err)
+	}
+	msg := ChannelMessage{
+		ChannelID:     legacyUUID,
+		MessageID:     1,
+		Version:       1,
+		Seq:           1,
+		OwnerVersion:  1,
+		CreatorPeerID: ownerPeerID,
+		AuthorPeerID:  ownerPeerID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Content:       NormalizeMessageContent("legacy message", nil),
+		MessageType:   MessageTypeText,
+	}
+	if err := signMessage(priv, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.ApplyMessage(msg); err != nil {
+		t.Fatal(err)
+	}
+
+	parsedUUID := mustParseUUID(t, legacyUUID)
+	canonicalChannelID := BuildChannelID(ownerPeerID, parsedUUID)
+	if err := svc.migrateOwnedChannelID(legacyUUID, canonicalChannelID); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalProfile, err := svc.store.GetChannelProfile(canonicalChannelID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalProfile.ChannelID != canonicalChannelID {
+		t.Fatalf("want canonical channel_id %s, got %s", canonicalChannelID, canonicalProfile.ChannelID)
+	}
+	if canonicalProfile.ProfileVersion != 2 {
+		t.Fatalf("want migrated profile version 2, got %d", canonicalProfile.ProfileVersion)
+	}
+	legacyProfile, err := svc.store.GetChannelProfile(legacyUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyProfile.ChannelID != canonicalChannelID {
+		t.Fatalf("want legacy alias to resolve to %s, got %s", canonicalChannelID, legacyProfile.ChannelID)
+	}
+	migratedMsg, err := svc.store.GetChannelMessage(legacyUUID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migratedMsg.ChannelID != canonicalChannelID {
+		t.Fatalf("want migrated message channel_id %s, got %s", canonicalChannelID, migratedMsg.ChannelID)
+	}
+	if err := svc.verifyMessageAgainstProfile(canonicalProfile, migratedMsg); err != nil {
+		t.Fatalf("verify migrated message: %v", err)
+	}
+}
+
 func TestListSubscribedChannels(t *testing.T) {
 	t.Parallel()
 
@@ -2281,6 +2386,15 @@ func mustUUIDv7(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return id.String()
+}
+
+func mustParseUUID(t *testing.T, raw string) uuid.UUID {
+	t.Helper()
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func mustMultiaddr(t *testing.T, raw string) ma.Multiaddr {

@@ -117,6 +117,11 @@ func (s *Store) migrate() error {
 			failure_count INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(channel_db_id, peer_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS public_channel_aliases (
+			alias_channel_id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_public_channels_owner ON public_channels(owner_peer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_public_channel_messages_channel_msg ON public_channel_messages(channel_db_id, message_id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_public_channel_messages_channel_seq ON public_channel_messages(channel_db_id, seq ASC)`,
@@ -191,7 +196,55 @@ func (s *Store) ensureSyncStateTx(tx *sql.Tx, channelDBID int64, now int64) erro
 	return err
 }
 
+func (s *Store) resolveChannelIDTx(tx *sql.Tx, channelID string) (string, error) {
+	channelID = stringsTrim(channelID)
+	if channelID == "" {
+		return "", sql.ErrNoRows
+	}
+	var canonical string
+	err := tx.QueryRow(`SELECT channel_id FROM public_channels WHERE channel_id=?`, channelID).Scan(&canonical)
+	switch {
+	case err == nil:
+		return canonical, nil
+	case err != sql.ErrNoRows:
+		return "", err
+	}
+	err = tx.QueryRow(`SELECT channel_id FROM public_channel_aliases WHERE alias_channel_id=?`, channelID).Scan(&canonical)
+	if err != nil {
+		return "", err
+	}
+	return canonical, nil
+}
+
+func (s *Store) resolveChannelID(channelID string) (string, error) {
+	channelID = stringsTrim(channelID)
+	if channelID == "" {
+		return "", sql.ErrNoRows
+	}
+	var canonical string
+	err := s.db.QueryRow(`SELECT channel_id FROM public_channels WHERE channel_id=?`, channelID).Scan(&canonical)
+	switch {
+	case err == nil:
+		return canonical, nil
+	case err != sql.ErrNoRows:
+		return "", err
+	}
+	err = s.db.QueryRow(`SELECT channel_id FROM public_channel_aliases WHERE alias_channel_id=?`, channelID).Scan(&canonical)
+	if err != nil {
+		return "", err
+	}
+	return canonical, nil
+}
+
+func (s *Store) ResolveCanonicalChannelID(channelID string) (string, error) {
+	return s.resolveChannelID(channelID)
+}
+
 func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelProfile, ChannelHead, error) {
+	canonicalChannelID, err := s.resolveChannelIDTx(tx, channelID)
+	if err != nil {
+		return 0, ChannelProfile{}, ChannelHead{}, err
+	}
 	var (
 		id         int64
 		avatarJSON string
@@ -200,11 +253,11 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 		profile    ChannelProfile
 		head       ChannelHead
 	)
-	err := tx.QueryRow(`
+	err = tx.QueryRow(`
 		SELECT id, owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version,
 		       last_message_id, last_seq, created_at, updated_at, head_updated_at, profile_signature, head_signature
 		FROM public_channels WHERE channel_id=?
-	`, channelID).Scan(
+	`, canonicalChannelID).Scan(
 		&id,
 		&profile.OwnerPeerID,
 		&profile.OwnerVersion,
@@ -224,10 +277,10 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 	if err != nil {
 		return 0, ChannelProfile{}, ChannelHead{}, err
 	}
-	profile.ChannelID = channelID
+	profile.ChannelID = canonicalChannelID
 	profile.Avatar = unmarshalAvatar(avatarJSON)
 	profile.Signature = profileSig
-	head.ChannelID = channelID
+	head.ChannelID = canonicalChannelID
 	head.OwnerPeerID = profile.OwnerPeerID
 	head.OwnerVersion = profile.OwnerVersion
 	head.ProfileVersion = profile.ProfileVersion
@@ -237,7 +290,11 @@ func (s *Store) getChannelRowTx(tx *sql.Tx, channelID string) (int64, ChannelPro
 
 func (s *Store) getChannelDBID(channelID string) (int64, error) {
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM public_channels WHERE channel_id=?`, channelID).Scan(&id)
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return 0, err
+	}
+	err = s.db.QueryRow(`SELECT id FROM public_channels WHERE channel_id=?`, canonicalChannelID).Scan(&id)
 	return id, err
 }
 
@@ -292,7 +349,111 @@ func (s *Store) CreateOwnedChannel(profile ChannelProfile, head ChannelHead, now
 	return nil
 }
 
+func (s *Store) AddChannelAlias(aliasChannelID, channelID string, now int64) error {
+	aliasChannelID = stringsTrim(aliasChannelID)
+	channelID = stringsTrim(channelID)
+	if aliasChannelID == "" || channelID == "" || aliasChannelID == channelID {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO public_channel_aliases(alias_channel_id, channel_id, updated_at)
+		VALUES(?,?,?)
+		ON CONFLICT(alias_channel_id) DO UPDATE SET
+			channel_id=excluded.channel_id,
+			updated_at=excluded.updated_at
+	`, aliasChannelID, channelID, now)
+	return err
+}
+
+func (s *Store) MigrateOwnedChannelID(oldChannelID string, profile ChannelProfile, head ChannelHead, messages []ChannelMessage, change ChannelChange, now int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	channelDBID, currentProfile, currentHead, err := s.getChannelRowTx(tx, oldChannelID)
+	if err != nil {
+		return err
+	}
+	if currentProfile.ChannelID == profile.ChannelID {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
+	if currentProfile.OwnerPeerID != profile.OwnerPeerID {
+		return fmt.Errorf("owner mismatch for channel migration old=%s new=%s current_owner=%s migrated_owner=%s", oldChannelID, profile.ChannelID, currentProfile.OwnerPeerID, profile.OwnerPeerID)
+	}
+	if _, err := tx.Exec(`
+		UPDATE public_channels
+		SET channel_id=?, owner_peer_id=?, owner_version=?, name=?, avatar_json=?, bio=?, message_retention_minutes=?, profile_version=?,
+			last_message_id=?, last_seq=?, created_at=?, updated_at=?, head_updated_at=?, profile_signature=?, head_signature=?
+		WHERE id=?
+	`, profile.ChannelID, profile.OwnerPeerID, profile.OwnerVersion, profile.Name, marshalAvatar(profile.Avatar), profile.Bio,
+		profile.MessageRetentionMinutes, profile.ProfileVersion, head.LastMessageID, head.LastSeq, profile.CreatedAt, profile.UpdatedAt,
+		head.UpdatedAt, profile.Signature, head.Signature, channelDBID); err != nil {
+		return err
+	}
+	for _, message := range messages {
+		if _, err := tx.Exec(`
+			UPDATE public_channel_messages
+			SET version=?, seq=?, owner_version=?, creator_peer_id=?, author_peer_id=?, created_at=?, updated_at=?, is_deleted=?, message_type=?, content_json=?, signature=?
+			WHERE channel_db_id=? AND message_id=?
+		`, message.Version, message.Seq, message.OwnerVersion, message.CreatorPeerID, message.AuthorPeerID, message.CreatedAt, message.UpdatedAt,
+			boolToInt(message.IsDeleted), message.MessageType, marshalContent(message.Content), message.Signature, channelDBID, message.MessageID); err != nil {
+			return err
+		}
+	}
+	if change.Seq > currentHead.LastSeq {
+		if _, err := tx.Exec(`
+			INSERT INTO public_channel_changes(channel_db_id, seq, change_type, message_id, version, is_deleted, profile_version, created_at)
+			VALUES(?,?,?,?,?,?,?,?)
+			ON CONFLICT(channel_db_id, seq) DO NOTHING
+		`, channelDBID, change.Seq, change.ChangeType, nil, nil, nil, nullableInt64(change.ProfileVersion), change.CreatedAt); err != nil {
+			return err
+		}
+	}
+	if err := s.ensureSyncStateTx(tx, channelDBID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		UPDATE public_channel_sync_state
+		SET last_seen_seq=CASE WHEN last_seen_seq < ? THEN ? ELSE last_seen_seq END,
+			last_synced_seq=CASE WHEN last_synced_seq < ? THEN ? ELSE last_synced_seq END,
+			updated_at=?
+		WHERE channel_db_id=?
+	`, head.LastSeq, head.LastSeq, head.LastSeq, head.LastSeq, now, channelDBID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO public_channel_aliases(alias_channel_id, channel_id, updated_at)
+		VALUES(?,?,?)
+		ON CONFLICT(alias_channel_id) DO UPDATE SET
+			channel_id=excluded.channel_id,
+			updated_at=excluded.updated_at
+	`, oldChannelID, profile.ChannelID, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func (s *Store) EnsureSubscribedChannel(channelID string, lastSeenSeq, now int64) error {
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err == nil {
+		channelID = canonicalChannelID
+	} else if err != sql.ErrNoRows {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -476,6 +637,11 @@ func (s *Store) CommitOwnedMessageChange(message ChannelMessage, head ChannelHea
 }
 
 func (s *Store) ApplyProfile(profile ChannelProfile) error {
+	if boundOwner, _, err := ParseChannelID(profile.ChannelID); err != nil {
+		return err
+	} else if boundOwner != "" && boundOwner != profile.OwnerPeerID {
+		return fmt.Errorf("channel_id owner mismatch channel=%s channel_owner=%s profile_owner=%s", profile.ChannelID, boundOwner, profile.OwnerPeerID)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -545,6 +711,11 @@ func (s *Store) ApplyProfile(profile ChannelProfile) error {
 }
 
 func (s *Store) ApplyHead(head ChannelHead) error {
+	if boundOwner, _, err := ParseChannelID(head.ChannelID); err != nil {
+		return err
+	} else if boundOwner != "" && boundOwner != head.OwnerPeerID {
+		return fmt.Errorf("channel_id owner mismatch channel=%s channel_owner=%s head_owner=%s", head.ChannelID, boundOwner, head.OwnerPeerID)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -583,6 +754,11 @@ func (s *Store) ApplyHead(head ChannelHead) error {
 }
 
 func (s *Store) ApplyMessage(message ChannelMessage) error {
+	if boundOwner, _, err := ParseChannelID(message.ChannelID); err != nil {
+		return err
+	} else if boundOwner != "" && boundOwner != message.AuthorPeerID {
+		return fmt.Errorf("channel_id owner mismatch channel=%s channel_owner=%s author=%s", message.ChannelID, boundOwner, message.AuthorPeerID)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -923,14 +1099,18 @@ func (s *Store) RecordProviderSyncFailure(channelID, peerID string, now int64) e
 }
 
 func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return ChannelProfile{}, err
+	}
 	var (
 		profile    ChannelProfile
 		avatarJSON string
 	)
-	err := s.db.QueryRow(`
+	err = s.db.QueryRow(`
 		SELECT owner_peer_id, owner_version, name, avatar_json, bio, message_retention_minutes, profile_version, created_at, updated_at, profile_signature
 		FROM public_channels WHERE channel_id=?
-	`, channelID).Scan(
+	`, canonicalChannelID).Scan(
 		&profile.OwnerPeerID,
 		&profile.OwnerVersion,
 		&profile.Name,
@@ -945,17 +1125,21 @@ func (s *Store) GetChannelProfile(channelID string) (ChannelProfile, error) {
 	if err != nil {
 		return ChannelProfile{}, err
 	}
-	profile.ChannelID = channelID
+	profile.ChannelID = canonicalChannelID
 	profile.Avatar = unmarshalAvatar(avatarJSON)
 	return profile, nil
 }
 
 func (s *Store) GetChannelHead(channelID string) (ChannelHead, error) {
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return ChannelHead{}, err
+	}
 	var head ChannelHead
-	err := s.db.QueryRow(`
+	err = s.db.QueryRow(`
 		SELECT owner_peer_id, owner_version, last_message_id, profile_version, last_seq, head_updated_at, head_signature
 		FROM public_channels WHERE channel_id=?
-	`, channelID).Scan(
+	`, canonicalChannelID).Scan(
 		&head.OwnerPeerID,
 		&head.OwnerVersion,
 		&head.LastMessageID,
@@ -967,7 +1151,7 @@ func (s *Store) GetChannelHead(channelID string) (ChannelHead, error) {
 	if err != nil {
 		return ChannelHead{}, err
 	}
-	head.ChannelID = channelID
+	head.ChannelID = canonicalChannelID
 	return head, nil
 }
 
@@ -988,7 +1172,11 @@ func (s *Store) GetChannelSummary(channelID string) (ChannelSummary, error) {
 }
 
 func (s *Store) GetChannelMessage(channelID string, messageID int64) (ChannelMessage, error) {
-	channelDBID, err := s.getChannelDBID(channelID)
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return ChannelMessage{}, err
+	}
+	channelDBID, err := s.getChannelDBID(canonicalChannelID)
 	if err != nil {
 		return ChannelMessage{}, err
 	}
@@ -1018,7 +1206,7 @@ func (s *Store) GetChannelMessage(channelID string, messageID int64) (ChannelMes
 	if err != nil {
 		return ChannelMessage{}, err
 	}
-	msg.ChannelID = channelID
+	msg.ChannelID = canonicalChannelID
 	msg.MessageID = messageID
 	msg.IsDeleted = isDeleted != 0
 	msg.Content = unmarshalContent(contentJSON)
@@ -1026,7 +1214,11 @@ func (s *Store) GetChannelMessage(channelID string, messageID int64) (ChannelMes
 }
 
 func (s *Store) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]ChannelMessage, error) {
-	channelDBID, err := s.getChannelDBID(channelID)
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return nil, err
+	}
+	channelDBID, err := s.getChannelDBID(canonicalChannelID)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1266,7 @@ func (s *Store) GetChannelMessages(channelID string, beforeMessageID int64, limi
 		); err != nil {
 			return nil, err
 		}
-		msg.ChannelID = channelID
+		msg.ChannelID = canonicalChannelID
 		msg.IsDeleted = isDeleted != 0
 		msg.Content = unmarshalContent(contentJSON)
 		out = append(out, msg)
@@ -1083,14 +1275,18 @@ func (s *Store) GetChannelMessages(channelID string, beforeMessageID int64, limi
 }
 
 func (s *Store) GetChannelChanges(channelID string, afterSeq int64, limit int) (GetChangesResponse, error) {
-	channelDBID, err := s.getChannelDBID(channelID)
+	canonicalChannelID, err := s.resolveChannelID(channelID)
+	if err != nil {
+		return GetChangesResponse{}, err
+	}
+	channelDBID, err := s.getChannelDBID(canonicalChannelID)
 	if err != nil {
 		return GetChangesResponse{}, err
 	}
 	if limit <= 0 {
 		limit = DefaultChangesLimit
 	}
-	head, err := s.GetChannelHead(channelID)
+	head, err := s.GetChannelHead(canonicalChannelID)
 	if err != nil {
 		return GetChangesResponse{}, err
 	}
@@ -1105,7 +1301,7 @@ func (s *Store) GetChannelChanges(channelID string, afterSeq int64, limit int) (
 		return GetChangesResponse{}, err
 	}
 	defer rows.Close()
-	resp := GetChangesResponse{ChannelID: channelID, CurrentLastSeq: head.LastSeq}
+	resp := GetChangesResponse{ChannelID: canonicalChannelID, CurrentLastSeq: head.LastSeq}
 	for rows.Next() {
 		var (
 			item       ChannelChange
@@ -1117,7 +1313,7 @@ func (s *Store) GetChannelChanges(channelID string, afterSeq int64, limit int) (
 		if err := rows.Scan(&item.Seq, &item.ChangeType, &messageID, &version, &isDeleted, &profileVer, &item.CreatedAt); err != nil {
 			return GetChangesResponse{}, err
 		}
-		item.ChannelID = channelID
+		item.ChannelID = canonicalChannelID
 		if messageID.Valid {
 			v := messageID.Int64
 			item.MessageID = &v
