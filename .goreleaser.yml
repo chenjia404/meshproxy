@@ -66,6 +66,7 @@ dockers_v2:
   - images:
       - "chenjia404/{{.ProjectName}}"
     tags:
+      - "latest"
       - "dev"
     platforms:
       - linux/amd64
