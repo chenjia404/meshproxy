@@ -655,6 +655,7 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	log.Printf("[publicchannel] subscribe join topic channel=%s seeds=%s", channelID, formatPeerIDsForLog(seedPeerIDs))
 	// 订阅 topic 后主动连接 seed/provider，确保新节点尽快进入 pubsub mesh。
 	s.proactivelyJoinTopicMesh(ctx, channelID, seedPeerIDs)
 	remoteProfile, remoteHead, remoteMessages, providers, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
@@ -692,6 +693,7 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 	if err := s.subscribeTopic(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
+	log.Printf("[publicchannel] subscribe join topic channel=%s seeds=%s", channelID, formatPeerIDsForLog(seedPeerIDs))
 	// 异步订阅同样需要先尝试连上种子节点，否则只 Join topic 不足以进入 gossip mesh。
 	joinCtx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	safe.Go("publicchannel.joinmesh."+channelID, func() {
@@ -1557,8 +1559,10 @@ func (s *Service) provideChannel(channelID string) error {
 func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []string {
 	seen := map[string]struct{}{}
 	var out []string
+	topicPeers := s.topicPeerIDs(channelID)
+	log.Printf("[publicchannel] pubsub topic peers channel=%s peers=%s", channelID, formatPeerIDsForLog(topicPeers))
 	// 已经在当前 topic mesh 里的邻居通常是最容易连通的候选，优先尝试它们。
-	for _, peerID := range s.topicPeerIDs(channelID) {
+	for _, peerID := range topicPeers {
 		if _, ok := seen[peerID]; ok {
 			continue
 		}
@@ -1598,6 +1602,7 @@ func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []strin
 			}
 		}
 	}
+	log.Printf("[publicchannel] sync provider candidates channel=%s peers=%s", channelID, formatPeerIDsForLog(out))
 	return out
 }
 
@@ -1625,6 +1630,7 @@ func (s *Service) topicPeerIDs(channelID string) []string {
 
 func (s *Service) proactivelyJoinTopicMesh(ctx context.Context, channelID string, seedPeerIDs []string) {
 	for _, peerID := range s.mergeChannelPeerIDs(channelID, seedPeerIDs) {
+		log.Printf("[publicchannel] join mesh connect peer channel=%s peer=%s", channelID, peerID)
 		if err := s.connectPeer(ctx, peerID); err != nil {
 			log.Printf("[publicchannel] join mesh channel=%s peer=%s err=%v", channelID, peerID, err)
 		}
@@ -1730,6 +1736,24 @@ func clampInt64(v, minV, maxV int64) int64 {
 		return maxV
 	}
 	return v
+}
+
+func formatPeerIDsForLog(peerIDs []string) string {
+	if len(peerIDs) == 0 {
+		return "[]"
+	}
+	items := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		peerID = strings.TrimSpace(peerID)
+		if peerID == "" {
+			continue
+		}
+		items = append(items, peerID)
+	}
+	if len(items) == 0 {
+		return "[]"
+	}
+	return "[" + strings.Join(items, ",") + "]"
 }
 
 func firstNonEmptyString(v, fallback string) string {
