@@ -1071,6 +1071,166 @@ func TestLoadMessagesFromProvidersFallsBackToNextProvider(t *testing.T) {
 	}
 }
 
+func TestProviderPeerIDsPrefersTopicPeers(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	meshPriv, meshPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	_, stalePeerID := mustTestIdentity(t)
+	meshAddr := mustMultiaddr(t, "/ip6/::1/tcp/12031")
+	readerAddr := mustMultiaddr(t, "/ip6/::1/tcp/12032")
+	meshHost, err := mn.AddPeer(meshPriv, meshAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, readerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mn.ConnectPeers(meshHost.ID(), readerHost.ID()); err != nil {
+		t.Fatal(err)
+	}
+
+	meshPS, err := pubsub.NewGossipSub(ctx, meshHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meshSvc := mustTestService(t, ctx, meshHost, meshPS, meshPriv, filepath.Join(t.TempDir(), "mesh-topic.db"))
+	readerSvc := mustTestService(t, ctx, readerHost, readerPS, readerPriv, filepath.Join(t.TempDir(), "reader-topic.db"))
+
+	channelID := mustUUIDv7(t)
+	now := time.Now().Unix()
+	if err := meshSvc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := readerSvc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := meshSvc.subscribeTopic(channelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := readerSvc.subscribeTopic(channelID); err != nil {
+		t.Fatal(err)
+	}
+	if err := readerSvc.store.UpsertProvider(channelID, stalePeerID, "seed", now); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		peers := readerSvc.topicPeerIDs(channelID)
+		if len(peers) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reader topic did not discover mesh peer in time")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	peers := readerSvc.providerPeerIDs(ctx, channelID)
+	if len(peers) < 2 {
+		t.Fatalf("want at least 2 provider candidates, got %d", len(peers))
+	}
+	if peers[0] != meshPeerID {
+		t.Fatalf("want topic peer %s first, got %s", meshPeerID, peers[0])
+	}
+	if peers[1] != stalePeerID {
+		t.Fatalf("want stored provider %s second, got %s", stalePeerID, peers[1])
+	}
+}
+
+func TestSubscribeChannelAsyncRetriesBootstrapSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+
+	ownerPriv, ownerPeerID := mustTestIdentity(t)
+	readerPriv, _ := mustTestIdentity(t)
+	ownerAddr := mustMultiaddr(t, "/ip6/::1/tcp/12041")
+	readerAddr := mustMultiaddr(t, "/ip6/::1/tcp/12042")
+	ownerHost, err := mn.AddPeer(ownerPriv, ownerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerHost, err := mn.AddPeer(readerPriv, readerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mn.LinkAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPS, err := pubsub.NewGossipSub(ctx, ownerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerPS, err := pubsub.NewGossipSub(ctx, readerHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerSvc := mustTestService(t, ctx, ownerHost, ownerPS, ownerPriv, filepath.Join(t.TempDir(), "owner-bootstrap-retry.db"))
+	readerSvc, err := newServiceWithConfig(ctx, filepath.Join(t.TempDir(), "reader-bootstrap-retry.db"), readerHost, nil, readerPS, serviceConfig{
+		bootstrapRetryBackoffs: []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerSvc.SetNodePrivateKey(readerPriv)
+	t.Cleanup(func() { _ = readerSvc.Close() })
+
+	summary, err := ownerSvc.CreateChannel(CreateChannelInput{Name: "bootstrap-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelID := summary.Profile.ChannelID
+
+	if _, err := readerSvc.SubscribeChannelAsync(channelID, []string{ownerPeerID}, 0); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := readerSvc.GetChannelProfile(channelID)
+	if err != nil {
+		t.Fatalf("want placeholder channel row before retry succeeds, got err=%v", err)
+	}
+	if profile.OwnerPeerID != "" {
+		t.Fatalf("want placeholder profile before retry succeeds, got owner=%s", profile.OwnerPeerID)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	readerHost.Peerstore().AddAddrs(ownerHost.ID(), ownerHost.Addrs(), time.Hour)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		profile, err := readerSvc.GetChannelProfile(channelID)
+		if err == nil && profile.OwnerPeerID == ownerPeerID {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bootstrap retry did not fetch channel profile in time, last err=%v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func TestCreateChannelReturnsBeforeProvideCompletes(t *testing.T) {
 	t.Parallel()
 
@@ -1217,9 +1377,24 @@ func TestProvideRetryDelayStartsFromAttemptFinish(t *testing.T) {
 	}
 	routing.waitForProvideCount(t, 1, 2*time.Second)
 
-	svc.provideMu.Lock()
-	state := svc.provideStates[summary.Profile.ChannelID]
-	svc.provideMu.Unlock()
+	var state *provideState
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		svc.provideMu.Lock()
+		state = svc.provideStates[summary.Profile.ChannelID]
+		lastProvideErrAt := int64(0)
+		if state != nil {
+			lastProvideErrAt = state.lastProvideErrAt
+		}
+		svc.provideMu.Unlock()
+		if state != nil && lastProvideErrAt != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if state == nil {
 		t.Fatal("want provide state after failed attempt")
 	}

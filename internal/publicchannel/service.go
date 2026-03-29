@@ -44,6 +44,7 @@ type Service struct {
 	provideStates           map[string]*provideState
 	provideWakeCh           chan struct{}
 	provideRetryBackoffs    []time.Duration
+	bootstrapRetryBackoffs  []time.Duration
 	provideSuccessInterval  time.Duration
 	provideLoopInterval     time.Duration
 	provideTimeout          time.Duration
@@ -53,6 +54,7 @@ type Service struct {
 
 type serviceConfig struct {
 	provideRetryBackoffs    []time.Duration
+	bootstrapRetryBackoffs  []time.Duration
 	provideSuccessInterval  time.Duration
 	provideLoopInterval     time.Duration
 	provideTimeout          time.Duration
@@ -90,6 +92,7 @@ type ipfsFilePinner interface {
 func defaultServiceConfig() serviceConfig {
 	return serviceConfig{
 		provideRetryBackoffs:    []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute},
+		bootstrapRetryBackoffs:  []time.Duration{3 * time.Second, 10 * time.Second, 30 * time.Second, 60 * time.Second},
 		provideSuccessInterval:  20 * time.Minute,
 		provideLoopInterval:     time.Second,
 		provideTimeout:          30 * time.Second,
@@ -111,6 +114,9 @@ func newServiceWithConfig(ctx context.Context, dbPath string, h host.Host, routi
 	}
 	if len(cfg.provideRetryBackoffs) == 0 {
 		cfg.provideRetryBackoffs = defaultServiceConfig().provideRetryBackoffs
+	}
+	if len(cfg.bootstrapRetryBackoffs) == 0 {
+		cfg.bootstrapRetryBackoffs = defaultServiceConfig().bootstrapRetryBackoffs
 	}
 	if cfg.provideSuccessInterval <= 0 {
 		cfg.provideSuccessInterval = defaultServiceConfig().provideSuccessInterval
@@ -139,6 +145,7 @@ func newServiceWithConfig(ctx context.Context, dbPath string, h host.Host, routi
 		provideStates:           make(map[string]*provideState),
 		provideWakeCh:           make(chan struct{}, 1),
 		provideRetryBackoffs:    append([]time.Duration(nil), cfg.provideRetryBackoffs...),
+		bootstrapRetryBackoffs:  append([]time.Duration(nil), cfg.bootstrapRetryBackoffs...),
 		provideSuccessInterval:  cfg.provideSuccessInterval,
 		provideLoopInterval:     cfg.provideLoopInterval,
 		provideTimeout:          cfg.provideTimeout,
@@ -728,16 +735,34 @@ func (s *Service) applyInitialSnapshot(ctx context.Context, channelID string, re
 
 func (s *Service) bootstrapSubscriptionAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) {
 	safe.Go("publicchannel.subscribe.bootstrap."+channelID, func() {
-		ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
-		defer cancel()
-		now := time.Now().Unix()
-		remoteProfile, remoteHead, remoteMessages, _, err := s.fetchInitialSnapshot(ctx, channelID, seedPeerIDs)
-		if err != nil {
-			log.Printf("[publicchannel] async subscribe snapshot %s: %v", channelID, err)
+		maxAttempts := len(s.bootstrapRetryBackoffs) + 1
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if attempt > 1 {
+				delay := s.bootstrapRetryBackoffs[attempt-2]
+				timer := time.NewTimer(delay)
+				select {
+				case <-s.ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			fetchCtx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+			now := s.nowUnix()
+			remoteProfile, remoteHead, remoteMessages, _, err := s.fetchInitialSnapshot(fetchCtx, channelID, seedPeerIDs)
+			cancel()
+			if err != nil {
+				log.Printf("[publicchannel] async subscribe snapshot channel=%s attempt=%d/%d err=%v", channelID, attempt, maxAttempts, err)
+				continue
+			}
+			applyCtx, applyCancel := context.WithTimeout(s.ctx, 20*time.Second)
+			err = s.applyInitialSnapshot(applyCtx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now)
+			applyCancel()
+			if err != nil {
+				log.Printf("[publicchannel] async subscribe apply channel=%s attempt=%d/%d err=%v", channelID, attempt, maxAttempts, err)
+				continue
+			}
 			return
-		}
-		if err := s.applyInitialSnapshot(ctx, channelID, remoteProfile, remoteHead, remoteMessages, seedPeerIDs, lastSeenSeq, now); err != nil {
-			log.Printf("[publicchannel] async subscribe apply %s: %v", channelID, err)
 		}
 	})
 }
@@ -1523,6 +1548,15 @@ func (s *Service) provideChannel(channelID string) error {
 func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []string {
 	seen := map[string]struct{}{}
 	var out []string
+	// 已经在当前 topic mesh 里的邻居通常是最容易连通的候选，优先尝试它们。
+	for _, peerID := range s.topicPeerIDs(channelID) {
+		if _, ok := seen[peerID]; ok {
+			continue
+		}
+		seen[peerID] = struct{}{}
+		out = append(out, peerID)
+		_ = s.upsertProviderIfKnown(channelID, peerID, "pubsub_mesh", s.nowUnix())
+	}
 	providers, _ := s.store.ListProviders(channelID)
 	for _, item := range providers {
 		if item.PeerID == "" {
@@ -1537,7 +1571,8 @@ func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []strin
 	if cr, ok := s.routing.(contentRouter); ok {
 		key, err := providerCID(channelID)
 		if err == nil {
-			findCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+			// DHT provider 广告收敛偏慢，这里给稍长一点的窗口，减少“频道明明存在但还没找到”的概率。
+			findCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			for info := range cr.FindProvidersAsync(findCtx, key, DefaultProviderFind) {
 				if info.ID == "" {
@@ -1553,6 +1588,28 @@ func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []strin
 				_ = s.upsertProviderIfKnown(channelID, peerID, "dht", time.Now().Unix())
 			}
 		}
+	}
+	return out
+}
+
+func (s *Service) topicPeerIDs(channelID string) []string {
+	s.subMu.Lock()
+	item := s.subs[channelID]
+	s.subMu.Unlock()
+	if item == nil || item.topic == nil {
+		return nil
+	}
+	peers := item.topic.ListPeers()
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(peers))
+	for _, pid := range peers {
+		peerID := strings.TrimSpace(pid.String())
+		if peerID == "" {
+			continue
+		}
+		out = append(out, peerID)
 	}
 	return out
 }
