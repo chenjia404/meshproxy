@@ -228,7 +228,9 @@ func (s *Service) AcceptGroupInvite(groupID string) (Group, error) {
 			return Group{}, err
 		}
 		if err := s.sendEnvelope(group.ControllerPeerID, req); err != nil {
-			return Group{}, err
+			if storeErr := s.submitOfflineGroupWire(group.ControllerPeerID, req, false); storeErr != nil {
+				return Group{}, fmt.Errorf("send join request: %w; offline store: %v", err, storeErr)
+			}
 		}
 		return s.syncAcceptedInviteState(groupID, group.ControllerPeerID)
 	}
@@ -292,7 +294,9 @@ func (s *Service) LeaveGroup(groupID, reason string) (Group, error) {
 			return Group{}, err
 		}
 		if err := s.sendEnvelope(group.ControllerPeerID, req); err != nil {
-			return Group{}, err
+			if storeErr := s.submitOfflineGroupWire(group.ControllerPeerID, req, false); storeErr != nil {
+				return Group{}, fmt.Errorf("send leave request: %w; offline store: %v", err, storeErr)
+			}
 		}
 		return s.store.GetGroup(groupID)
 	}
@@ -700,10 +704,13 @@ func (s *Service) SendGroupText(groupID, text string) (GroupMessage, error) {
 	failedCount := 0
 	for _, peerID := range recipients {
 		if err := s.sendEnvelope(peerID, wire); err != nil {
-			failedCount++
-			_ = s.scheduleGroupDeliveryRetry(msg.MsgID, peerID, 1)
-			log.Printf("[group] send text group=%s peer=%s failed: %v", groupID, peerID, err)
-			continue
+			if storeErr := s.submitOfflineGroupWire(peerID, wire, false); storeErr != nil {
+				failedCount++
+				_ = s.scheduleGroupDeliveryRetry(msg.MsgID, peerID, 1)
+				log.Printf("[group] send text group=%s peer=%s failed: %v; offline store: %v", groupID, peerID, err, storeErr)
+				continue
+			}
+			log.Printf("[group] send text group=%s peer=%s fallback=offline_store after err=%v", groupID, peerID, err)
 		}
 		sentCount++
 		_ = s.store.MarkGroupDeliveryState(msg.MsgID, peerID, GroupDeliveryStateSentToTransport, time.Time{})
@@ -817,10 +824,13 @@ func (s *Service) SendGroupFile(groupID, fileName, mimeType string, data []byte)
 	failedCount := 0
 	for _, peerID := range recipients {
 		if err := s.sendEnvelope(peerID, wire); err != nil {
-			failedCount++
-			_ = s.scheduleGroupDeliveryRetry(msg.MsgID, peerID, 1)
-			log.Printf("[group] send file group=%s peer=%s failed: %v", groupID, peerID, err)
-			continue
+			if storeErr := s.submitOfflineGroupWire(peerID, wire, false); storeErr != nil {
+				failedCount++
+				_ = s.scheduleGroupDeliveryRetry(msg.MsgID, peerID, 1)
+				log.Printf("[group] send file group=%s peer=%s failed: %v; offline store: %v", groupID, peerID, err, storeErr)
+				continue
+			}
+			log.Printf("[group] send file group=%s peer=%s fallback=offline_store after err=%v", groupID, peerID, err)
 		}
 		sentCount++
 		_ = s.store.MarkGroupDeliveryState(msg.MsgID, peerID, GroupDeliveryStateSentToTransport, time.Time{})
@@ -1001,7 +1011,11 @@ func (s *Service) retryGroupDelivery(item groupRetryDelivery) error {
 		return err
 	}
 	if err := s.sendEnvelope(item.PeerID, wire); err != nil {
-		return s.scheduleGroupDeliveryRetry(item.MsgID, item.PeerID, item.RetryCount+1)
+		if storeErr := s.submitOfflineGroupWire(item.PeerID, wire, false); storeErr != nil {
+			log.Printf("[group] retry delivery offline store failed group=%s msg=%s peer=%s send_err=%v store_err=%v", item.GroupID, item.MsgID, item.PeerID, err, storeErr)
+			return s.scheduleGroupDeliveryRetry(item.MsgID, item.PeerID, item.RetryCount+1)
+		}
+		log.Printf("[group] retry delivery fallback=offline_store group=%s msg=%s peer=%s send_err=%v", item.GroupID, item.MsgID, item.PeerID, err)
 	}
 	return s.store.MarkGroupDeliveryState(item.MsgID, item.PeerID, GroupDeliveryStateSentToTransport, time.Time{})
 }
@@ -1079,7 +1093,11 @@ func (s *Service) retryGroupEventDelivery(item groupRetryEventDelivery) error {
 		Signature:     item.Signature,
 	}
 	if err := s.sendEnvelope(item.PeerID, env); err != nil {
-		return s.scheduleGroupEventDeliveryRetry(item.EventID, item.PeerID, item.RetryCount+1)
+		if storeErr := s.submitOfflineGroupWire(item.PeerID, env, false); storeErr != nil {
+			log.Printf("[group] retry event offline store failed group=%s event=%s peer=%s send_err=%v store_err=%v", item.GroupID, item.EventID, item.PeerID, err, storeErr)
+			return s.scheduleGroupEventDeliveryRetry(item.EventID, item.PeerID, item.RetryCount+1)
+		}
+		log.Printf("[group] retry event fallback=offline_store group=%s event=%s peer=%s send_err=%v", item.GroupID, item.EventID, item.PeerID, err)
 	}
 	return s.store.MarkGroupEventDeliverySent(item.EventID, item.PeerID)
 }
@@ -2111,9 +2129,12 @@ func (s *Service) broadcastGroupEvent(groupID string, event GroupEvent, peerIDs 
 			continue
 		}
 		if err := s.sendEnvelope(peerID, env); err != nil {
-			_ = s.scheduleGroupEventDeliveryRetry(event.EventID, peerID, 1)
-			log.Printf("[group] broadcast event=%s group=%s peer=%s failed: %v", event.EventType, groupID, peerID, err)
-			continue
+			if storeErr := s.submitOfflineGroupWire(peerID, env, false); storeErr != nil {
+				_ = s.scheduleGroupEventDeliveryRetry(event.EventID, peerID, 1)
+				log.Printf("[group] broadcast event=%s group=%s peer=%s failed: %v; offline store: %v", event.EventType, groupID, peerID, err, storeErr)
+				continue
+			}
+			log.Printf("[group] broadcast event=%s group=%s peer=%s fallback=offline_store after err=%v", event.EventType, groupID, peerID, err)
 		}
 		_ = s.store.MarkGroupEventDeliverySent(event.EventID, peerID)
 	}

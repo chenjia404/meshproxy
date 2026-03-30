@@ -763,6 +763,43 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 
 ---
 
+### 群組協定的離線 `store` 兜底
+
+群組流量除原本的 **direct** / **relay** 外，現在也會在特定情況下寫入離線 **`store`**。這是**傳輸層兜底**，不是新的 HTTP API，也**不改變**本節各接口的請求 / 回應格式。
+
+#### 目前會寫入 `store` 的群組載荷
+
+- **群組正文訊息**：`group_chat_text`、`group_chat_file`
+- **群控事件**：`group_control`
+- **群組請求**：`group_join_request`、`group_leave_request`
+
+#### 觸發條件
+
+- 發送端先按既有邏輯嘗試 **直連** 與 **relay**
+- 若該次送出失敗，會再嘗試把對應收件者的一份群組 wire 載荷寫入其離線 `store`
+- 若寫入 `store` 成功，發送端會把該次投遞視為已進入傳輸層，等待對端後續拉取並處理
+
+#### 接收端行為
+
+- 接收端定期從已配置的離線 `store` 拉取待處理項目
+- 拉取到的群組載荷會先驗證 **外層 store envelope 簽名**
+- 再解析內層群組 wire，復用既有群組驗簽 / 落庫 / ACK / 事件套用流程
+- 對於正文訊息，最終仍以 `GroupMessage` / `GroupDeliverySummary` 等既有資料模型對外呈現
+- 對於群控事件，最終仍以本地群組狀態變化為準，例如標題更新、成員加入 / 退出、控制者變更等
+
+#### 邊界與限制
+
+| 情況 | 行為 |
+|------|------|
+| **未配置離線 `store`** | 群組仍只走 direct / relay；本節兜底能力不生效。 |
+| **direct / relay 成功** | 不會因為已成功送達而額外再寫一份群組離線 `store`。 |
+| **某位成員 direct / relay 失敗，但 `store` 寫入成功** | 該成員後續可在離線時段結束後由自己拉取；發送端本地投遞狀態會先視為已送入傳輸層。 |
+| **某位成員 direct / relay 與 `store` 都失敗** | 仍走既有重試邏輯。 |
+| **`group_invite_notice`** | 這條仍是**單聊私訊**，走單聊離線 `store` 邏輯，不屬於本節「群組協定離線載荷」。 |
+| **`group_sync_request` / `group_sync_response` / `group_delivery_ack`** | 目前**不**寫入群組離線 `store`；仍依賴在線 direct / relay。 |
+
+---
+
 ### `GET /api/v1/groups/{group_id}`
 
 | 項目 | 說明 |
@@ -833,6 +870,11 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 
 **請求 body 摘要**：`invite`：`peer_id`、`role`、`invite_text`；`leave`/`dissolve`：可選 `reason`；`remove`：`peer_id`、`reason`；`title`：`title`；`retention`：`retention_minutes`；`controller`：`peer_id`。
 
+**補充**：
+
+- `join`、`leave` 在非控制者路徑下，實際會發送 `group_join_request` / `group_leave_request` 給控制者；若當次 direct / relay 失敗，會再嘗試寫入群組離線 `store`。
+- `invite`、`remove`、`title`、`retention`、`dissolve`、`controller` 成功落庫後，對外成員廣播的是 `group_control`；若當次廣播 direct / relay 失敗，也會再嘗試寫入群組離線 `store`。
+
 ---
 
 ### `GET` / `POST /api/v1/groups/{group_id}/messages`
@@ -878,6 +920,11 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 
 **POST 回應欄位**：單一 **`GroupMessage`** 物件，欄位同上表。
 
+**補充**：
+
+- `POST` 發送文字時，對每位目標成員會先嘗試 direct / relay；失敗時再嘗試將該筆 `group_chat_text` 寫入該成員離線 `store`。
+- 這表示 **200 OK** 僅代表「本地已建立並開始投遞」，不代表所有成員都已即時在線收到；實際送達情況請看後續 `delivery_summary` / WebSocket 狀態事件。
+
 ---
 
 ### `POST /api/v1/groups/{group_id}/files`
@@ -890,6 +937,10 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 | Content-Type | `application/json` |
 
 **回應欄位**：單一 **`GroupMessage`** 物件，欄位同本節 **GET 陣列元素**之 `GroupMessage` 表。
+
+**補充**：
+
+- 檔案群訊息的離線兜底與文字相同：direct / relay 失敗時，會再嘗試把 `group_chat_file` 寫入收件者離線 `store`。
 
 ---
 

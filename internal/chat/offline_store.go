@@ -36,6 +36,10 @@ const (
 	offlineStoreConnectTimeout = 30 * time.Second
 	// offlineStoreKeepAliveInterval 周期性确保与已配置 store 仍连接并维持 Protect。
 	offlineStoreKeepAliveInterval = 2 * time.Minute
+
+	// OfflineGroupWireAlgoV1 表示离线 store 中承载的是完整群聊 wire 消息 JSON；
+	// 外层 store envelope 负责 recipient 级签名，内层仍保留群消息自身签名。
+	OfflineGroupWireAlgoV1 = "mesh-group-wire-v1"
 )
 
 type offlineFetchItemError struct {
@@ -213,6 +217,22 @@ func (s *Service) tryOfflineStoreSubmit(msg Message, storedBlob, cachedCiphertex
 	return s.submitSignedOfflineEnvelope(env, quiet)
 }
 
+// submitOfflineGroupWire 将单个群组协议载荷投递到指定接收者的离线 store。
+// 这里存的是完整群组 wire JSON，而不是再次用私聊会话密钥加密后的载荷。
+func (s *Service) submitOfflineGroupWire(recipientPeerID string, wire any, quiet bool) error {
+	if s == nil || s.nodePriv == nil || s.host == nil {
+		return errors.New("offline store: not configured")
+	}
+	env, err := s.buildOfflineGroupEnvelope(recipientPeerID, wire)
+	if err != nil {
+		return err
+	}
+	if err := signOfflineEnvelope(s.nodePriv, env, offlineDefaultTTLSec); err != nil {
+		return err
+	}
+	return s.submitSignedOfflineEnvelope(env, quiet)
+}
+
 // submitSignedOfflineEnvelope 將已簽名的 OfflineMessageEnvelope 並發提交到配置的 store 節點。
 // quiet 為 true 時不記錄「submitting / submit ok」（例如中繼已成功後的冗餘寫入）。
 func (s *Service) submitSignedOfflineEnvelope(env *OfflineMessageEnvelope, quiet bool) error {
@@ -319,6 +339,168 @@ func (s *Service) buildOfflineEnvelope(msg Message, storedBlob, cachedCiphertext
 		Signature: OfflineSignature{},
 	}
 	return env, nil
+}
+
+func (s *Service) buildOfflineGroupEnvelope(recipientPeerID string, wire any) (*OfflineMessageEnvelope, error) {
+	if strings.TrimSpace(recipientPeerID) == "" {
+		return nil, errors.New("offline group envelope: empty recipient")
+	}
+	nowUnixMillis := time.Now().UTC().UnixMilli()
+	ttl := offlineDefaultTTLSec
+	switch msg := wire.(type) {
+	case GroupControlEnvelope:
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		return &OfflineMessageEnvelope{
+			Version:        1,
+			MsgID:          firstNonEmptyString(msg.EventID, fmt.Sprintf("group-control-%s-%d", msg.GroupID, msg.EventSeq)),
+			SenderID:       msg.SignerPeerID,
+			RecipientID:    recipientPeerID,
+			ConversationID: msg.GroupID,
+			CreatedAt:      firstNonZeroInt64(msg.CreatedAtUnix, nowUnixMillis),
+			TTLSec:         &ttl,
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineGroupWireAlgoV1,
+				RecipientKeyID: encodeRecipientKeyID(msg.EventSeq, MessageTypeGroupControl),
+				Nonce:          "",
+				Ciphertext:     base64.StdEncoding.EncodeToString(raw),
+			},
+			Signature: OfflineSignature{},
+		}, nil
+	case *GroupControlEnvelope:
+		if msg == nil {
+			return nil, errors.New("offline group envelope: nil group control")
+		}
+		return s.buildOfflineGroupEnvelope(recipientPeerID, *msg)
+	case GroupJoinRequest:
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		return &OfflineMessageEnvelope{
+			Version:        1,
+			MsgID:          fmt.Sprintf("group-join-%s-%s-%d", msg.GroupID, msg.JoinerPeerID, msg.SentAtUnix),
+			SenderID:       msg.JoinerPeerID,
+			RecipientID:    recipientPeerID,
+			ConversationID: msg.GroupID,
+			CreatedAt:      firstNonZeroInt64(msg.SentAtUnix, nowUnixMillis),
+			TTLSec:         &ttl,
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineGroupWireAlgoV1,
+				RecipientKeyID: encodeRecipientKeyID(msg.AcceptedEpoch, MessageTypeGroupJoinRequest),
+				Nonce:          "",
+				Ciphertext:     base64.StdEncoding.EncodeToString(raw),
+			},
+			Signature: OfflineSignature{},
+		}, nil
+	case *GroupJoinRequest:
+		if msg == nil {
+			return nil, errors.New("offline group envelope: nil group join request")
+		}
+		return s.buildOfflineGroupEnvelope(recipientPeerID, *msg)
+	case GroupLeaveRequest:
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		return &OfflineMessageEnvelope{
+			Version:        1,
+			MsgID:          fmt.Sprintf("group-leave-%s-%s-%d", msg.GroupID, msg.LeaverPeerID, msg.SentAtUnix),
+			SenderID:       msg.LeaverPeerID,
+			RecipientID:    recipientPeerID,
+			ConversationID: msg.GroupID,
+			CreatedAt:      firstNonZeroInt64(msg.SentAtUnix, nowUnixMillis),
+			TTLSec:         &ttl,
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineGroupWireAlgoV1,
+				RecipientKeyID: encodeRecipientKeyID(0, MessageTypeGroupLeaveRequest),
+				Nonce:          "",
+				Ciphertext:     base64.StdEncoding.EncodeToString(raw),
+			},
+			Signature: OfflineSignature{},
+		}, nil
+	case *GroupLeaveRequest:
+		if msg == nil {
+			return nil, errors.New("offline group envelope: nil group leave request")
+		}
+		return s.buildOfflineGroupEnvelope(recipientPeerID, *msg)
+	case GroupChatText:
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		nonce := protocol.BuildGroupChatNonce(msg.GroupID, msg.SenderPeerID, msg.SenderSeq)
+		return &OfflineMessageEnvelope{
+			Version:        1,
+			MsgID:          msg.MsgID,
+			SenderID:       msg.SenderPeerID,
+			RecipientID:    recipientPeerID,
+			ConversationID: msg.GroupID,
+			CreatedAt:      firstNonZeroInt64(msg.SentAtUnix, nowUnixMillis),
+			TTLSec:         &ttl,
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineGroupWireAlgoV1,
+				RecipientKeyID: encodeRecipientKeyID(msg.SenderSeq, MessageTypeGroupChatText),
+				Nonce:          base64.StdEncoding.EncodeToString(nonce),
+				Ciphertext:     base64.StdEncoding.EncodeToString(raw),
+			},
+			Signature: OfflineSignature{},
+		}, nil
+	case *GroupChatText:
+		if msg == nil {
+			return nil, errors.New("offline group envelope: nil group chat text")
+		}
+		return s.buildOfflineGroupEnvelope(recipientPeerID, *msg)
+	case GroupChatFile:
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		nonce := protocol.BuildGroupChatNonce(msg.GroupID, msg.SenderPeerID, msg.SenderSeq)
+		return &OfflineMessageEnvelope{
+			Version:        1,
+			MsgID:          msg.MsgID,
+			SenderID:       msg.SenderPeerID,
+			RecipientID:    recipientPeerID,
+			ConversationID: msg.GroupID,
+			CreatedAt:      firstNonZeroInt64(msg.SentAtUnix, nowUnixMillis),
+			TTLSec:         &ttl,
+			Cipher: OfflineCipherPayload{
+				Algorithm:      OfflineGroupWireAlgoV1,
+				RecipientKeyID: encodeRecipientKeyID(msg.SenderSeq, MessageTypeGroupChatFile),
+				Nonce:          base64.StdEncoding.EncodeToString(nonce),
+				Ciphertext:     base64.StdEncoding.EncodeToString(raw),
+			},
+			Signature: OfflineSignature{},
+		}, nil
+	case *GroupChatFile:
+		if msg == nil {
+			return nil, errors.New("offline group envelope: nil group chat file")
+		}
+		return s.buildOfflineGroupEnvelope(recipientPeerID, *msg)
+	default:
+		return nil, fmt.Errorf("offline group envelope: unsupported wire type %T", wire)
+	}
+}
+
+func firstNonZeroInt64(vs ...int64) int64 {
+	for _, v := range vs {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstNonEmptyString(vs ...string) string {
+	for _, v := range vs {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func offlineSentAtUnix(env *OfflineMessageEnvelope) int64 {
@@ -615,6 +797,15 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 		log.Printf("[chat] offline fetch item friend-control done store_seq=%d msg=%s", seq, env.MsgID)
 		return seq, nil
 	}
+	if env.Cipher.Algorithm == OfflineGroupWireAlgoV1 {
+		log.Printf("[chat] offline fetch item group-wire begin store_seq=%d msg=%s", seq, env.MsgID)
+		if err := s.processOfflineGroupPayload(env, seq); err != nil {
+			return seq, fmt.Errorf("store_seq=%d msg=%s conv=%s from=%s algo=%s: process offline group payload: %w",
+				seq, env.MsgID, env.ConversationID, env.SenderID, env.Cipher.Algorithm, err)
+		}
+		log.Printf("[chat] offline fetch item group-wire done store_seq=%d msg=%s", seq, env.MsgID)
+		return seq, nil
+	}
 	counter, msgType, err := decodeRecipientKeyID(env.Cipher.RecipientKeyID)
 	if err != nil {
 		return seq, newPermanentOfflineFetchItemError(err)
@@ -640,4 +831,112 @@ func (s *Service) processOneOfflineFetchItem(raw []byte) (storeSeq uint64, err e
 	}
 	log.Printf("[chat] offline fetch item chat done store_seq=%d msg=%s type=%s counter=%d", seq, env.MsgID, msgType, counter)
 	return seq, nil
+}
+
+func (s *Service) processOfflineGroupPayload(env *OfflineMessageEnvelope, storeSeq uint64) error {
+	if env == nil {
+		return newPermanentOfflineFetchItemError(errors.New("nil offline group envelope"))
+	}
+	if env.Cipher.Algorithm != OfflineGroupWireAlgoV1 {
+		return newPermanentOfflineFetchItemError(fmt.Errorf("unsupported offline group algorithm %q", env.Cipher.Algorithm))
+	}
+	_, msgType, err := decodeRecipientKeyID(env.Cipher.RecipientKeyID)
+	if err != nil {
+		return newPermanentOfflineFetchItemError(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(env.Cipher.Ciphertext)
+	if err != nil {
+		return newPermanentOfflineFetchItemError(err)
+	}
+	switch msgType {
+	case MessageTypeGroupControl, MessageTypeGroupJoinRequest, MessageTypeGroupLeaveRequest:
+		var rawEnv map[string]any
+		if err := json.Unmarshal(raw, &rawEnv); err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		groupID, senderPeerID, err := offlineGroupEnvelopeIdentity(rawEnv)
+		if err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		if strings.TrimSpace(groupID) == "" {
+			return newPermanentOfflineFetchItemError(errors.New("offline group control: empty group_id"))
+		}
+		if groupID != strings.TrimSpace(env.ConversationID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group control: group_id mismatch"))
+		}
+		if senderPeerID != strings.TrimSpace(env.SenderID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group control: sender mismatch"))
+		}
+		log.Printf("[group] offline store control store_seq=%d type=%s group=%s sender=%s",
+			storeSeq, msgType, groupID, senderPeerID)
+		return s.processGroupEnvelope(rawEnv)
+	case MessageTypeGroupChatText:
+		var msg GroupChatText
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		if strings.TrimSpace(msg.GroupID) == "" {
+			return newPermanentOfflineFetchItemError(errors.New("offline group text: empty group_id"))
+		}
+		if msg.GroupID != strings.TrimSpace(env.ConversationID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group text: group_id mismatch"))
+		}
+		if msg.SenderPeerID != strings.TrimSpace(env.SenderID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group text: sender mismatch"))
+		}
+		if err := s.verifyGroupChatText(msg); err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		log.Printf("[group] offline store text store_seq=%d group=%s msg=%s sender=%s seq=%d",
+			storeSeq, msg.GroupID, msg.MsgID, msg.SenderPeerID, msg.SenderSeq)
+		return s.handleIncomingGroupText(msg)
+	case MessageTypeGroupChatFile:
+		var msg GroupChatFile
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		if strings.TrimSpace(msg.GroupID) == "" {
+			return newPermanentOfflineFetchItemError(errors.New("offline group file: empty group_id"))
+		}
+		if msg.GroupID != strings.TrimSpace(env.ConversationID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group file: group_id mismatch"))
+		}
+		if msg.SenderPeerID != strings.TrimSpace(env.SenderID) {
+			return newPermanentOfflineFetchItemError(errors.New("offline group file: sender mismatch"))
+		}
+		if err := s.verifyGroupChatFile(msg); err != nil {
+			return newPermanentOfflineFetchItemError(err)
+		}
+		log.Printf("[group] offline store file store_seq=%d group=%s msg=%s sender=%s seq=%d",
+			storeSeq, msg.GroupID, msg.MsgID, msg.SenderPeerID, msg.SenderSeq)
+		return s.handleIncomingGroupFile(msg)
+	default:
+		return newPermanentOfflineFetchItemError(fmt.Errorf("unsupported offline group msg_type %q", msgType))
+	}
+}
+
+func offlineGroupEnvelopeIdentity(env map[string]any) (groupID string, senderPeerID string, err error) {
+	typeName, _ := env["type"].(string)
+	switch typeName {
+	case MessageTypeGroupControl:
+		var ctrl GroupControlEnvelope
+		if err := remarshal(env, &ctrl); err != nil {
+			return "", "", err
+		}
+		return ctrl.GroupID, ctrl.SignerPeerID, nil
+	case MessageTypeGroupJoinRequest:
+		var req GroupJoinRequest
+		if err := remarshal(env, &req); err != nil {
+			return "", "", err
+		}
+		return req.GroupID, req.JoinerPeerID, nil
+	case MessageTypeGroupLeaveRequest:
+		var req GroupLeaveRequest
+		if err := remarshal(env, &req); err != nil {
+			return "", "", err
+		}
+		return req.GroupID, req.LeaverPeerID, nil
+	default:
+		return "", "", fmt.Errorf("unsupported group envelope type %q", typeName)
+	}
 }
