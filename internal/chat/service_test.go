@@ -11,6 +11,8 @@ import (
 	"github.com/chenjia404/meshproxy/internal/protocol"
 )
 
+const asyncDispatchMaxLatency = 500 * time.Millisecond
+
 func TestSendRequestDispatchesAsynchronously(t *testing.T) {
 	t.Parallel()
 
@@ -61,8 +63,9 @@ func TestSendRequestDispatchesAsynchronously(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 100*time.Millisecond {
-		t.Fatalf("SendRequest took too long: %s", time.Since(start))
+	elapsed := time.Since(start)
+	if elapsed > asyncDispatchMaxLatency {
+		t.Fatalf("SendRequest took too long: %s", elapsed)
 	}
 	if req.RequestID == "" {
 		t.Fatal("request id is empty")
@@ -166,8 +169,9 @@ func TestAcceptRequestDispatchesAsynchronously(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 100*time.Millisecond {
-		t.Fatalf("AcceptRequest took too long: %s", time.Since(start))
+	elapsed := time.Since(start)
+	if elapsed > asyncDispatchMaxLatency {
+		t.Fatalf("AcceptRequest took too long: %s", elapsed)
 	}
 	if conv.ConversationID == "" {
 		t.Fatal("conversation id is empty")

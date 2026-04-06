@@ -12,7 +12,7 @@ import (
 // 中繼路徑無法綁定 libp2p RemotePeer，因此對「聲稱的發件人」用 libp2p 身份密鑰簽名；簽名域與訊息類型綁定以防跨類型重放。
 
 func relaySignMessage(kind string, canonical []byte) []byte {
-	return append(append([]byte("mesh-proxy/chat/relay/v1:"+kind+"\n"), canonical...))
+	return append([]byte("mesh-proxy/chat/relay/v1:"+kind+"\n"), canonical...)
 }
 
 func (s *Service) relaySignerMustBeLocal(fromPeerID string) error {
