@@ -4,3 +4,9 @@ vendor
 *.tmp
 *.swp
 dist
+.gocache/
+.gocache_review/
+.gomodcache/
+.gomodcache_review/
+.gopath/
+*.exe

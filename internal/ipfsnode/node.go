@@ -6,14 +6,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ipfs/boxo/bitswap"
 	bsnet "github.com/ipfs/boxo/bitswap/network/bsnet"
 	"github.com/ipfs/boxo/blockservice"
 	blockstore "github.com/ipfs/boxo/blockstore"
+	offlineexchange "github.com/ipfs/boxo/exchange/offline"
 	"github.com/ipfs/boxo/ipld/merkledag"
+	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-datastore"
+	dssync "github.com/ipfs/go-datastore/sync"
+	carv2 "github.com/ipld/go-car/v2"
 	host "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/routing"
 
@@ -29,6 +36,9 @@ import (
 
 // ErrNotImplemented 目錄匯入等尚未實作時使用。
 var ErrNotImplemented = errors.New("not implemented")
+
+// ErrMirrorCIDMismatch 表示 HTTP 鏡像閘道返回的內容經 UnixFS 導入後 CID 與目標不一致。
+var ErrMirrorCIDMismatch = errors.New("ipfs mirror content cid mismatch")
 
 // EmbeddedIPFS 綁定共享 libp2p host 的 IPFS 子系統。
 type EmbeddedIPFS struct {
@@ -137,6 +147,9 @@ type service struct {
 	bsvc  blockservice.BlockService
 	dag   ipld.DAGService
 	pins  *ipfspin.FileStore
+
+	httpMirrorGateway string
+	httpClient        *http.Client
 }
 
 // NewEmbeddedIPFS 使用既有 host 與 routing（DHT）建立嵌入式 IPFS；baseIPFSDir 通常為 $DataDir/ipfs。
@@ -172,13 +185,17 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 	}
 
 	svc := &service{
-		cfg:   cfg,
-		rt:    rt,
-		bs:    bs,
-		bswap: bswapEx,
-		bsvc:  bsvc,
-		dag:   dag,
-		pins:  pinStore,
+		cfg:               cfg,
+		rt:                rt,
+		bs:                bs,
+		bswap:             bswapEx,
+		bsvc:              bsvc,
+		dag:               dag,
+		pins:              pinStore,
+		httpMirrorGateway: cfg.HTTPMirrorGateway,
+		httpClient: &http.Client{
+			Timeout: ft,
+		},
 	}
 	return &EmbeddedIPFS{
 		svc:             svc,
@@ -195,6 +212,22 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 		chunker:         cfg.Chunker,
 		rawLeaves:       cfg.RawLeaves,
 	}, nil
+}
+
+// EnsureLocal 會在本地缺少該 CID 時，嘗試從配置的 HTTP 鏡像閘道拉取並校驗後寫入本地 blockstore。
+func (e *EmbeddedIPFS) EnsureLocal(ctx context.Context, c cid.Cid) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocal(ctx, c, false)
+}
+
+// EnsureLocalFileOnly 會在本地缺少該 CID 時，僅按單檔內容從 HTTP 鏡像閘道拉取並校驗。
+func (e *EmbeddedIPFS) EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocal(ctx, c, true)
 }
 
 func (s *service) AddFile(ctx context.Context, r io.Reader, opt AddFileOptions) (cid.Cid, error) {
@@ -231,14 +264,23 @@ func (s *service) AddDir(ctx context.Context, path string, opt AddDirOptions) (c
 }
 
 func (s *service) Cat(ctx context.Context, c cid.Cid) (io.ReadCloser, error) {
+	if err := s.ensureLocal(ctx, c, false); err != nil {
+		return nil, err
+	}
 	return ipfsunixfs.Cat(ctx, s.dag, c)
 }
 
 func (s *service) Get(ctx context.Context, c cid.Cid, w io.Writer) error {
+	if err := s.ensureLocal(ctx, c, false); err != nil {
+		return err
+	}
 	return ipfsunixfs.Get(ctx, s.dag, c, w)
 }
 
 func (s *service) Stat(ctx context.Context, c cid.Cid) (*ObjectStat, error) {
+	if err := s.ensureLocal(ctx, c, false); err != nil {
+		return nil, err
+	}
 	local, err := s.bs.Has(ctx, c)
 	if err != nil {
 		return nil, err
@@ -257,9 +299,11 @@ func (s *service) Stat(ctx context.Context, c cid.Cid) (*ObjectStat, error) {
 }
 
 func (s *service) Pin(ctx context.Context, c cid.Cid, recursive bool) error {
-	_ = ctx
 	if !recursive {
 		return ipfspin.ErrNotImplemented
+	}
+	if err := s.ensureLocal(ctx, c, false); err != nil {
+		return err
 	}
 	return s.pins.PinRecursive(c)
 }
@@ -287,4 +331,188 @@ func (s *service) Provide(ctx context.Context, c cid.Cid, recursive bool) error 
 
 func (s *service) HasLocal(ctx context.Context, c cid.Cid) (bool, error) {
 	return s.bs.Has(ctx, c)
+}
+
+func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool) error {
+	local, err := s.bs.Has(ctx, c)
+	if err != nil {
+		return err
+	}
+	if local {
+		return nil
+	}
+	if strings.TrimSpace(s.httpMirrorGateway) == "" {
+		return nil
+	}
+	return s.fetchFromHTTPMirror(ctx, c, fileOnly)
+}
+
+func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileOnly bool) error {
+	if !fileOnly {
+		if err := s.fetchCARFromHTTPMirror(ctx, target); err == nil {
+			return nil
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.httpMirrorGateway+"/ipfs/"+target.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch from ipfs http mirror: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ipfs http mirror returned status %d", resp.StatusCode)
+	}
+
+	tmp, err := os.CreateTemp("", "meshproxy-ipfs-mirror-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		return fmt.Errorf("copy mirror response: %w", err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	verified, err := s.importIntoTempDAG(tmp)
+	if err != nil {
+		return fmt.Errorf("verify mirror content cid: %w", err)
+	}
+	if !verified.Equals(target) {
+		return fmt.Errorf("%w: want %s got %s", ErrMirrorCIDMismatch, target.String(), verified.String())
+	}
+
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	nd, err := ipfsunixfs.AddFileFromReader(
+		ctx,
+		s.dag,
+		tmp,
+		ipfsunixfs.ChunkSizeFromSpec(s.cfg.Chunker),
+		s.cfg.RawLeaves,
+		s.cfg.CIDVersion,
+		s.cfg.HashFunction,
+	)
+	if err != nil {
+		return fmt.Errorf("store mirror content locally: %w", err)
+	}
+	if !nd.Cid().Equals(target) {
+		return fmt.Errorf("%w: want %s got %s", ErrMirrorCIDMismatch, target.String(), nd.Cid().String())
+	}
+	if s.cfg.AutoProvide && s.rt != nil {
+		_ = s.rt.Provide(ctx, target, true)
+	}
+	return nil
+}
+
+func (s *service) fetchCARFromHTTPMirror(ctx context.Context, target cid.Cid) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.httpMirrorGateway+"/ipfs/"+target.String()+"?format=car", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.ipld.car")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch car from ipfs http mirror: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ipfs http mirror returned car status %d", resp.StatusCode)
+	}
+
+	tempBS, tempDAG := newEphemeralDAG()
+	br, err := carv2.NewBlockReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read car from ipfs http mirror: %w", err)
+	}
+	for {
+		blk, nextErr := br.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return fmt.Errorf("iterate car blocks: %w", nextErr)
+		}
+		if err := tempBS.Put(ctx, blk); err != nil {
+			return fmt.Errorf("store car block in temp blockstore: %w", err)
+		}
+	}
+
+	ok, err := tempBS.Has(ctx, target)
+	if err != nil {
+		return fmt.Errorf("check target root in temp blockstore: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("car from ipfs http mirror missing target root %s", target.String())
+	}
+
+	visited, err := collectReachableBlocks(ctx, tempDAG, target)
+	if err != nil {
+		return fmt.Errorf("validate car dag from root %s: %w", target.String(), err)
+	}
+	if len(visited) == 0 {
+		return fmt.Errorf("car from ipfs http mirror contained no reachable blocks for %s", target.String())
+	}
+	if err := s.bs.PutMany(ctx, visited); err != nil {
+		return fmt.Errorf("store car blocks locally: %w", err)
+	}
+	if s.cfg.AutoProvide && s.rt != nil {
+		_ = s.rt.Provide(ctx, target, true)
+	}
+	return nil
+}
+
+func (s *service) importIntoTempDAG(r io.Reader) (cid.Cid, error) {
+	_, dag := newEphemeralDAG()
+	nd, err := ipfsunixfs.AddFileFromReader(
+		context.Background(),
+		dag,
+		r,
+		ipfsunixfs.ChunkSizeFromSpec(s.cfg.Chunker),
+		s.cfg.RawLeaves,
+		s.cfg.CIDVersion,
+		s.cfg.HashFunction,
+	)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return nd.Cid(), nil
+}
+
+func newEphemeralDAG() (blockstore.Blockstore, ipld.DAGService) {
+	ds := dssync.MutexWrap(datastore.NewMapDatastore())
+	bs := blockstore.NewBlockstore(ds)
+	bsvc := blockservice.New(bs, offlineexchange.Exchange(bs))
+	return bs, merkledag.NewDAGService(bsvc)
+}
+
+func collectReachableBlocks(ctx context.Context, dag ipld.DAGService, root cid.Cid) ([]blocks.Block, error) {
+	out := make([]blocks.Block, 0, 16)
+	seen := make(map[string]struct{})
+	err := merkledag.Walk(ctx, merkledag.GetLinksDirect(dag), root, func(c cid.Cid) bool {
+		key := c.KeyString()
+		if _, ok := seen[key]; ok {
+			return false
+		}
+		seen[key] = struct{}{}
+		blk, err := dag.Get(ctx, c)
+		if err != nil {
+			return false
+		}
+		out = append(out, blk)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,7 +106,8 @@ type IPFSConfig struct {
 	RoutingMode              string `yaml:"routing_mode"`
 
 	// Fetch
-	FetchTimeoutSeconds int `yaml:"fetch_timeout_seconds"`
+	FetchTimeoutSeconds int    `yaml:"fetch_timeout_seconds"`
+	HTTPMirrorGateway   string `yaml:"http_mirror_gateway"`
 
 	// Pin
 	AutoPinOnAdd bool `yaml:"auto_pin_on_add"`
@@ -598,6 +600,20 @@ func (c *IPFSConfig) normalize() error {
 	}
 	if c.FetchTimeoutSeconds <= 0 {
 		c.FetchTimeoutSeconds = 60
+	}
+	c.HTTPMirrorGateway = strings.TrimSpace(c.HTTPMirrorGateway)
+	c.HTTPMirrorGateway = strings.TrimRight(c.HTTPMirrorGateway, "/")
+	if c.HTTPMirrorGateway != "" {
+		u, err := url.Parse(c.HTTPMirrorGateway)
+		if err != nil {
+			return fmt.Errorf("invalid ipfs.http_mirror_gateway: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("invalid ipfs.http_mirror_gateway scheme %q", u.Scheme)
+		}
+		if strings.TrimSpace(u.Host) == "" {
+			return errors.New("ipfs.http_mirror_gateway host must not be empty")
+		}
 	}
 	if c.MaxUploadBytes <= 0 {
 		c.MaxUploadBytes = 64 << 20

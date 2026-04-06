@@ -7,3 +7,4 @@ shell.sh
 node.exe
 .gocache_review/
 .gomodcache_review/
+*.exe

@@ -155,6 +155,31 @@ func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
 			writeIPFSError(w, "BAD_REQUEST", "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		suffix := strings.TrimPrefix(p, "/ipfs/")
+		rootCID := suffix
+		if idx := strings.IndexByte(rootCID, '/'); idx >= 0 {
+			rootCID = rootCID[:idx]
+		}
+		rootCID = strings.TrimSpace(rootCID)
+		if rootCID != "" {
+			if c, err := cid.Decode(rootCID); err == nil {
+				fileOnly := strings.TrimSpace(r.URL.Query().Get("filename")) != ""
+				if !fileOnly {
+					remainder := strings.TrimPrefix(suffix, rootCID)
+					remainder = strings.TrimSpace(remainder)
+					fileOnly = remainder != ""
+				}
+				var ensureErr error
+				if fileOnly {
+					ensureErr = a.opts.IPFS.EnsureLocalFileOnly(r.Context(), c)
+				} else {
+					ensureErr = a.opts.IPFS.EnsureLocal(r.Context(), c)
+				}
+				if ensureErr != nil {
+					log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t error=%v", c.String(), fileOnly, ensureErr)
+				}
+			}
+		}
 	}
 	gw.ServeHTTP(w, r)
 }
