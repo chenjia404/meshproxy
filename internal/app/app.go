@@ -2155,7 +2155,7 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 	if a == nil || a.host == nil || a.publicChannels == nil || pid == "" {
 		return
 	}
-	log.Printf("[publicchannel] exchange subscriptions start peer=%s", pid.String())
+	// log.Printf("[publicchannel] exchange subscriptions start peer=%s", pid.String())
 	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 	defer cancel()
 	// Wait briefly for identify to populate supported protocols before using the public-channel RPC.
