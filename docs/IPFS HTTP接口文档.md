@@ -62,6 +62,27 @@ IPFS 写接口会返回统一 JSON 错误：
 - `GET /ipfs/bafy.../avatar.png`
 - `GET /ipfs/bafy...`
 
+可选请求头：
+
+- `http_mirror_gateway`：可选，请填纯 `host` 或 `host:port`，例如 `gateway.example.com`、`gateway.example.com:8443`
+
+请求头规则：
+
+- 该请求头只对当前这一次 `/ipfs/...` 读取生效
+- 如果设置了该请求头，会优先使用这个镜像网关拉取内容，而不是配置文件里的 `ipfs.http_mirror_gateway`
+- 服务端会固定按 `https://{host}` 组装镜像地址，不接受客户端自行指定 `http://` 或 `https://`
+- 请求头必须是纯 host，不能包含 scheme、路径、查询串或空白字符
+- 请求头非法时，接口返回 `400 BAD_REQUEST`
+
+镜像拉取规则：
+
+- 对纯 CID 请求，例如 `GET /ipfs/{cid}`，节点会优先尝试从镜像网关请求 `GET https://{mirror}/ipfs/{cid}?format=car`
+- 如果镜像网关返回合法 CAR，则会先在临时 blockstore 中校验整棵 DAG，再导入本地节点
+- 如果 CAR 不可用，再回退为单文件拉取校验
+- 对带文件名语义的请求，不走 CAR，直接按单文件拉取并校验 CID。以下两类都视为带文件名语义：
+  - `GET /ipfs/{cid}/avatar.png`
+  - `GET /ipfs/{cid}?filename=avatar.png`
+
 支持：
 
 - `GET`
@@ -238,7 +259,7 @@ IPFS 写接口会返回统一 JSON 错误：
 ## 5. 实现补充
 
 - 上传接口默认限制由 `MaxUploadBytes` 控制
-- 统一使用本地嵌入式 IPFS 服务，不依赖外部 HTTP IPFS 节点
+- 节点可通过配置项 `ipfs.http_mirror_gateway` 指定默认 HTTP 镜像网关；未配置或留空时，默认使用 `https://ipfs.io`
+- `/ipfs/...` 读取请求也可通过请求头 `http_mirror_gateway` 覆盖本次使用的镜像网关
 - `/ipfs/...` 是内容访问入口，`/api/ipfs/*` 是管理入口
 - `AddDir` 目前未实现，但保留接口形状，便于后续补齐
-

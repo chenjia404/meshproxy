@@ -8,10 +8,12 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/ipfs/boxo v0.37.0
+	github.com/ipfs/go-block-format v0.2.3
 	github.com/ipfs/go-cid v0.6.0
 	github.com/ipfs/go-datastore v0.9.1
 	github.com/ipfs/go-ds-leveldb v0.5.2
 	github.com/ipfs/go-ipld-format v0.6.3
+	github.com/ipld/go-car/v2 v2.16.0
 	github.com/libp2p/go-libp2p v0.48.0
 	github.com/libp2p/go-libp2p-kad-dht v0.39.0
 	github.com/libp2p/go-libp2p-pubsub v0.15.0
@@ -54,7 +56,6 @@ require (
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/ipfs/bbloom v0.0.4 // indirect
 	github.com/ipfs/go-bitfield v1.1.0 // indirect
-	github.com/ipfs/go-block-format v0.2.3 // indirect
 	github.com/ipfs/go-cidutil v0.1.1 // indirect
 	github.com/ipfs/go-dsqueue v0.2.0 // indirect
 	github.com/ipfs/go-ipfs-pq v0.0.4 // indirect
@@ -65,7 +66,6 @@ require (
 	github.com/ipfs/go-metrics-interface v0.3.0 // indirect
 	github.com/ipfs/go-peertaskqueue v0.8.3 // indirect
 	github.com/ipfs/go-unixfsnode v1.10.3 // indirect
-	github.com/ipld/go-car/v2 v2.16.0 // indirect
 	github.com/ipld/go-codec-dagpb v1.7.0 // indirect
 	github.com/ipld/go-ipld-prime v0.22.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect

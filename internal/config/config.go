@@ -116,6 +116,8 @@ type IPFSConfig struct {
 	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
 }
 
+const defaultIPFSHTTPMirrorGateway = "https://ipfs.io"
+
 // ExitConfig 出口節點策略與運行時配置（運營者控制允許代理的目標範圍）。
 type ExitConfig struct {
 	Enabled bool              `yaml:"enabled"`
@@ -364,6 +366,7 @@ func Default() Config {
 			AutoProvide:         true,
 			RoutingMode:         "dht-client",
 			FetchTimeoutSeconds: 60,
+			HTTPMirrorGateway:   defaultIPFSHTTPMirrorGateway,
 			AutoPinOnAdd:        true,
 			MaxUploadBytes:      64 << 20,
 		},
@@ -603,6 +606,9 @@ func (c *IPFSConfig) normalize() error {
 	}
 	c.HTTPMirrorGateway = strings.TrimSpace(c.HTTPMirrorGateway)
 	c.HTTPMirrorGateway = strings.TrimRight(c.HTTPMirrorGateway, "/")
+	if c.HTTPMirrorGateway == "" {
+		c.HTTPMirrorGateway = defaultIPFSHTTPMirrorGateway
+	}
 	if c.HTTPMirrorGateway != "" {
 		u, err := url.Parse(c.HTTPMirrorGateway)
 		if err != nil {
