@@ -102,6 +102,40 @@ func TestEmbeddedIPFSEnsureLocalFileOnlySkipsCAR(t *testing.T) {
 	}
 }
 
+func TestEmbeddedIPFSEnsureLocalFileOnlyWithMirrorOverridesConfig(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	cfg.HTTPMirrorGateway = "https://invalid.example"
+
+	data := []byte("hello ipfs file-only mirror override")
+	target := mustCIDForConfig(t, cfg, data)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ipfs/"+target {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	svc := newTestService(t, cfg)
+	e := &EmbeddedIPFS{svc: svc}
+
+	c := mustDecodeCID(t, target)
+	if err := e.EnsureLocalFileOnlyWithMirror(context.Background(), c, srv.URL); err != nil {
+		t.Fatalf("EnsureLocalFileOnlyWithMirror should use request mirror override: %v", err)
+	}
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal after file-only mirror override: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected cid to be present locally after file-only mirror override")
+	}
+}
+
 func TestServicePinFetchesFromHTTPMirror(t *testing.T) {
 	cfg := config.Default().IPFS
 	cfg.AutoProvide = false
@@ -170,7 +204,7 @@ func TestServiceEnsureLocalRejectsCIDMismatch(t *testing.T) {
 	svc := newTestService(t, cfg)
 
 	c := mustDecodeCID(t, target)
-	err := svc.ensureLocal(context.Background(), c, false)
+	err := svc.ensureLocal(context.Background(), c, false, "")
 	if !errors.Is(err, ErrMirrorCIDMismatch) {
 		t.Fatalf("ensureLocal error = %v, want ErrMirrorCIDMismatch", err)
 	}

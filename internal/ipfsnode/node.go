@@ -219,7 +219,7 @@ func (e *EmbeddedIPFS) EnsureLocal(ctx context.Context, c cid.Cid) error {
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
 	}
-	return e.svc.ensureLocal(ctx, c, false)
+	return e.svc.ensureLocal(ctx, c, false, "")
 }
 
 // EnsureLocalFileOnly 會在本地缺少該 CID 時，僅按單檔內容從 HTTP 鏡像閘道拉取並校驗。
@@ -227,7 +227,23 @@ func (e *EmbeddedIPFS) EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
 	}
-	return e.svc.ensureLocal(ctx, c, true)
+	return e.svc.ensureLocal(ctx, c, true, "")
+}
+
+// EnsureLocalWithMirror 允許用單次請求指定的鏡像位址補拉內容。
+func (e *EmbeddedIPFS) EnsureLocalWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocal(ctx, c, false, mirrorURL)
+}
+
+// EnsureLocalFileOnlyWithMirror 允許用單次請求指定的鏡像位址按單檔模式補拉內容。
+func (e *EmbeddedIPFS) EnsureLocalFileOnlyWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocal(ctx, c, true, mirrorURL)
 }
 
 func (s *service) AddFile(ctx context.Context, r io.Reader, opt AddFileOptions) (cid.Cid, error) {
@@ -264,21 +280,21 @@ func (s *service) AddDir(ctx context.Context, path string, opt AddDirOptions) (c
 }
 
 func (s *service) Cat(ctx context.Context, c cid.Cid) (io.ReadCloser, error) {
-	if err := s.ensureLocal(ctx, c, false); err != nil {
+	if err := s.ensureLocal(ctx, c, false, ""); err != nil {
 		return nil, err
 	}
 	return ipfsunixfs.Cat(ctx, s.dag, c)
 }
 
 func (s *service) Get(ctx context.Context, c cid.Cid, w io.Writer) error {
-	if err := s.ensureLocal(ctx, c, false); err != nil {
+	if err := s.ensureLocal(ctx, c, false, ""); err != nil {
 		return err
 	}
 	return ipfsunixfs.Get(ctx, s.dag, c, w)
 }
 
 func (s *service) Stat(ctx context.Context, c cid.Cid) (*ObjectStat, error) {
-	if err := s.ensureLocal(ctx, c, false); err != nil {
+	if err := s.ensureLocal(ctx, c, false, ""); err != nil {
 		return nil, err
 	}
 	local, err := s.bs.Has(ctx, c)
@@ -302,7 +318,7 @@ func (s *service) Pin(ctx context.Context, c cid.Cid, recursive bool) error {
 	if !recursive {
 		return ipfspin.ErrNotImplemented
 	}
-	if err := s.ensureLocal(ctx, c, false); err != nil {
+	if err := s.ensureLocal(ctx, c, false, ""); err != nil {
 		return err
 	}
 	return s.pins.PinRecursive(c)
@@ -333,7 +349,7 @@ func (s *service) HasLocal(ctx context.Context, c cid.Cid) (bool, error) {
 	return s.bs.Has(ctx, c)
 }
 
-func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool) error {
+func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool, mirrorURL string) error {
 	local, err := s.bs.Has(ctx, c)
 	if err != nil {
 		return err
@@ -341,19 +357,23 @@ func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool) err
 	if local {
 		return nil
 	}
-	if strings.TrimSpace(s.httpMirrorGateway) == "" {
+	mirrorURL = strings.TrimSpace(mirrorURL)
+	if mirrorURL == "" {
+		mirrorURL = strings.TrimSpace(s.httpMirrorGateway)
+	}
+	if mirrorURL == "" {
 		return nil
 	}
-	return s.fetchFromHTTPMirror(ctx, c, fileOnly)
+	return s.fetchFromHTTPMirror(ctx, c, fileOnly, mirrorURL)
 }
 
-func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileOnly bool) error {
+func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error {
 	if !fileOnly {
-		if err := s.fetchCARFromHTTPMirror(ctx, target); err == nil {
+		if err := s.fetchCARFromHTTPMirror(ctx, target, mirrorURL); err == nil {
 			return nil
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.httpMirrorGateway+"/ipfs/"+target.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(mirrorURL, "/")+"/ipfs/"+target.String(), nil)
 	if err != nil {
 		return err
 	}
@@ -414,8 +434,8 @@ func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileO
 	return nil
 }
 
-func (s *service) fetchCARFromHTTPMirror(ctx context.Context, target cid.Cid) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.httpMirrorGateway+"/ipfs/"+target.String()+"?format=car", nil)
+func (s *service) fetchCARFromHTTPMirror(ctx context.Context, target cid.Cid, mirrorURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(mirrorURL, "/")+"/ipfs/"+target.String()+"?format=car", nil)
 	if err != nil {
 		return err
 	}

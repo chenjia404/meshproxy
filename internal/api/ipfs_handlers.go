@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -29,6 +30,30 @@ func writeIPFSError(w http.ResponseWriter, code, msg string, status int) {
 	e.Error.Code = code
 	e.Error.Message = msg
 	_ = json.NewEncoder(w).Encode(e)
+}
+
+func ipfsMirrorURLFromHeader(r *http.Request) (string, error) {
+	raw := strings.TrimSpace(r.Header.Get("http_mirror_gateway"))
+	if raw == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(raw, "/?#") {
+		return "", errors.New("http_mirror_gateway must be a host only")
+	}
+	if strings.Contains(raw, "://") {
+		return "", errors.New("http_mirror_gateway must not include scheme")
+	}
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return "", errors.New("http_mirror_gateway must not include whitespace")
+	}
+	u, err := url.Parse("https://" + raw)
+	if err != nil {
+		return "", errors.New("invalid http_mirror_gateway host")
+	}
+	if strings.TrimSpace(u.Host) == "" || u.Host != raw {
+		return "", errors.New("invalid http_mirror_gateway host")
+	}
+	return "https://" + raw, nil
 }
 
 func (a *LocalAPI) handleIPFSAdd(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +188,11 @@ func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
 		rootCID = strings.TrimSpace(rootCID)
 		if rootCID != "" {
 			if c, err := cid.Decode(rootCID); err == nil {
+				mirrorURL, mirrorErr := ipfsMirrorURLFromHeader(r)
+				if mirrorErr != nil {
+					writeIPFSError(w, "BAD_REQUEST", mirrorErr.Error(), http.StatusBadRequest)
+					return
+				}
 				fileOnly := strings.TrimSpace(r.URL.Query().Get("filename")) != ""
 				if !fileOnly {
 					remainder := strings.TrimPrefix(suffix, rootCID)
@@ -171,12 +201,20 @@ func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
 				}
 				var ensureErr error
 				if fileOnly {
-					ensureErr = a.opts.IPFS.EnsureLocalFileOnly(r.Context(), c)
+					if mirrorURL != "" {
+						ensureErr = a.opts.IPFS.EnsureLocalFileOnlyWithMirror(r.Context(), c, mirrorURL)
+					} else {
+						ensureErr = a.opts.IPFS.EnsureLocalFileOnly(r.Context(), c)
+					}
 				} else {
-					ensureErr = a.opts.IPFS.EnsureLocal(r.Context(), c)
+					if mirrorURL != "" {
+						ensureErr = a.opts.IPFS.EnsureLocalWithMirror(r.Context(), c, mirrorURL)
+					} else {
+						ensureErr = a.opts.IPFS.EnsureLocal(r.Context(), c)
+					}
 				}
 				if ensureErr != nil {
-					log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t error=%v", c.String(), fileOnly, ensureErr)
+					log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t mirror=%q error=%v", c.String(), fileOnly, mirrorURL, ensureErr)
 				}
 			}
 		}
