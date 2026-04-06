@@ -47,11 +47,6 @@ checksum:
   name_template: 'checksums.txt'
   algorithm: sha512
 
-signs:
-  - artifacts: all
-    signature: "${artifact}.asc"
-    cmd: C:\soft\GnuPG\bin\gpg.exe
-    args: ["--armor","-u","189BE79683369DA3","--detach-sign", "${artifact}"]
 
 snapshot:
   version_template: "{{ .Tag }}"
