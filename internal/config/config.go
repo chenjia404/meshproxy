@@ -365,7 +365,7 @@ func Default() Config {
 			HashFunction:        "sha2-256",
 			AutoProvide:         true,
 			RoutingMode:         "dht-client",
-			FetchTimeoutSeconds: 60,
+			FetchTimeoutSeconds: 10,
 			HTTPMirrorGateway:   defaultIPFSHTTPMirrorGateway,
 			AutoPinOnAdd:        true,
 			MaxUploadBytes:      64 << 20,

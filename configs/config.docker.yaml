@@ -39,7 +39,7 @@ ipfs:
   auto_provide: true
   reprovide_interval_seconds: 0     # 预留，当前实现未用
   routing_mode: dht-client          # 说明用，与进程内 DHT 一致
-  fetch_timeout_seconds: 60         # 网关取回超时（秒）
+  fetch_timeout_seconds: 10         # 网关取回超时（秒）
   http_mirror_gateway: "https://ipfs.io" # 默认 HTTP 镜像网关；留空时也会回落到 https://ipfs.io
   auto_pin_on_add: true
   max_upload_bytes: 67108864        # 单次上传上限，默认 64MiB
