@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/ipfspin"
@@ -54,6 +56,44 @@ func ipfsMirrorURLFromHeader(r *http.Request) (string, error) {
 		return "", errors.New("invalid http_mirror_gateway host")
 	}
 	return "https://" + raw, nil
+}
+
+type ipfsMirrorEnsurer interface {
+	EnsureLocal(ctx context.Context, c cid.Cid) error
+	EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error
+	EnsureLocalWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error
+	EnsureLocalFileOnlyWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error
+}
+
+func asyncEnsureIPFSContent(ctx context.Context, timeout time.Duration, ensurer ipfsMirrorEnsurer, c cid.Cid, fileOnly bool, mirrorURL string) {
+	if ensurer == nil {
+		return
+	}
+	go func() {
+		bg := context.WithoutCancel(ctx)
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			bg, cancel = context.WithTimeout(bg, timeout)
+			defer cancel()
+		}
+		var err error
+		if fileOnly {
+			if mirrorURL != "" {
+				err = ensurer.EnsureLocalFileOnlyWithMirror(bg, c, mirrorURL)
+			} else {
+				err = ensurer.EnsureLocalFileOnly(bg, c)
+			}
+		} else {
+			if mirrorURL != "" {
+				err = ensurer.EnsureLocalWithMirror(bg, c, mirrorURL)
+			} else {
+				err = ensurer.EnsureLocal(bg, c)
+			}
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t mirror=%q error=%v", c.String(), fileOnly, mirrorURL, err)
+		}
+	}()
 }
 
 func (a *LocalAPI) handleIPFSAdd(w http.ResponseWriter, r *http.Request) {
@@ -199,23 +239,7 @@ func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
 					remainder = strings.TrimSpace(remainder)
 					fileOnly = remainder != ""
 				}
-				var ensureErr error
-				if fileOnly {
-					if mirrorURL != "" {
-						ensureErr = a.opts.IPFS.EnsureLocalFileOnlyWithMirror(r.Context(), c, mirrorURL)
-					} else {
-						ensureErr = a.opts.IPFS.EnsureLocalFileOnly(r.Context(), c)
-					}
-				} else {
-					if mirrorURL != "" {
-						ensureErr = a.opts.IPFS.EnsureLocalWithMirror(r.Context(), c, mirrorURL)
-					} else {
-						ensureErr = a.opts.IPFS.EnsureLocal(r.Context(), c)
-					}
-				}
-				if ensureErr != nil {
-					log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t mirror=%q error=%v", c.String(), fileOnly, mirrorURL, ensureErr)
-				}
+				asyncEnsureIPFSContent(r.Context(), a.opts.IPFS.FetchTimeout(), a.opts.IPFS, c, fileOnly, mirrorURL)
 			}
 		}
 	}

@@ -46,6 +46,7 @@ type EmbeddedIPFS struct {
 	closeDS         func() error
 	bswap           *bitswap.Bitswap
 	gw              http.Handler
+	fetchTimeout    time.Duration
 	maxUploadBytes  int64
 	gatewayEnabled  bool
 	gatewayWritable bool
@@ -73,6 +74,14 @@ func (e *EmbeddedIPFS) MaxUploadBytes() int64 {
 		return 64 << 20
 	}
 	return e.maxUploadBytes
+}
+
+// FetchTimeout returns the configured timeout used by gateway and mirror fetches.
+func (e *EmbeddedIPFS) FetchTimeout() time.Duration {
+	if e == nil || e.fetchTimeout <= 0 {
+		return 60 * time.Second
+	}
+	return e.fetchTimeout
 }
 
 // GatewayEnabled 是否註冊 GET /ipfs/。
@@ -202,6 +211,7 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 		closeDS:         closeDS,
 		bswap:           bswapEx,
 		gw:              gw,
+		fetchTimeout:    ft,
 		maxUploadBytes:  cfg.MaxUploadBytes,
 		gatewayEnabled:  cfg.GatewayEnabled,
 		gatewayWritable: cfg.GatewayWritable,
