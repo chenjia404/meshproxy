@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ipfs/boxo/blockservice"
 	blockstore "github.com/ipfs/boxo/blockstore"
@@ -229,7 +230,7 @@ func newTestService(t *testing.T, cfg config.IPFSConfig) *service {
 	if err != nil {
 		t.Fatalf("NewFileStore: %v", err)
 	}
-	return &service{
+	svc := &service{
 		cfg:               cfg,
 		bs:                bs,
 		bsvc:              bsvc,
@@ -238,6 +239,9 @@ func newTestService(t *testing.T, cfg config.IPFSConfig) *service {
 		httpMirrorGateway: cfg.HTTPMirrorGateway,
 		httpClient:        http.DefaultClient,
 	}
+	svc.fetchFromHTTPMirrorFn = svc.fetchFromHTTPMirror
+	svc.fetchFromP2PFn = svc.fetchFromP2P
+	return svc
 }
 
 func mustCIDForConfig(t *testing.T, cfg config.IPFSConfig, data []byte) string {
@@ -313,4 +317,220 @@ func mustDecodeCID(t *testing.T, value string) cid.Cid {
 		t.Fatalf("cid.Decode(%q): %v", value, err)
 	}
 	return c
+}
+
+func storeTestContentLocally(t *testing.T, svc *service, cfg config.IPFSConfig, data []byte) cid.Cid {
+	t.Helper()
+
+	nd, err := ipfsunixfs.AddFileFromReader(
+		context.Background(),
+		svc.dag,
+		bytes.NewReader(data),
+		ipfsunixfs.ChunkSizeFromSpec(cfg.Chunker),
+		cfg.RawLeaves,
+		cfg.CIDVersion,
+		cfg.HashFunction,
+	)
+	if err != nil {
+		t.Fatalf("AddFileFromReader local store: %v", err)
+	}
+	return nd.Cid()
+}
+
+func TestEnsureLocalMirrorOrP2PReturnsOnFirstSuccess(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	target := mustDecodeCID(t, mustCIDForConfig(t, cfg, []byte("hello parallel")))
+
+	svc := newTestService(t, cfg)
+	originalMirror := svc.fetchFromHTTPMirrorFn
+	originalP2P := svc.fetchFromP2PFn
+	defer func() {
+		svc.fetchFromHTTPMirrorFn = originalMirror
+		svc.fetchFromP2PFn = originalP2P
+	}()
+
+	done := make(chan struct{})
+	svc.fetchFromHTTPMirrorFn = func(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error {
+		return nil
+	}
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		<-done
+		return ctx.Err()
+	}
+
+	start := time.Now()
+	if err := svc.ensureLocalMirrorOrP2P(context.Background(), target, false, "https://mirror.example.com"); err != nil {
+		t.Fatalf("ensureLocalMirrorOrP2P error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("ensureLocalMirrorOrP2P blocked for %v waiting on loser", elapsed)
+	}
+	close(done)
+}
+
+func TestEnsureLocalMirrorOrP2PReturnsWhenP2PWins(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	target := mustDecodeCID(t, mustCIDForConfig(t, cfg, []byte("hello p2p-first")))
+
+	svc := newTestService(t, cfg)
+	originalMirror := svc.fetchFromHTTPMirrorFn
+	originalP2P := svc.fetchFromP2PFn
+	defer func() {
+		svc.fetchFromHTTPMirrorFn = originalMirror
+		svc.fetchFromP2PFn = originalP2P
+	}()
+
+	done := make(chan struct{})
+	svc.fetchFromHTTPMirrorFn = func(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error {
+		<-done
+		return ctx.Err()
+	}
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		return nil
+	}
+
+	start := time.Now()
+	if err := svc.ensureLocalMirrorOrP2P(context.Background(), target, false, "https://mirror.example.com"); err != nil {
+		t.Fatalf("ensureLocalMirrorOrP2P error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("ensureLocalMirrorOrP2P blocked for %v waiting on loser", elapsed)
+	}
+	close(done)
+}
+
+func TestEnsureLocalWithoutMirrorFetchesFromP2P(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	cfg.HTTPMirrorGateway = ""
+	target := mustDecodeCID(t, mustCIDForConfig(t, cfg, []byte("hello no-mirror")))
+
+	svc := newTestService(t, cfg)
+	originalP2P := svc.fetchFromP2PFn
+	defer func() {
+		svc.fetchFromP2PFn = originalP2P
+	}()
+
+	called := false
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		called = true
+		return nil
+	}
+
+	if err := svc.ensureLocal(context.Background(), target, false, ""); err != nil {
+		t.Fatalf("ensureLocal error: %v", err)
+	}
+	if !called {
+		t.Fatalf("ensureLocal without mirror should fetch from p2p")
+	}
+}
+
+func TestFetchFromP2PFileOnlyDoesNotFallbackToGraphFetch(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	target := mustDecodeCID(t, mustCIDForConfig(t, cfg, []byte("hello file-only")))
+
+	svc := newTestService(t, cfg)
+	err := svc.fetchFromP2P(context.Background(), target, true)
+	if err == nil {
+		t.Fatal("fetchFromP2P fileOnly should fail without remote content")
+	}
+
+	local, hasErr := svc.HasLocal(context.Background(), target)
+	if hasErr != nil {
+		t.Fatalf("HasLocal after fetchFromP2P: %v", hasErr)
+	}
+	if local {
+		t.Fatal("fetchFromP2P fileOnly should not store content locally on failure")
+	}
+}
+
+func TestEnsureLocalMirrorOrP2PStoresLocalWhenP2PWins(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+
+	data := []byte("hello p2p wins and stores local")
+	target := mustCIDForConfig(t, cfg, data)
+	c := mustDecodeCID(t, target)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		if r.URL.Path != "/ipfs/"+target {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	cfg.HTTPMirrorGateway = srv.URL
+	svc := newTestService(t, cfg)
+
+	originalP2P := svc.fetchFromP2PFn
+	defer func() {
+		svc.fetchFromP2PFn = originalP2P
+	}()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		got := storeTestContentLocally(t, svc, cfg, data)
+		if !got.Equals(target) {
+			t.Fatalf("p2p stored cid = %s, want %s", got, target)
+		}
+		return nil
+	}
+
+	if err := svc.ensureLocal(context.Background(), c, false, ""); err != nil {
+		t.Fatalf("ensureLocal should succeed when p2p wins: %v", err)
+	}
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal after p2p win: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected cid to be present locally after p2p win")
+	}
+}
+
+func TestEnsureLocalMirrorOrP2PStoresLocalWhenMirrorWins(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+
+	data := []byte("hello mirror wins and stores local")
+	target := mustCIDForConfig(t, cfg, data)
+	c := mustDecodeCID(t, target)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ipfs/"+target {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	cfg.HTTPMirrorGateway = srv.URL
+	svc := newTestService(t, cfg)
+
+	originalP2P := svc.fetchFromP2PFn
+	defer func() {
+		svc.fetchFromP2PFn = originalP2P
+	}()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	if err := svc.ensureLocal(context.Background(), c, false, ""); err != nil {
+		t.Fatalf("ensureLocal should succeed when mirror wins: %v", err)
+	}
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal after mirror win: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected cid to be present locally after mirror win")
+	}
 }

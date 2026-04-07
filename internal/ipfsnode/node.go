@@ -157,8 +157,10 @@ type service struct {
 	dag   ipld.DAGService
 	pins  *ipfspin.FileStore
 
-	httpMirrorGateway string
-	httpClient        *http.Client
+	httpMirrorGateway     string
+	httpClient            *http.Client
+	fetchFromHTTPMirrorFn func(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error
+	fetchFromP2PFn        func(ctx context.Context, c cid.Cid, fileOnly bool) error
 }
 
 // NewEmbeddedIPFS 使用既有 host 與 routing（DHT）建立嵌入式 IPFS；baseIPFSDir 通常為 $DataDir/ipfs。
@@ -206,6 +208,8 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 			Timeout: ft,
 		},
 	}
+	svc.fetchFromHTTPMirrorFn = svc.fetchFromHTTPMirror
+	svc.fetchFromP2PFn = svc.fetchFromP2P
 	return &EmbeddedIPFS{
 		svc:             svc,
 		closeDS:         closeDS,
@@ -224,7 +228,7 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 	}, nil
 }
 
-// EnsureLocal 會在本地缺少該 CID 時，嘗試從配置的 HTTP 鏡像閘道拉取並校驗後寫入本地 blockstore。
+// EnsureLocal 會在本地缺少該 CID 時，若已配置鏡像則並發嘗試 HTTP 鏡像與 P2P（bitswap），先成功者為準；無鏡像時直接走 P2P。
 func (e *EmbeddedIPFS) EnsureLocal(ctx context.Context, c cid.Cid) error {
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
@@ -232,7 +236,7 @@ func (e *EmbeddedIPFS) EnsureLocal(ctx context.Context, c cid.Cid) error {
 	return e.svc.ensureLocal(ctx, c, false, "")
 }
 
-// EnsureLocalFileOnly 會在本地缺少該 CID 時，僅按單檔內容從 HTTP 鏡像閘道拉取並校驗。
+// EnsureLocalFileOnly 會在本地缺少該 CID 時，若已配置鏡像則並發嘗試鏡像單檔拉取與 P2P（先成功優先）；無鏡像時直接走 P2P。
 func (e *EmbeddedIPFS) EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error {
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
@@ -240,7 +244,7 @@ func (e *EmbeddedIPFS) EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error
 	return e.svc.ensureLocal(ctx, c, true, "")
 }
 
-// EnsureLocalWithMirror 允許用單次請求指定的鏡像位址補拉內容。
+// EnsureLocalWithMirror 使用請求指定的鏡像，並與 P2P 並發拉取（先成功優先）。
 func (e *EmbeddedIPFS) EnsureLocalWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error {
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
@@ -248,7 +252,7 @@ func (e *EmbeddedIPFS) EnsureLocalWithMirror(ctx context.Context, c cid.Cid, mir
 	return e.svc.ensureLocal(ctx, c, false, mirrorURL)
 }
 
-// EnsureLocalFileOnlyWithMirror 允許用單次請求指定的鏡像位址按單檔模式補拉內容。
+// EnsureLocalFileOnlyWithMirror 使用請求指定的鏡像按單檔模式，並與 P2P 並發拉取（先成功優先）。
 func (e *EmbeddedIPFS) EnsureLocalFileOnlyWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error {
 	if e == nil || e.svc == nil {
 		return errors.New("ipfs service not initialized")
@@ -372,9 +376,67 @@ func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool, mir
 		mirrorURL = strings.TrimSpace(s.httpMirrorGateway)
 	}
 	if mirrorURL == "" {
-		return nil
+		return s.fetchFromP2PFn(ctx, c, fileOnly)
 	}
-	return s.fetchFromHTTPMirror(ctx, c, fileOnly, mirrorURL)
+	return s.ensureLocalMirrorOrP2P(ctx, c, fileOnly, mirrorURL)
+}
+
+// ensureLocalMirrorOrP2P 同時從 HTTP 鏡像與 P2P（bitswap）拉取，先成功者為準並取消另一路徑。
+func (s *service) ensureLocalMirrorOrP2P(ctx context.Context, c cid.Cid, fileOnly bool, mirrorURL string) error {
+	ctxM, cancelM := context.WithCancel(ctx)
+	ctxP, cancelP := context.WithCancel(ctx)
+	defer cancelM()
+	defer cancelP()
+
+	type srcErr struct {
+		src string
+		err error
+	}
+	ch := make(chan srcErr, 2)
+	go func() {
+		ch <- srcErr{"mirror", s.fetchFromHTTPMirrorFn(ctxM, c, fileOnly, mirrorURL)}
+	}()
+	go func() {
+		ch <- srcErr{"p2p", s.fetchFromP2PFn(ctxP, c, fileOnly)}
+	}()
+
+	var errs []error
+	for i := 0; i < 2; i++ {
+		se := <-ch
+		if se.err == nil {
+			if se.src == "mirror" {
+				cancelP()
+			} else {
+				cancelM()
+			}
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", se.src, se.err))
+	}
+	return errors.Join(errs...)
+}
+
+// fetchFromP2P 透過 DAG 服務從網路拉取區塊（bitswap）。fileOnly 時先嘗試 UnixFS 串流讀盡，失敗則再嘗試整棵 DAG。
+func (s *service) fetchFromP2P(ctx context.Context, c cid.Cid, fileOnly bool) error {
+	if fileOnly {
+		errGet := ipfsunixfs.Get(ctx, s.dag, c, io.Discard)
+		if errGet == nil {
+			s.maybeProvideRoot(ctx, c)
+			return nil
+		}
+		return errGet
+	}
+	if err := merkledag.FetchGraph(ctx, c, s.dag, merkledag.Concurrent()); err != nil {
+		return err
+	}
+	s.maybeProvideRoot(ctx, c)
+	return nil
+}
+
+func (s *service) maybeProvideRoot(ctx context.Context, c cid.Cid) {
+	if s.cfg.AutoProvide && s.rt != nil {
+		_ = s.rt.Provide(ctx, c, true)
+	}
 }
 
 func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error {
