@@ -67,8 +67,17 @@ type Config struct {
 	// Chat 私聊相關（預設離線 store 節點等）。
 	Chat ChatConfig `yaml:"chat"`
 
+	// PublicChannel 去中心化公开频道（连接时是否交换订阅等）。
+	PublicChannel PublicChannelConfig `yaml:"public_channel"`
+
 	// LogModules 逗号分隔，仅输出匹配 [name] 模块标签的日志行（name 与此处一致，大小写不敏感）；空表示不过滤。无 [module] 前缀的行（如启动提示）仍会输出。
 	LogModules string `yaml:"log_modules"`
+}
+
+// PublicChannelConfig 公开频道行为。
+type PublicChannelConfig struct {
+	// ExchangeOnConnect 是否在与其他节点建立连接后主动交换公开频道订阅摘要并尝试增量同步。默认 false。
+	ExchangeOnConnect bool `yaml:"exchange_on_connect"`
 }
 
 // ChatConfig 私聊；OfflineStorePeers 與 p2p.bootstrap_peers 相同，為 multiaddr 字符串列表（含 /p2p/<peerID>）；亦可僅填 peer_id 走 DHT。

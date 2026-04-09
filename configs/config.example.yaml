@@ -52,6 +52,10 @@ chat:
   offline_store_peers: []
   # - /ip4/1.2.3.4/tcp/4001/p2p/12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
+# 去中心化公开频道：是否在与其它节点连接后交换订阅摘要并尝试增量同步（默认关闭）
+public_channel:
+  exchange_on_connect: false
+
 # 電路池：默認預建 1 條電路，按需擴展；空閒超時銷毀、失敗自動補建
 circuit_pool:
   min_per_pool: 1

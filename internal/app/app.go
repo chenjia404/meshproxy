@@ -2059,7 +2059,7 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	if a.chat != nil {
 		a.chat.OnPeerConnected(pid.String())
 	}
-	if a.publicChannels != nil {
+	if a.publicChannels != nil && a.cfg.PublicChannel.ExchangeOnConnect {
 		if _, loaded := a.publicChannelExchangeOnce.LoadOrStore(pid.String(), struct{}{}); !loaded {
 			safe.Go("app.exchangePublicChannelSubscriptions", func() { a.exchangePublicChannelSubscriptions(pid) })
 		}
@@ -2183,7 +2183,7 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 }
 
 func (a *App) syncExistingPublicChannelPeers() {
-	if a == nil || a.host == nil || a.publicChannels == nil {
+	if a == nil || a.host == nil || a.publicChannels == nil || !a.cfg.PublicChannel.ExchangeOnConnect {
 		return
 	}
 	peers := a.Host().Network().Peers()
