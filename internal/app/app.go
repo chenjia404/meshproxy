@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -2070,9 +2071,50 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	safe.Go("app.exchangePeerSnapshot", func() { a.exchangePeerSnapshot(pid) })
 }
 
+func realIPStringFromMultiaddr(m multiaddr.Multiaddr) string {
+	if m == nil || !hasRealIP(m) {
+		return ""
+	}
+	if v, err := m.ValueForProtocol(multiaddr.P_IP4); err == nil && v != "" {
+		if a, err := netip.ParseAddr(v); err == nil {
+			return a.String()
+		}
+		return v
+	}
+	if v, err := m.ValueForProtocol(multiaddr.P_IP6); err == nil && v != "" {
+		if a, err := netip.ParseAddr(v); err == nil {
+			return a.String()
+		}
+		return v
+	}
+	return ""
+}
+
+func (a *App) realIPForConnectedPeer(pid peer.ID, remote multiaddr.Multiaddr) string {
+	if ip := realIPStringFromMultiaddr(remote); ip != "" {
+		return ip
+	}
+	if a == nil || a.host == nil {
+		return ""
+	}
+	for _, m := range a.Host().Peerstore().Addrs(pid) {
+		if ip := realIPStringFromMultiaddr(m); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
 func (a *App) recordConnectedRelay(pid peer.ID, remote multiaddr.Multiaddr) {
 	if a == nil || pid == "" {
 		return
+	}
+	if a.discovery != nil && a.chat != nil {
+		if d, ok := a.discovery.Store().Get(pid.String()); ok && d != nil && d.Relay {
+			if ip := a.realIPForConnectedPeer(pid, remote); ip != "" {
+				a.chat.OnRelayPeerConnected(pid.String(), ip)
+			}
+		}
 	}
 	addrs := make([]string, 0, 8)
 	if remote != nil {

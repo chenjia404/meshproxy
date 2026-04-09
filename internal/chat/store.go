@@ -307,6 +307,12 @@ func (s *Store) migrate() error {
 			last_transport_attempt TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS relay_node_scores (
+			peer_id TEXT PRIMARY KEY,
+			real_ip TEXT NOT NULL DEFAULT '',
+			score INTEGER NOT NULL DEFAULT 0,
+			last_score_at TEXT NOT NULL DEFAULT ''
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

@@ -205,7 +205,15 @@ func (s *Service) keepRelaysConnected(max int) {
 			descs = append(descs, d)
 		}
 	}
-	sortRelayDescriptorsByStartedAtThenShuffleTies(descs)
+	scores := map[string]int{}
+	if s.store != nil {
+		if m, err := s.store.RelayNodeScoresMap(); err != nil {
+			log.Printf("[chat] relay scores map: %v", err)
+		} else if m != nil {
+			scores = m
+		}
+	}
+	sortRelayDescriptorsByScoreThenStartedAtThenShuffleTies(descs, scores)
 
 	connected := 0
 	for _, relayDesc := range descs {
@@ -1496,6 +1504,23 @@ func (s *Service) OnPeerConnected(peerID string) {
 	})
 }
 
+// OnRelayPeerConnected 在与中继建立连接且已解析出对端公网 IP 时调用，用于更新中继稳定性得分。
+func (s *Service) OnRelayPeerConnected(peerID, realIP string) {
+	if s == nil || s.store == nil {
+		return
+	}
+	peerID = strings.TrimSpace(peerID)
+	realIP = strings.TrimSpace(realIP)
+	if peerID == "" || realIP == "" {
+		return
+	}
+	safe.Go("chat.onRelayPeerConnected", func() {
+		if _, err := s.store.ApplyRelayNodeConnectScore(peerID, realIP, time.Now().UTC()); err != nil {
+			log.Printf("[chat] relay node score peer=%s: %v", peerID, err)
+		}
+	})
+}
+
 func (s *Service) sendPendingMessageRevokes(peerID string) error {
 	items, err := s.store.ListMessageRevokeJobsForPeer(peerID, directRetryBatchSize)
 	if err != nil {
@@ -2228,12 +2253,21 @@ func relaySortKeyUnix(d *discovery.NodeDescriptor) int64 {
 	return d.StartedAtUnix
 }
 
-// sortRelayDescriptorsByStartedAtThenShuffleTies 依啟動時間排序，相同時間戳隨機打亂避免熱點。
-func sortRelayDescriptorsByStartedAtThenShuffleTies(descs []*discovery.NodeDescriptor) {
+// sortRelayDescriptorsByScoreThenStartedAtThenShuffleTies 先按累积分数降序，再按启动时间，
+// 相同（分数、启动时间）组内随机打乱避免热点。
+func sortRelayDescriptorsByScoreThenStartedAtThenShuffleTies(descs []*discovery.NodeDescriptor, scores map[string]int) {
 	if len(descs) <= 1 {
 		return
 	}
 	sort.Slice(descs, func(i, j int) bool {
+		si, sj := 0, 0
+		if scores != nil {
+			si = scores[descs[i].PeerID]
+			sj = scores[descs[j].PeerID]
+		}
+		if si != sj {
+			return si > sj
+		}
 		ki, kj := relaySortKeyUnix(descs[i]), relaySortKeyUnix(descs[j])
 		if ki != kj {
 			return ki < kj
@@ -2242,9 +2276,20 @@ func sortRelayDescriptorsByStartedAtThenShuffleTies(descs []*discovery.NodeDescr
 	})
 	i := 0
 	for i < len(descs) {
+		si := 0
+		if scores != nil {
+			si = scores[descs[i].PeerID]
+		}
 		k := relaySortKeyUnix(descs[i])
 		j := i + 1
-		for j < len(descs) && relaySortKeyUnix(descs[j]) == k {
+		for j < len(descs) {
+			sj := 0
+			if scores != nil {
+				sj = scores[descs[j].PeerID]
+			}
+			if sj != si || relaySortKeyUnix(descs[j]) != k {
+				break
+			}
 			j++
 		}
 		if j-i > 1 {
@@ -2279,7 +2324,15 @@ func (s *Service) pickRelayCandidates(targetPeerID string, limit int) ([]peer.ID
 	if len(candidates) == 0 {
 		return nil, errors.New("no relay path available")
 	}
-	sortRelayDescriptorsByStartedAtThenShuffleTies(candidates)
+	scores := map[string]int{}
+	if s.store != nil {
+		if m, err := s.store.RelayNodeScoresMap(); err != nil {
+			log.Printf("[chat] relay scores map: %v", err)
+		} else if m != nil {
+			scores = m
+		}
+	}
+	sortRelayDescriptorsByScoreThenStartedAtThenShuffleTies(candidates, scores)
 
 	connected := make([]peer.ID, 0, min(limit, len(candidates)))
 	disconnected := make([]peer.ID, 0, min(limit, len(candidates)))
