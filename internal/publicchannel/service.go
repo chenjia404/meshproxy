@@ -24,6 +24,7 @@ import (
 	"github.com/multiformats/go-multihash"
 
 	"github.com/chenjia404/meshproxy/internal/chat"
+	"github.com/chenjia404/meshproxy/internal/offlinestore"
 	"github.com/chenjia404/meshproxy/internal/safe"
 )
 
@@ -52,6 +53,9 @@ type Service struct {
 	provideTimeout          time.Duration
 	provideSuccessLogMinGap time.Duration
 	nowFn                   func() time.Time
+
+	storeNodes        []offlinestore.OfflineStoreNode
+	storePushMuByChan sync.Map // canonical channel_id -> *sync.Mutex（serialize store-node 推送）
 }
 
 type serviceConfig struct {
@@ -511,6 +515,7 @@ func (s *Service) migrateOwnedChannelID(oldChannelID, newChannelID string) error
 		log.Printf("[publicchannel] switch migrated topic old=%s new=%s err=%v", oldChannelID, newChannelID, err)
 	}
 	s.publishChange(change)
+	s.scheduleStorePushBackfill(newChannelID)
 	return nil
 }
 
@@ -590,6 +595,7 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 		return ChannelSummary{}, err
 	}
 	s.bootstrapOwnedChannelAsync(profile.ChannelID)
+	s.scheduleStorePush(profile.ChannelID, storePushJob{kind: storePushInitial})
 	return summary, nil
 }
 
@@ -662,6 +668,7 @@ func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProf
 	s.runRetentionSweep(time.Unix(now, 0).UTC())
 	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
+	s.scheduleStorePush(channelID, storePushJob{kind: storePushProfileOnly})
 	return s.store.GetChannelSummary(channelID)
 }
 
@@ -729,6 +736,7 @@ func (s *Service) CreateChannelMessage(channelID string, input UpsertMessageInpu
 	}
 	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
+	s.scheduleStorePush(channelID, storePushJob{kind: storePushWithMessage, messageID: msg.MessageID})
 	return msg, nil
 }
 
@@ -843,6 +851,7 @@ func (s *Service) UpdateChannelMessage(ctx context.Context, channelID string, me
 	}
 	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
+	s.scheduleStorePush(channelID, storePushJob{kind: storePushWithMessage, messageID: current.MessageID})
 	return current, nil
 }
 
@@ -892,6 +901,7 @@ func (s *Service) DeleteChannelMessage(ctx context.Context, channelID string, me
 	}
 	s.scheduleOwnedProvide(channelID)
 	s.publishChange(change)
+	s.scheduleStorePush(channelID, storePushJob{kind: storePushWithMessage, messageID: current.MessageID})
 	return current, nil
 }
 

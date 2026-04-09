@@ -311,6 +311,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.chatRelayV1Table = relay.NewChatRelayV1Table()
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	publicChannelSvc.SetNodePrivateKey(idMgr.PrivateKey())
+	publicChannelSvc.SetStoreNodes(cfg.Chat.OfflineStoreNodes)
 	safe.Go("app.syncExistingPublicChannelPeers", func() { a.syncExistingPublicChannelPeers() })
 	safe.Go("chat.offlineStoreInitialSync", func() { chatSvc.SyncOfflineStoresNow() })
 	if a.ipfsEmb != nil {
