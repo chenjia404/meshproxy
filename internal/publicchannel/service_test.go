@@ -24,6 +24,7 @@ import (
 	mocknet "github.com/libp2p/go-libp2p/p2p/net/mock"
 	ma "github.com/multiformats/go-multiaddr"
 
+	"github.com/chenjia404/meshproxy/internal/offlinestore"
 	"github.com/chenjia404/meshproxy/internal/tunnel"
 )
 
@@ -1155,6 +1156,49 @@ func TestProviderPeerIDsPrefersTopicPeers(t *testing.T) {
 	}
 	if peers[1] != stalePeerID {
 		t.Fatalf("want stored provider %s second, got %s", stalePeerID, peers[1])
+	}
+}
+
+func TestProviderPeerIDsPrefersConfiguredStoreNodes(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	priv, _ := mustTestIdentity(t)
+	mn := mocknet.New()
+	defer func() { _ = mn.Close() }()
+	h, err := mn.AddPeer(priv, mustMultiaddr(t, "/ip6/::1/tcp/12071"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := mustTestService(t, ctx, h, ps, priv, filepath.Join(t.TempDir(), "provider-store-first.db"))
+
+	_, storePeerID := mustTestIdentity(t)
+	_, otherPeerID := mustTestIdentity(t)
+	channelID := mustUUIDv7(t)
+	now := time.Now().Unix()
+	if err := svc.store.EnsureSubscribedChannel(channelID, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertProvider(channelID, storePeerID, "seed", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertProvider(channelID, otherPeerID, "seed", now-1); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.SetStoreNodes([]offlinestore.OfflineStoreNode{{PeerID: storePeerID}})
+	peers := svc.providerPeerIDs(ctx, channelID)
+	if len(peers) < 2 {
+		t.Fatalf("want at least 2 peers, got %d", len(peers))
+	}
+	if peers[0] != storePeerID {
+		t.Fatalf("want configured store node first, got %s", peers[0])
 	}
 }
 

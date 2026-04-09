@@ -1899,9 +1899,23 @@ func (s *Service) provideChannel(channelID string) error {
 func (s *Service) providerPeerIDs(ctx context.Context, channelID string) []string {
 	seen := map[string]struct{}{}
 	var out []string
+
+	// 与离线消息 store / 频道推送共用的 store 节点列表：拉取公共频道消息时优先向其请求。
+	for _, n := range s.storeNodes {
+		pid := strings.TrimSpace(n.PeerID)
+		if pid == "" || pid == s.localPeer {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		out = append(out, pid)
+	}
+
 	topicPeers := s.topicPeerIDs(channelID)
 	log.Printf("[publicchannel] pubsub topic peers channel=%s peers=%s", channelID, formatPeerIDsForLog(topicPeers))
-	// 已经在当前 topic mesh 里的邻居通常是最容易连通的候选，优先尝试它们。
+	// 已经在当前 topic mesh 里的邻居通常是最容易连通的候选，在 store 节点之后尝试它们。
 	for _, peerID := range topicPeers {
 		if _, ok := seen[peerID]; ok {
 			continue
