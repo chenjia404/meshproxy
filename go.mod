@@ -4,7 +4,6 @@ go 1.25.7
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/ipfs/boxo v0.37.0
