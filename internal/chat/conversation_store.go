@@ -63,9 +63,9 @@ func (s *Store) CreateConversation(conv Conversation, sess sessionState) (Conver
 		createdAt = conv.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-	`, conv.ConversationID, conv.PeerID, conv.State, lastMessageAt, conv.LastMessage, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), createdAt, now)
+		INSERT OR REPLACE INTO conversations(conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at,upstream_conversation_id,last_upstream_sync_seq)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, conv.ConversationID, conv.PeerID, conv.State, lastMessageAt, conv.LastMessage, conv.LastTransportMode, conv.UnreadCount, conv.RetentionMinutes, firstNonEmpty(conv.RetentionSyncState, "synced"), formatDBTime(conv.RetentionSyncedAt), createdAt, now, conv.UpstreamConversationID, conv.LastUpstreamSyncSeq)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -83,8 +83,8 @@ func (s *Store) GetConversation(id string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
 	var retentionSyncedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE conversation_id=?`, id).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at,upstream_conversation_id,last_upstream_sync_seq FROM conversations WHERE conversation_id=?`, id).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt, &c.UpstreamConversationID, &c.LastUpstreamSyncSeq)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -111,8 +111,8 @@ func (s *Store) GetConversationByPeer(peerID string) (Conversation, error) {
 	var c Conversation
 	var lastMessageAt, createdAt, updatedAt string
 	var retentionSyncedAt string
-	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at FROM conversations WHERE peer_id=?`, peerID).
-		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt)
+	err := s.db.QueryRow(`SELECT conversation_id,peer_id,state,last_message_at,last_message,last_transport_mode,unread_count,retention_minutes,retention_sync_state,retention_synced_at,created_at,updated_at,upstream_conversation_id,last_upstream_sync_seq FROM conversations WHERE peer_id=?`, peerID).
+		Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt, &c.UpstreamConversationID, &c.LastUpstreamSyncSeq)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -127,7 +127,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	// Only list conversations for an established friendship: accepted request between peers,
 	// or legacy rows that have session state (E2E established) without a request row.
 	rows, err := s.db.Query(`
-		SELECT c.conversation_id,c.peer_id,c.state,c.last_message_at,c.last_message,c.last_transport_mode,c.unread_count,c.retention_minutes,c.retention_sync_state,c.retention_synced_at,c.created_at,c.updated_at
+		SELECT c.conversation_id,c.peer_id,c.state,c.last_message_at,c.last_message,c.last_transport_mode,c.unread_count,c.retention_minutes,c.retention_sync_state,c.retention_synced_at,c.created_at,c.updated_at,c.upstream_conversation_id,c.last_upstream_sync_seq
 		FROM conversations c
 		WHERE (
 			EXISTS (
@@ -150,7 +150,7 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	for rows.Next() {
 		var c Conversation
 		var lastMessageAt, retentionSyncedAt, createdAt, updatedAt string
-		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&c.ConversationID, &c.PeerID, &c.State, &lastMessageAt, &c.LastMessage, &c.LastTransportMode, &c.UnreadCount, &c.RetentionMinutes, &c.RetentionSyncState, &retentionSyncedAt, &createdAt, &updatedAt, &c.UpstreamConversationID, &c.LastUpstreamSyncSeq); err != nil {
 			return nil, err
 		}
 		c.LastMessageAt = parseDBTime(lastMessageAt)

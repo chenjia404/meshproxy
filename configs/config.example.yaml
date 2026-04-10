@@ -51,6 +51,8 @@ ipfs:
 chat:
   offline_store_peers: []
   # - /ip4/1.2.3.4/tcp/4001/p2p/12D3KooWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  # 可选：meshchat-server HTTP 根地址，用于私聊上游 relay / offline store（仅 mesh-proxy 使用，Android 不直连）
+  # meshchat_server_url: "http://127.0.0.1:8581"
 
 # 去中心化公开频道：是否在与其它节点连接后交换订阅摘要并尝试增量同步（默认关闭）
 public_channel:

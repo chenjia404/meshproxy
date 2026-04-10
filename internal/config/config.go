@@ -79,9 +79,11 @@ type PublicChannelConfig struct {
 
 // ChatConfig 私聊；OfflineStorePeers 與 p2p.bootstrap_peers 相同，為 multiaddr 字符串列表（含 /p2p/<peerID>）；亦可僅填 peer_id 走 DHT。
 // OfflineStoreNodes 由 Normalize 從 OfflineStorePeers 解析得到，不參與 YAML 反序列化。
+// MeshChatServerURL 可选：唯一上游 meshchat-server（HTTP 根，如 http://127.0.0.1:8581），用于私聊 relay/offline store；仅 mesh-proxy 使用，Android 不直连。
 type ChatConfig struct {
-	OfflineStorePeers []string                        `yaml:"offline_store_peers"`
-	OfflineStoreNodes []offlinestore.OfflineStoreNode `yaml:"-"`
+	OfflineStorePeers   []string                        `yaml:"offline_store_peers"`
+	MeshChatServerURL   string                          `yaml:"meshchat_server_url"`
+	OfflineStoreNodes   []offlinestore.OfflineStoreNode `yaml:"-"`
 }
 
 // IPFSConfig 嵌入式 IPFS 子系統（boxo + 共享 host）。

@@ -340,7 +340,78 @@ func (s *Store) migrate() error {
 	if err := s.ensureOfflineStoreCursorTable(); err != nil {
 		return err
 	}
+	if err := s.ensureRelayStoreColumns(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureRelayStoreColumns() error {
+	// messages：relay / offline store 元数据
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"transport_kind", `ALTER TABLE messages ADD COLUMN transport_kind TEXT NOT NULL DEFAULT 'native'`},
+		{"relay_status", `ALTER TABLE messages ADD COLUMN relay_status TEXT NOT NULL DEFAULT 'none'`},
+		{"upstream_message_id", `ALTER TABLE messages ADD COLUMN upstream_message_id TEXT NOT NULL DEFAULT ''`},
+		{"client_msg_id", `ALTER TABLE messages ADD COLUMN client_msg_id TEXT NOT NULL DEFAULT ''`},
+		{"ack_pending", `ALTER TABLE messages ADD COLUMN ack_pending INTEGER NOT NULL DEFAULT 0`},
+		{"last_relay_at", `ALTER TABLE messages ADD COLUMN last_relay_at TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := s.addColumnIfMissing("messages", col.name, col.ddl); err != nil {
+			return err
+		}
+	}
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"upstream_conversation_id", `ALTER TABLE conversations ADD COLUMN upstream_conversation_id TEXT NOT NULL DEFAULT ''`},
+		{"last_upstream_sync_seq", `ALTER TABLE conversations ADD COLUMN last_upstream_sync_seq INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := s.addColumnIfMissing("conversations", col.name, col.ddl); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS relay_store_pending_ack (
+		msg_id TEXT PRIMARY KEY,
+		upstream_message_id TEXT NOT NULL
+	)`)
+	return err
+}
+
+func (s *Store) addColumnIfMissing(table, column, ddl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.Exec(ddl)
+	return err
 }
 
 func (s *Store) ensureMessageIndexes() error {

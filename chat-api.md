@@ -8,6 +8,11 @@
 
 若節點未啟用聊天服務，相關路由會回傳 **404**，內文可能為純文字 `chat service not available`。
 
+### 可选上游 relay / offline store（meshchat-server）
+
+- 在配置 `chat.meshchat_server_url` 填入 **meshchat-server** 的 HTTP 根地址（如 `http://127.0.0.1:8581`）后，mesh-proxy 会用本机 libp2p 身份登录上游，并在**不改变 Android 接入方式**的前提下，将文本私聊额外上送到上游、拉取补全、转发 ACK。
+- 私聊主模型仍在本地 SQLite；单聊 REST/WebSocket 仍为 `/api/v1/chat/...`。消息 JSON 可多出可选字段：`transport_kind`、`relay_status`、`upstream_message_id`、`client_msg_id`、`ack_pending`、`last_relay_at`（见实现与数据字典）。
+
 ---
 
 ## CORS 與 OPTIONS

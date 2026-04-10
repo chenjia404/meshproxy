@@ -80,6 +80,8 @@ type Service struct {
 	chatRequestProbeSeen sync.Map
 	chatSyncPending      sync.Map // key: conversation_id -> chan ChatSyncResponse
 	chatFileFetchPending sync.Map // key: conversation_id\x00msg_id\x00offset -> chan ChatFileFetchResponse
+
+	meshChat *meshChatHTTPClient // 上游 meshchat-server relay（可选）
 }
 
 type chatRequestProbeState struct {
@@ -1330,6 +1332,9 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 	safe.Go("chat.sendDirectText."+msg.MsgID, func() {
 		s.completeOutboundDirectSend(msg, ciphertext, nil)
 	})
+	if s.meshChat != nil {
+		safe.Go("chat.meshchat.send."+msg.MsgID, func() { s.tryMeshChatRelaySend(msg.MsgID) })
+	}
 	return msg, nil
 }
 
@@ -3144,7 +3149,9 @@ func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) err
 		ToPeerID:       toPeerID,
 		AckedAtUnix:    time.Now().UTC().UnixMilli(),
 	}
-	return s.sendEnvelope(conv.PeerID, ack)
+	err := s.sendEnvelope(conv.PeerID, ack)
+	s.TryMeshChatUpstreamAck(msgID)
+	return err
 }
 
 func (s *Service) handleIncomingDeliveryAck(ack DeliveryAck, streamPeerID string) error {

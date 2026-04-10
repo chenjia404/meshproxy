@@ -1,9 +1,32 @@
 package chat
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 )
+
+func relaySQLValues(msg *Message) (tk, rs, up, cmid string, ackp int, lastRel string) {
+	tk = msg.TransportKind
+	if tk == "" {
+		tk = TransportKindNative
+	}
+	rs = msg.RelayStatus
+	if rs == "" {
+		rs = RelayStatusNone
+	}
+	up = msg.UpstreamMessageID
+	cmid = msg.ClientMsgID
+	if msg.AckPending {
+		ackp = 1
+	}
+	if !msg.LastRelayAt.IsZero() {
+		lastRel = msg.LastRelayAt.UTC().Format(time.RFC3339Nano)
+	}
+	return
+}
+
+const selectMessageCols = `msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at,transport_kind,relay_status,upstream_message_id,client_msg_id,ack_pending,last_relay_at`
 
 // AddInboundMessageAndAdvanceRecvCounter 在同一 SQLite 事务中：写入入站消息、更新会话时间戳、
 // 推进 session_states.recv_counter。若 incrementUnread 为 true，同时将 conversations.unread_count 加 1（实时入站；
@@ -27,10 +50,11 @@ func (s *Store) AddInboundMessageAndAdvanceRecvCounter(msg Message, ciphertext [
 			_ = tx.Rollback()
 		}
 	}()
+	tk, rs, up, cmid, ackp, lastRel := relaySQLValues(&msg)
 	if _, err := tx.Exec(`
-		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt); err != nil {
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at,transport_kind,relay_status,upstream_message_id,client_msg_id,ack_pending,last_relay_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt, tk, rs, up, cmid, ackp, lastRel); err != nil {
 		return err
 	}
 	preview := messagePreviewFromMessage(msg)
@@ -72,10 +96,11 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 		deliveredAt = msg.DeliveredAt.UTC().Format(time.RFC3339Nano)
 	}
 	createdAt := msg.CreatedAt.UTC().Format(time.RFC3339Nano)
+	tk, rs, up, cmid, ackp, lastRel := relaySQLValues(&msg)
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt)
+		INSERT OR REPLACE INTO messages(msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,ciphertext_blob,transport_mode,state,counter,created_at,delivered_at,transport_kind,relay_status,upstream_message_id,client_msg_id,ack_pending,last_relay_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, msg.MsgID, msg.ConversationID, msg.SenderPeerID, msg.ReceiverPeerID, msg.Direction, msg.MsgType, msg.Plaintext, msg.FileName, msg.MIMEType, msg.FileSize, msg.FileCID, ciphertext, msg.TransportMode, msg.State, msg.Counter, createdAt, deliveredAt, tk, rs, up, cmid, ackp, lastRel)
 	if err != nil {
 		return Message{}, err
 	}
@@ -88,20 +113,17 @@ func (s *Store) AddMessage(msg Message, ciphertext []byte) (Message, error) {
 }
 
 func (s *Store) ListMessages(conversationID string) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
+	rows, err := s.db.Query(`SELECT `+selectMessageCols+` FROM messages WHERE conversation_id=? ORDER BY created_at ASC`, conversationID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
-		var m Message
-		var createdAt, deliveredAt string
-		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+		m, err := scanMessageFromRows(rows)
+		if err != nil {
 			return nil, err
 		}
-		m.CreatedAt = parseDBTime(createdAt)
-		m.DeliveredAt = parseDBTime(deliveredAt)
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -121,7 +143,7 @@ func (s *Store) ListMessagesPage(conversationID string, limit, offset int) ([]Me
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(`
-		SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at
+		SELECT `+selectMessageCols+`
 		FROM messages WHERE conversation_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?`,
 		conversationID, limit, offset)
 	if err != nil {
@@ -130,13 +152,10 @@ func (s *Store) ListMessagesPage(conversationID string, limit, offset int) ([]Me
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
-		var m Message
-		var createdAt, deliveredAt string
-		if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt); err != nil {
+		m, err := scanMessageFromRows(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		m.CreatedAt = parseDBTime(createdAt)
-		m.DeliveredAt = parseDBTime(deliveredAt)
 		out = append(out, m)
 	}
 	return out, total, rows.Err()
@@ -375,14 +394,31 @@ func (s *Store) ListOutboxJobsForPeer(peerID string, limit int) ([]outboxRetryIt
 
 func (s *Store) GetMessage(msgID string) (Message, error) {
 	var m Message
-	var createdAt, deliveredAt string
-	err := s.db.QueryRow(`SELECT msg_id,conversation_id,sender_peer_id,receiver_peer_id,direction,msg_type,plaintext,file_name,mime_type,file_size,file_cid,transport_mode,state,counter,created_at,delivered_at FROM messages WHERE msg_id=?`, msgID).
-		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt)
+	var createdAt, deliveredAt, lastRelayAt string
+	var ackp int
+	err := s.db.QueryRow(`SELECT `+selectMessageCols+` FROM messages WHERE msg_id=?`, msgID).
+		Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt, &m.TransportKind, &m.RelayStatus, &m.UpstreamMessageID, &m.ClientMsgID, &ackp, &lastRelayAt)
 	if err != nil {
 		return Message{}, err
 	}
 	m.CreatedAt = parseDBTime(createdAt)
 	m.DeliveredAt = parseDBTime(deliveredAt)
+	m.AckPending = ackp != 0
+	m.LastRelayAt = parseDBTime(lastRelayAt)
+	return m, nil
+}
+
+func scanMessageFromRows(rows *sql.Rows) (Message, error) {
+	var m Message
+	var createdAt, deliveredAt, lastRelayAt string
+	var ackp int
+	if err := rows.Scan(&m.MsgID, &m.ConversationID, &m.SenderPeerID, &m.ReceiverPeerID, &m.Direction, &m.MsgType, &m.Plaintext, &m.FileName, &m.MIMEType, &m.FileSize, &m.FileCID, &m.TransportMode, &m.State, &m.Counter, &createdAt, &deliveredAt, &m.TransportKind, &m.RelayStatus, &m.UpstreamMessageID, &m.ClientMsgID, &ackp, &lastRelayAt); err != nil {
+		return Message{}, err
+	}
+	m.CreatedAt = parseDBTime(createdAt)
+	m.DeliveredAt = parseDBTime(deliveredAt)
+	m.AckPending = ackp != 0
+	m.LastRelayAt = parseDBTime(lastRelayAt)
 	return m, nil
 }
 

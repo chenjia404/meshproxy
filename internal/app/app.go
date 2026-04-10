@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -279,6 +280,9 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	if strings.TrimSpace(cfg.Chat.MeshChatServerURL) != "" {
+		chatSvc.SetMeshChatRelay(cfg.Chat.MeshChatServerURL, a.idMgr)
+	}
 	publicChannelSvc, err := publicchannel.NewService(ctx, filepath.Join(cfg.DataDir, "public_channels.db"), a.Host(), h.Routing, gossipComp.PubSub())
 	if err != nil {
 		return nil, fmt.Errorf("init public channel service: %w", err)

@@ -150,6 +150,9 @@ type Conversation struct {
 	RetentionSyncedAt  time.Time `json:"retention_synced_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+
+	UpstreamConversationID string `json:"upstream_conversation_id,omitempty"`
+	LastUpstreamSyncSeq    uint64 `json:"last_upstream_sync_seq,omitempty"`
 }
 
 type Message struct {
@@ -169,6 +172,13 @@ type Message struct {
 	Counter        uint64    `json:"counter"`
 	CreatedAt      time.Time `json:"created_at"`
 	DeliveredAt    time.Time `json:"delivered_at,omitempty"`
+
+	TransportKind     string    `json:"transport_kind,omitempty"`
+	RelayStatus       string    `json:"relay_status,omitempty"`
+	UpstreamMessageID string    `json:"upstream_message_id,omitempty"`
+	ClientMsgID       string    `json:"client_msg_id,omitempty"`
+	AckPending        bool      `json:"ack_pending,omitempty"`
+	LastRelayAt       time.Time `json:"last_relay_at,omitempty"`
 }
 
 type SessionRequest struct {
