@@ -385,9 +385,28 @@ func (s *Service) meshChatBootstrap() {
 			}
 			_ = s.store.SetConversationUpstreamMeta(c.ConversationID, dcv.ConversationID, c.LastUpstreamSyncSeq)
 		}
+	}
+	s.syncMeshChatAllUpstreamConversations(ctx)
+	safe.Go("chat.meshchat.ws", func() { s.startMeshChatWebSocket(s.ctx) })
+}
+
+// syncMeshChatAllUpstreamConversations 对已有上游会话 ID 的会话按 LastUpstreamSyncSeq 做 HTTP 补拉（与 WebSocket 无关，用于启动与重连后填补断线窗口）。
+func (s *Service) syncMeshChatAllUpstreamConversations(ctx context.Context) {
+	if s == nil || s.meshChat == nil {
+		return
+	}
+	convs, err := s.store.ListConversations()
+	if err != nil {
+		log.Printf("[chat] meshchat sync all: list conversations: %v", err)
+		return
+	}
+	for i := range convs {
+		c := convs[i]
+		if strings.TrimSpace(c.UpstreamConversationID) == "" {
+			continue
+		}
 		s.syncMeshChatMessages(ctx, c.ConversationID)
 	}
-	safe.Go("chat.meshchat.ws", func() { s.startMeshChatWebSocket(s.ctx) })
 }
 
 func (s *Service) syncMeshChatMessages(ctx context.Context, localConvID string) {
@@ -657,8 +676,20 @@ func (s *Service) startMeshChatWebSocket(ctx context.Context) {
 			continue
 		}
 		dialBackoff = time.Second
+
+		// 先启动读协程，避免长时间仅做 HTTP 补拉时 WebSocket 层无法响应对端 ping/control。
+		readErrCh := make(chan error, 1)
+		go func() {
+			readErrCh <- s.meshChatWSReadLoop(conn)
+		}()
+
+		syncCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		s.syncMeshChatAllUpstreamConversations(syncCtx)
+		cancel()
+
 		s.meshChatWSSubscribe(conn)
-		readErr := s.meshChatWSReadLoop(conn)
+
+		readErr := <-readErrCh
 		_ = conn.Close()
 		if readErr != nil {
 			log.Printf("[chat] meshchat ws read: %v", readErr)
