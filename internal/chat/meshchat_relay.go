@@ -3,7 +3,9 @@ package chat
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -336,7 +338,7 @@ func (s *Service) markRelayFailed(m *Message, _ error) {
 	s.publishDirectMessageStateUpdate(m.MsgID)
 }
 
-// TryMeshChatUpstreamAck 在已向对端发送 delivery_ack 后，对来自上游 relay 的入站消息补充上游 ACK。
+// TryMeshChatUpstreamAck 在本地 delivery_ack 已通过 sendEnvelope 成功发出后，对来自上游 relay 的入站消息向 meshchat-server 补 ACK。
 func (s *Service) TryMeshChatUpstreamAck(msgID string) {
 	if s == nil || s.meshChat == nil {
 		return
@@ -385,7 +387,7 @@ func (s *Service) meshChatBootstrap() {
 		}
 		s.syncMeshChatMessages(ctx, c.ConversationID)
 	}
-	safe.Go("chat.meshchat.ws", func() { s.startMeshChatWebSocket(context.Background()) })
+	safe.Go("chat.meshchat.ws", func() { s.startMeshChatWebSocket(s.ctx) })
 }
 
 func (s *Service) syncMeshChatMessages(ctx context.Context, localConvID string) {
@@ -479,32 +481,88 @@ func (s *Service) applyUpstreamDMView(ctx context.Context, conv Conversation, dm
 	return nil
 }
 
-func (s *Service) startMeshChatWebSocket(ctx context.Context) {
-	if s.meshChat == nil {
+// dmRealtimePayload 与 meshchat-server WS 上 dm.message.created / dm.message.acked 的 data 结构一致。
+type dmRealtimePayload struct {
+	ConversationID string         `json:"conversation_id"`
+	Message        *dmMessageView `json:"message"`
+}
+
+// applyUpstreamDMAcked 处理上游 dm.message.acked，将本地对应消息的 relay_status 推进为 acked（出站已读确认；入站与 TryMeshChatUpstreamAck 幂等）。
+func (s *Service) applyUpstreamDMAcked(payload *dmRealtimePayload) {
+	if s == nil || payload == nil || payload.Message == nil {
 		return
 	}
-	auth, err := s.meshChat.authHeader(ctx)
+	upMid := strings.TrimSpace(payload.Message.MessageID)
+	if upMid == "" {
+		return
+	}
+	localMsgID, err := s.store.FindMessageByUpstreamID(upMid)
+	if err != nil || localMsgID == "" {
+		return
+	}
+	m, err := s.store.GetMessage(localMsgID)
 	if err != nil {
-		log.Printf("[chat] meshchat ws: auth: %v", err)
 		return
 	}
-	u, err := url.Parse(s.meshChat.baseURL)
-	if err != nil {
+	upConv := strings.TrimSpace(payload.ConversationID)
+	if upConv != "" {
+		localConvID, err := s.store.GetConversationByUpstreamID(upConv)
+		if err == nil && localConvID != "" && localConvID != m.ConversationID {
+			return
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return
+		}
+	}
+	if m.RelayStatus == RelayStatusAcked {
 		return
 	}
-	scheme := "ws"
-	if u.Scheme == "https" {
-		scheme = "wss"
+	m.RelayStatus = RelayStatusAcked
+	if m.Direction == "inbound" {
+		m.AckPending = false
 	}
-	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer"))
-	tok = strings.TrimSpace(tok)
-	wsURL := fmt.Sprintf("%s://%s/api/ws?token=%s", scheme, u.Host, url.QueryEscape(tok))
-	d, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		log.Printf("[chat] meshchat ws dial: %v", err)
+	blob, _ := s.store.GetMessageBlob(m.MsgID)
+	if _, err := s.store.AddMessage(m, blob); err != nil {
+		log.Printf("[chat] meshchat dm ack event persist: %v", err)
 		return
 	}
-	defer d.Close()
+	s.publishDirectMessageStateUpdate(m.MsgID)
+}
+
+func (s *Service) handleMeshChatWSFrame(data []byte) {
+	var env struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		return
+	}
+	switch env.Type {
+	case "dm.message.created":
+		var payload dmRealtimePayload
+		if json.Unmarshal(env.Data, &payload) != nil || payload.Message == nil {
+			return
+		}
+		localID, err := s.store.GetConversationByUpstreamID(payload.ConversationID)
+		if err != nil || localID == "" {
+			return
+		}
+		c, err := s.store.GetConversation(localID)
+		if err != nil {
+			return
+		}
+		_ = s.applyUpstreamDMView(context.Background(), c, payload.Message)
+	case "dm.message.acked":
+		var payload dmRealtimePayload
+		if json.Unmarshal(env.Data, &payload) != nil || payload.Message == nil {
+			return
+		}
+		s.applyUpstreamDMAcked(&payload)
+	default:
+	}
+}
+
+func (s *Service) meshChatWSSubscribe(conn *websocket.Conn) {
 	convs, _ := s.store.ListConversations()
 	var ids []string
 	for _, c := range convs {
@@ -513,37 +571,102 @@ func (s *Service) startMeshChatWebSocket(ctx context.Context) {
 		}
 	}
 	if len(ids) > 0 {
-		_ = d.WriteJSON(map[string]any{"action": "subscribe_dm", "conversation_ids": ids})
+		_ = conn.WriteJSON(map[string]any{"action": "subscribe_dm", "conversation_ids": ids})
 	}
+}
+
+func (s *Service) meshChatWSReadLoop(conn *websocket.Conn) error {
 	for {
-		_, data, err := d.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
+			return err
+		}
+		s.handleMeshChatWSFrame(data)
+	}
+}
+
+func meshChatWSNextDialBackoff(cur, max time.Duration) time.Duration {
+	cur *= 2
+	if cur > max {
+		return max
+	}
+	return cur
+}
+
+func (s *Service) startMeshChatWebSocket(ctx context.Context) {
+	if s.meshChat == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = s.ctx
+	}
+	dialBackoff := time.Second
+	const maxDialBackoff = 60 * time.Second
+	const disconnectPause = 2 * time.Second
+
+	dialer := websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+	}
+
+	for {
+		select {
+		case <-s.ctx.Done():
 			return
+		default:
 		}
-		var env struct {
-			Type string          `json:"type"`
-			Data json.RawMessage `json:"data"`
-		}
-		if err := json.Unmarshal(data, &env); err != nil {
+
+		auth, err := s.meshChat.authHeader(ctx)
+		if err != nil {
+			log.Printf("[chat] meshchat ws: auth: %v", err)
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(dialBackoff):
+			}
+			dialBackoff = meshChatWSNextDialBackoff(dialBackoff, maxDialBackoff)
 			continue
 		}
-		if env.Type == "dm.message.created" {
-			var payload struct {
-				ConversationID string       `json:"conversation_id"`
-				Message        *dmMessageView `json:"message"`
+		u, err := url.Parse(s.meshChat.baseURL)
+		if err != nil {
+			log.Printf("[chat] meshchat ws: parse url: %v", err)
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(dialBackoff):
 			}
-			if json.Unmarshal(env.Data, &payload) != nil || payload.Message == nil {
-				continue
+			dialBackoff = meshChatWSNextDialBackoff(dialBackoff, maxDialBackoff)
+			continue
+		}
+		scheme := "ws"
+		if u.Scheme == "https" {
+			scheme = "wss"
+		}
+		tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer"))
+		tok = strings.TrimSpace(tok)
+		wsURL := fmt.Sprintf("%s://%s/api/ws?token=%s", scheme, u.Host, url.QueryEscape(tok))
+		conn, _, err := dialer.Dial(wsURL, nil)
+		if err != nil {
+			log.Printf("[chat] meshchat ws dial: %v", err)
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(dialBackoff):
 			}
-			localID, err := s.store.GetConversationByUpstreamID(payload.ConversationID)
-			if err != nil || localID == "" {
-				continue
-			}
-			c, err := s.store.GetConversation(localID)
-			if err != nil {
-				continue
-			}
-			_ = s.applyUpstreamDMView(context.Background(), c, payload.Message)
+			dialBackoff = meshChatWSNextDialBackoff(dialBackoff, maxDialBackoff)
+			continue
+		}
+		dialBackoff = time.Second
+		s.meshChatWSSubscribe(conn)
+		readErr := s.meshChatWSReadLoop(conn)
+		_ = conn.Close()
+		if readErr != nil {
+			log.Printf("[chat] meshchat ws read: %v", readErr)
+		}
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(disconnectPause):
 		}
 	}
 }

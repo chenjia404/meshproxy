@@ -3150,7 +3150,9 @@ func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) err
 		AckedAtUnix:    time.Now().UTC().UnixMilli(),
 	}
 	err := s.sendEnvelope(conv.PeerID, ack)
-	s.TryMeshChatUpstreamAck(msgID)
+	if err == nil {
+		s.TryMeshChatUpstreamAck(msgID)
+	}
 	return err
 }
 
