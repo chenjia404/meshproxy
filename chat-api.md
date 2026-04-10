@@ -1040,52 +1040,6 @@ HTTP **`POST /api/v1/groups`** 在伺服器內會建立群組，並對 `members`
 
 ---
 
-## meshserver HTTP JWT（向使用者指定的伺服器取得 `access_token`）
-
-當前端需要**直接**呼叫 [meshserver 的 HTTP API](https://github.com/chenjia404/meshserver/blob/master/docs/api.md)（例如 `GET /v1/spaces`、`POST /v1/channels/{channel_id}/messages`），必須先取得 **`Authorization: Bearer <access_token>`**。meshserver 使用與 libp2p 對齊的 **`POST /v1/auth/challenge`** → 簽名 → **`POST /v1/auth/verify`** 流程；mesh-proxy 在本機代為完成 challenge/verify，並以**本節點的 libp2p 身份金鑰**簽名（與 mesh-proxy 的 PeerID 一致）。
-
-> **安全提示**：誰能呼叫本機 Local API，誰就能以你的節點身份向指定 `base_url` 換取 JWT。請僅在受信任環境使用，或自行在網關層限制來源。
-
-### `POST /api/v1/meshserver/http/access_token`
-
-| 項目 | 說明 |
-|------|------|
-| 成功狀態碼 | **200 OK** |
-| Content-Type | `application/json` |
-| 前置條件 | 應用已啟用 meshserver 相關能力（與其他 `/api/v1/meshserver/*` 相同）；否則 **404** `meshserver client not available`。 |
-
-**請求 body**：
-
-| 欄位 | 類型 | 必填 | 說明 |
-|------|------|------|------|
-| `base_url` | string | 是 | meshserver 的 HTTP 站點根位址，**不含**路徑前綴。例如 `https://mesh.example.com`。實作會請求 `{base_url}/v1/auth/challenge` 與 `{base_url}/v1/auth/verify`。 |
-| `protocol_id` | string | 否 | 簽名 payload 用的協議 ID。省略時使用 challenge 回應中的 `protocol_id`（須與 meshserver 設定的 `libp2p_protocol_id` 一致，預設多為 `/meshserver/session/1.0.0`）。 |
-
-範例：
-
-```json
-{
-  "base_url": "https://your-meshserver.example.com",
-  "protocol_id": "/meshserver/session/1.0.0"
-}
-```
-
-**回應欄位**（與 meshserver `POST /v1/auth/verify` 成功 body 對齊）：
-
-| 欄位 | 類型 | 說明 |
-|------|------|------|
-| `access_token` | string | JWT，後續請求 meshserver 時置於 `Authorization: Bearer ...` |
-| `token_type` | string | 通常為 `Bearer` |
-| `expires_in` | number | 剩餘有效秒數（約值） |
-| `expires_at` | string | 過期時間，RFC3339Nano，UTC |
-| `user` | object | 使用者摘要（結構見 meshserver 文件之 `user`） |
-
-**錯誤**：多為 **400**，body 純文字，內容為失敗原因（例如 challenge/verify HTTP 非 200、簽名驗證失敗、JSON 解析錯誤等）。
-
-**後續用法**：取得 `access_token` 後，瀏覽器或第三方應用應**直接向 `base_url` 所屬 meshserver** 發送請求（與 mesh-proxy 不同源），並帶上官方文件中的 Bearer 標頭；無需再經 mesh-proxy 轉發。
-
----
-
 ## WebSocket：即時事件
 
 ### 連線
