@@ -33,6 +33,7 @@ import (
 	"github.com/chenjia404/meshproxy/internal/identity"
 	"github.com/chenjia404/meshproxy/internal/ipfsnode"
 	"github.com/chenjia404/meshproxy/internal/meshserver"
+	"github.com/chenjia404/meshproxy/internal/meshserver/dmstore"
 	sessionv1 "github.com/chenjia404/meshproxy/internal/meshserver/sessionv1"
 	"github.com/chenjia404/meshproxy/internal/p2p"
 	"github.com/chenjia404/meshproxy/internal/protocol"
@@ -68,6 +69,9 @@ type App struct {
 	publicChannels   *publicchannel.Service
 	chatRelayV1Table *relay.ChatRelayV1Table // 《聊天中继.md》V1 中繼轉發表（僅 relay 模式寫入）
 	meshServer       *meshserver.Manager
+	dmStore          *dmstore.Store
+	dmSubs           map[chan map[string]any]struct{}
+	dmSubsMu         sync.Mutex
 
 	circuitStore         *store.CircuitStore
 	pathSelector         *client.PathSelector
@@ -304,6 +308,11 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	dmDB, err := dmstore.Open(filepath.Join(cfg.DataDir, "meshserver_dm.db"))
+	if err != nil {
+		return nil, fmt.Errorf("meshserver dm store: %w", err)
+	}
+	a.dmStore = dmDB
 	publicChannelSvc, err := publicchannel.NewService(ctx, filepath.Join(cfg.DataDir, "public_channels.db"), a.Host(), h.Routing, gossipComp.PubSub())
 	if err != nil {
 		return nil, fmt.Errorf("init public channel service: %w", err)
@@ -511,6 +520,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	safe.Go("app.autoUpdateLoop", func() { a.runAutoUpdateLoop(ctx) })
+	safe.Go("app.meshserver_dm_bridges", func() { a.startDMBridges(ctx) })
 
 	return a, nil
 }
@@ -1688,6 +1698,202 @@ func (m *meshServerAPIAdapter) CreateSpace(ctx context.Context, connection, name
 		return nil, fmt.Errorf("meshserver client not available")
 	}
 	return m.app.MeshServerCreateSpaceFor(ctx, connection, name, description, visibility, allowChannelCreation)
+}
+
+func (m *meshServerAPIAdapter) resolveMeshConnection(connection string) (string, error) {
+	name := strings.TrimSpace(connection)
+	if name != "" {
+		return name, nil
+	}
+	list := m.ListConnections()
+	if len(list) == 1 {
+		return list[0].Name, nil
+	}
+	return "", fmt.Errorf("connection query parameter is required when multiple meshserver connections exist")
+}
+
+func (m *meshServerAPIAdapter) DirectChatLocalUserID(connection string) string {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return ""
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil || cli == nil {
+		return ""
+	}
+	if ar := cli.AuthResult(); ar != nil {
+		return ar.UserId
+	}
+	return ""
+}
+
+func (m *meshServerAPIAdapter) DirectChatOpen(ctx context.Context, connection, peerUserID string) (*sessionv1.OpenDirectConversationResp, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return nil, err
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil {
+		return nil, err
+	}
+	return cli.OpenDirectConversation(ctx, peerUserID)
+}
+
+func (m *meshServerAPIAdapter) DirectChatListServer(ctx context.Context, connection string) (*sessionv1.ListDirectConversationsResp, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return nil, err
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil {
+		return nil, err
+	}
+	return cli.ListDirectConversations(ctx)
+}
+
+func (m *meshServerAPIAdapter) DirectChatSend(ctx context.Context, connection string, req *sessionv1.SendDirectMessageReq) (*sessionv1.SendDirectMessageAck, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return nil, err
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil {
+		return nil, err
+	}
+	return cli.SendDirectMessage(ctx, req)
+}
+
+func (m *meshServerAPIAdapter) DirectChatAck(ctx context.Context, connection, messageID string) (*sessionv1.AckDirectMessageResp, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return nil, err
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil {
+		return nil, err
+	}
+	return cli.AckDirectMessage(ctx, messageID)
+}
+
+func (m *meshServerAPIAdapter) DirectChatSync(ctx context.Context, connection string, req *sessionv1.SyncDirectMessagesReq) (*sessionv1.SyncDirectMessagesResp, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil {
+		return nil, err
+	}
+	cli, err := m.app.meshServerClient(cn)
+	if err != nil {
+		return nil, err
+	}
+	return cli.SyncDirectMessages(ctx, req)
+}
+
+func (m *meshServerAPIAdapter) DirectChatListLocal(connection string) ([]map[string]any, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil || m.app.dmStore == nil {
+		return nil, err
+	}
+	rows, err := m.app.dmStore.ListConversations(context.Background(), cn)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, map[string]any{
+			"connection":        r.Connection,
+			"conversation_id":   r.ConversationID,
+			"peer_user_id":      r.PeerUserID,
+			"peer_display_name":   r.PeerDisplayName,
+			"last_seq":          r.LastSeq,
+			"unread_count":      r.UnreadCount,
+			"last_message":      r.LastMessage,
+			"updated_at_unix":   r.UpdatedAtUnix,
+		})
+	}
+	return out, nil
+}
+
+func (m *meshServerAPIAdapter) DirectChatListMessagesLocal(connection, conversationID string, limit int) ([]map[string]any, error) {
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil || m.app == nil || m.app.dmStore == nil {
+		return nil, err
+	}
+	rows, err := m.app.dmStore.ListMessages(context.Background(), cn, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		m := map[string]any{
+			"connection":      r.Connection,
+			"conversation_id": r.ConversationID,
+			"message_id":      r.MessageID,
+			"seq":             r.Seq,
+			"from_user_id":    r.FromUserID,
+			"to_user_id":      r.ToUserID,
+			"direction":       r.Direction,
+			"msg_type":        r.MsgType,
+			"plaintext":       r.Plaintext,
+			"state":           r.State,
+			"created_at_unix": r.CreatedAtUnix,
+		}
+		if r.AckedAtUnix != nil {
+			m["acked_at_unix"] = *r.AckedAtUnix
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func (m *meshServerAPIAdapter) DirectChatMergeServerList(ctx context.Context, connection string, list *sessionv1.ListDirectConversationsResp) error {
+	if list == nil || m.app == nil || m.app.dmStore == nil {
+		return nil
+	}
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil {
+		return err
+	}
+	return m.app.dmStore.MergeListFromServer(ctx, cn, list.Conversations)
+}
+
+func (m *meshServerAPIAdapter) DirectChatApplySendAck(ctx context.Context, connection, localUserID, peerUserID string, ack *sessionv1.SendDirectMessageAck, text string) error {
+	if m.app == nil || m.app.dmStore == nil || ack == nil {
+		return nil
+	}
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil {
+		return err
+	}
+	return m.app.dmStore.ApplySendAck(ctx, cn, localUserID, peerUserID, ack, text)
+}
+
+func (m *meshServerAPIAdapter) DirectChatApplySyncMessages(ctx context.Context, connection string, sync *sessionv1.SyncDirectMessagesResp, localUserID string) error {
+	if sync == nil || m.app == nil || m.app.dmStore == nil {
+		return nil
+	}
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil {
+		return err
+	}
+	for _, ev := range sync.Messages {
+		if ev == nil {
+			continue
+		}
+		if err := m.app.dmStore.ApplyDirectMessageEvent(ctx, cn, localUserID, ev); err != nil {
+			return err
+		}
+	}
+	return m.app.dmStore.SetSyncAfterSeq(ctx, cn, sync.ConversationId, sync.NextAfterSeq)
+}
+
+func (m *meshServerAPIAdapter) DirectChatClearUnread(connection, conversationID string) error {
+	if m.app == nil || m.app.dmStore == nil {
+		return nil
+	}
+	cn, err := m.resolveMeshConnection(connection)
+	if err != nil {
+		return err
+	}
+	return m.app.dmStore.ClearUnread(context.Background(), cn, conversationID)
 }
 
 // streamsAPIAdapter adapts StreamManager to api.StreamsProvider.

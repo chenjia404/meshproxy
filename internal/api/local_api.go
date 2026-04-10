@@ -258,6 +258,20 @@ type MeshServerProvider interface {
 	// FetchMeshServerHTTPAccessToken 以本機 libp2p 身份對使用者指定的 meshserver HTTP 基底 URL 完成
 	// POST /v1/auth/challenge 與 /v1/auth/verify，取得 JWT（與 meshserver 官方 HTTP API 一致）。
 	FetchMeshServerHTTPAccessToken(ctx context.Context, baseURL, protocolID string) (*meshserver.HTTPAccessTokenResult, error)
+
+	// 中心化私聊（meshserver session DM），可選；未實作時 DM REST 回 501。
+	DirectChatOpen(ctx context.Context, connection, peerUserID string) (*sessionv1.OpenDirectConversationResp, error)
+	DirectChatListServer(ctx context.Context, connection string) (*sessionv1.ListDirectConversationsResp, error)
+	DirectChatSend(ctx context.Context, connection string, req *sessionv1.SendDirectMessageReq) (*sessionv1.SendDirectMessageAck, error)
+	DirectChatAck(ctx context.Context, connection, messageID string) (*sessionv1.AckDirectMessageResp, error)
+	DirectChatSync(ctx context.Context, connection string, req *sessionv1.SyncDirectMessagesReq) (*sessionv1.SyncDirectMessagesResp, error)
+	DirectChatListLocal(connection string) ([]map[string]any, error)
+	DirectChatListMessagesLocal(connection, conversationID string, limit int) ([]map[string]any, error)
+	DirectChatMergeServerList(ctx context.Context, connection string, list *sessionv1.ListDirectConversationsResp) error
+	DirectChatApplySendAck(ctx context.Context, connection, localUserID, peerUserID string, ack *sessionv1.SendDirectMessageAck, text string) error
+	DirectChatApplySyncMessages(ctx context.Context, connection string, sync *sessionv1.SyncDirectMessagesResp, localUserID string) error
+	DirectChatClearUnread(connection, conversationID string) error
+	DirectChatLocalUserID(connection string) string
 }
 
 // ChatProvider exposes direct chat functions to the local API.
@@ -434,6 +448,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/meshserver/connections/", api.handleMeshServerConnectionItem)
 	mux.HandleFunc("/api/v1/meshserver/server/my_permissions", api.handleMeshServerServerMyPermissions)
 	mux.HandleFunc("/api/v1/meshserver/http/access_token", api.handleMeshServerHTTPAccessToken)
+	mux.HandleFunc("/api/v1/meshserver/dm/", api.handleMeshServerDM)
 	mux.HandleFunc("/api/v1/update/check", api.handleUpdateCheck)
 	mux.HandleFunc("/api/v1/update/apply", api.handleUpdateApply)
 	mux.HandleFunc("/api/v1/update/settings", api.handleUpdateSettings)

@@ -44,6 +44,8 @@ type Client struct {
 	pendingMu     sync.Mutex
 	pending       map[string]chan *sessionv1.Envelope
 	events        chan *sessionv1.MessageEvent
+	dmEvents      chan *sessionv1.DirectMessageEvent
+	dmPeerAcks    chan *sessionv1.DirectPeerAckEvent
 	done          chan struct{}
 	closeOnce     sync.Once
 	streamMu      sync.RWMutex
@@ -78,6 +80,8 @@ func NewClient(ctx context.Context, h host.Host, privKey crypto.PrivKey, serverP
 		protocolID:   coreprotocol.ID(protoID),
 		pending:      make(map[string]chan *sessionv1.Envelope),
 		events:       make(chan *sessionv1.MessageEvent, 64),
+		dmEvents:     make(chan *sessionv1.DirectMessageEvent, 64),
+		dmPeerAcks:   make(chan *sessionv1.DirectPeerAckEvent, 32),
 		done:         make(chan struct{}),
 	}
 	if c.clientAgent == "" {
@@ -109,8 +113,24 @@ func (c *Client) Close() error {
 		}
 		c.pendingMu.Unlock()
 		close(c.events)
+		close(c.dmEvents)
+		close(c.dmPeerAcks)
 	})
 	return nil
+}
+
+func (c *Client) DMEvents() <-chan *sessionv1.DirectMessageEvent {
+	if c == nil {
+		return nil
+	}
+	return c.dmEvents
+}
+
+func (c *Client) DMPeerAckEvents() <-chan *sessionv1.DirectPeerAckEvent {
+	if c == nil {
+		return nil
+	}
+	return c.dmPeerAcks
 }
 
 func (c *Client) Events() <-chan *sessionv1.MessageEvent {
@@ -235,6 +255,26 @@ func (c *Client) readLoop() {
 			if err := protocol.UnmarshalBody(env.Body, &event); err == nil {
 				select {
 				case c.events <- &event:
+				case <-c.done:
+				}
+			}
+			continue
+		}
+		if env.MsgType == sessionv1.MsgType_DIRECT_MESSAGE_EVENT {
+			var event sessionv1.DirectMessageEvent
+			if err := protocol.UnmarshalBody(env.Body, &event); err == nil {
+				select {
+				case c.dmEvents <- &event:
+				case <-c.done:
+				}
+			}
+			continue
+		}
+		if env.MsgType == sessionv1.MsgType_DIRECT_PEER_ACK_EVENT {
+			var event sessionv1.DirectPeerAckEvent
+			if err := protocol.UnmarshalBody(env.Body, &event); err == nil {
+				select {
+				case c.dmPeerAcks <- &event:
 				case <-c.done:
 				}
 			}
@@ -626,6 +666,71 @@ func (c *Client) ListServerMembers(ctx context.Context, serverID string, afterMe
 		return nil, err
 	}
 	var resp sessionv1.ListSpaceMembersResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// OpenDirectConversation 發送 OPEN_DIRECT_CONVERSATION_REQ。
+func (c *Client) OpenDirectConversation(ctx context.Context, peerUserID string) (*sessionv1.OpenDirectConversationResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_OPEN_DIRECT_CONVERSATION_REQ, &sessionv1.OpenDirectConversationReq{PeerUserId: peerUserID})
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.OpenDirectConversationResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ListDirectConversations 發送 LIST_DIRECT_CONVERSATIONS_REQ。
+func (c *Client) ListDirectConversations(ctx context.Context) (*sessionv1.ListDirectConversationsResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_LIST_DIRECT_CONVERSATIONS_REQ, &sessionv1.ListDirectConversationsReq{})
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.ListDirectConversationsResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// SendDirectMessage 發送 SEND_DIRECT_MESSAGE_REQ。
+func (c *Client) SendDirectMessage(ctx context.Context, req *sessionv1.SendDirectMessageReq) (*sessionv1.SendDirectMessageAck, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_SEND_DIRECT_MESSAGE_REQ, req)
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.SendDirectMessageAck
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// AckDirectMessage 發送 ACK_DIRECT_MESSAGE_REQ。
+func (c *Client) AckDirectMessage(ctx context.Context, messageID string) (*sessionv1.AckDirectMessageResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_ACK_DIRECT_MESSAGE_REQ, &sessionv1.AckDirectMessageReq{MessageId: messageID})
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.AckDirectMessageResp
+	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// SyncDirectMessages 發送 SYNC_DIRECT_MESSAGES_REQ。
+func (c *Client) SyncDirectMessages(ctx context.Context, req *sessionv1.SyncDirectMessagesReq) (*sessionv1.SyncDirectMessagesResp, error) {
+	env, err := c.request(ctx, sessionv1.MsgType_SYNC_DIRECT_MESSAGES_REQ, req)
+	if err != nil {
+		return nil, err
+	}
+	var resp sessionv1.SyncDirectMessagesResp
 	if err := protocol.UnmarshalBody(env.Body, &resp); err != nil {
 		return nil, err
 	}

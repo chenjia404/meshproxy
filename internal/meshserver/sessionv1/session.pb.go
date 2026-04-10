@@ -54,6 +54,20 @@ const (
 	MsgType_GET_CREATE_GROUP_PERMISSIONS_RESP     MsgType = 62
 	MsgType_GET_MEDIA_REQ                         MsgType = 63
 	MsgType_GET_MEDIA_RESP                        MsgType = 64
+	MsgType_ADMIN_SET_GROUP_AUTO_DELETE_REQ       MsgType = 65
+	MsgType_ADMIN_SET_GROUP_AUTO_DELETE_RESP      MsgType = 66
+	MsgType_OPEN_DIRECT_CONVERSATION_REQ          MsgType = 67
+	MsgType_OPEN_DIRECT_CONVERSATION_RESP         MsgType = 68
+	MsgType_LIST_DIRECT_CONVERSATIONS_REQ         MsgType = 69
+	MsgType_LIST_DIRECT_CONVERSATIONS_RESP        MsgType = 70
+	MsgType_SEND_DIRECT_MESSAGE_REQ               MsgType = 71
+	MsgType_SEND_DIRECT_MESSAGE_ACK               MsgType = 72
+	MsgType_DIRECT_MESSAGE_EVENT                  MsgType = 73
+	MsgType_ACK_DIRECT_MESSAGE_REQ                MsgType = 74
+	MsgType_ACK_DIRECT_MESSAGE_RESP               MsgType = 75
+	MsgType_DIRECT_PEER_ACK_EVENT                 MsgType = 76
+	MsgType_SYNC_DIRECT_MESSAGES_REQ              MsgType = 77
+	MsgType_SYNC_DIRECT_MESSAGES_RESP             MsgType = 78
 	MsgType_ADMIN_SET_SPACE_MEMBER_ROLE_REQ       MsgType = 39
 	MsgType_ADMIN_SET_SPACE_MEMBER_ROLE_RESP      MsgType = 40
 	MsgType_ADMIN_SET_SPACE_CHANNEL_CREATION_REQ  MsgType = 41
@@ -112,6 +126,20 @@ var MsgType_name = map[int32]string{
 	62: "GET_CREATE_GROUP_PERMISSIONS_RESP",
 	63: "GET_MEDIA_REQ",
 	64: "GET_MEDIA_RESP",
+	65: "ADMIN_SET_GROUP_AUTO_DELETE_REQ",
+	66: "ADMIN_SET_GROUP_AUTO_DELETE_RESP",
+	67: "OPEN_DIRECT_CONVERSATION_REQ",
+	68: "OPEN_DIRECT_CONVERSATION_RESP",
+	69: "LIST_DIRECT_CONVERSATIONS_REQ",
+	70: "LIST_DIRECT_CONVERSATIONS_RESP",
+	71: "SEND_DIRECT_MESSAGE_REQ",
+	72: "SEND_DIRECT_MESSAGE_ACK",
+	73: "DIRECT_MESSAGE_EVENT",
+	74: "ACK_DIRECT_MESSAGE_REQ",
+	75: "ACK_DIRECT_MESSAGE_RESP",
+	76: "DIRECT_PEER_ACK_EVENT",
+	77: "SYNC_DIRECT_MESSAGES_REQ",
+	78: "SYNC_DIRECT_MESSAGES_RESP",
 }
 
 func (x MsgType) String() string { return proto.EnumName(MsgType_name, int32(x)) }
@@ -281,12 +309,13 @@ type ChannelSummary struct {
 	Description     string      `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
 	Visibility      Visibility  `protobuf:"varint,6,opt,name=visibility,proto3,enum=meshserver.session.v1.Visibility" json:"visibility,omitempty"`
 	SlowModeSeconds uint32      `protobuf:"varint,7,opt,name=slow_mode_seconds,json=slowModeSeconds,proto3" json:"slow_mode_seconds,omitempty"`
-	LastSeq         uint64      `protobuf:"varint,8,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
-	MemberCount     uint32      `protobuf:"varint,9,opt,name=member_count,json=memberCount,proto3" json:"member_count,omitempty"`
-	CanView         bool        `protobuf:"varint,10,opt,name=can_view,json=canView,proto3" json:"can_view,omitempty"`
-	CanSendMessage  bool        `protobuf:"varint,11,opt,name=can_send_message,json=canSendMessage,proto3" json:"can_send_message,omitempty"`
-	CanSendImage    bool        `protobuf:"varint,12,opt,name=can_send_image,json=canSendImage,proto3" json:"can_send_image,omitempty"`
-	CanSendFile     bool        `protobuf:"varint,13,opt,name=can_send_file,json=canSendFile,proto3" json:"can_send_file,omitempty"`
+	AutoDeleteAfterSeconds uint32      `protobuf:"varint,8,opt,name=auto_delete_after_seconds,json=autoDeleteAfterSeconds,proto3" json:"auto_delete_after_seconds,omitempty"`
+	LastSeq                uint64      `protobuf:"varint,9,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
+	MemberCount            uint32      `protobuf:"varint,10,opt,name=member_count,json=memberCount,proto3" json:"member_count,omitempty"`
+	CanView                bool        `protobuf:"varint,11,opt,name=can_view,json=canView,proto3" json:"can_view,omitempty"`
+	CanSendMessage         bool        `protobuf:"varint,12,opt,name=can_send_message,json=canSendMessage,proto3" json:"can_send_message,omitempty"`
+	CanSendImage           bool        `protobuf:"varint,13,opt,name=can_send_image,json=canSendImage,proto3" json:"can_send_image,omitempty"`
+	CanSendFile            bool        `protobuf:"varint,14,opt,name=can_send_file,json=canSendFile,proto3" json:"can_send_file,omitempty"`
 }
 
 func (m *ChannelSummary) Reset()         { *m = ChannelSummary{} }
@@ -692,6 +721,7 @@ type MediaFile struct {
 	MimeType   string `protobuf:"bytes,6,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	Size       uint64 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`
 	InlineData []byte `protobuf:"bytes,8,opt,name=inline_data,json=inlineData,proto3" json:"inline_data,omitempty"`
+	FileCid    string `protobuf:"bytes,9,opt,name=file_cid,json=fileCid,proto3" json:"file_cid,omitempty"`
 }
 
 func (m *MediaFile) Reset()         { *m = MediaFile{} }
@@ -804,3 +834,161 @@ type GetMediaResp struct {
 func (m *GetMediaResp) Reset()         { *m = GetMediaResp{} }
 func (m *GetMediaResp) String() string { return proto.CompactTextString(m) }
 func (*GetMediaResp) ProtoMessage()    {}
+
+type AdminSetGroupAutoDeleteReq struct {
+	ChannelId              uint32 `protobuf:"varint,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	AutoDeleteAfterSeconds uint32 `protobuf:"varint,2,opt,name=auto_delete_after_seconds,json=autoDeleteAfterSeconds,proto3" json:"auto_delete_after_seconds,omitempty"`
+}
+
+func (m *AdminSetGroupAutoDeleteReq) Reset()         { *m = AdminSetGroupAutoDeleteReq{} }
+func (m *AdminSetGroupAutoDeleteReq) String() string { return proto.CompactTextString(m) }
+func (*AdminSetGroupAutoDeleteReq) ProtoMessage()    {}
+
+type AdminSetGroupAutoDeleteResp struct {
+	Ok                     bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	ChannelId              uint32        `protobuf:"varint,2,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	AutoDeleteAfterSeconds uint32        `protobuf:"varint,3,opt,name=auto_delete_after_seconds,json=autoDeleteAfterSeconds,proto3" json:"auto_delete_after_seconds,omitempty"`
+	Channel                *ChannelSummary `protobuf:"bytes,4,opt,name=channel,proto3" json:"channel,omitempty"`
+	Message                string        `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *AdminSetGroupAutoDeleteResp) Reset()         { *m = AdminSetGroupAutoDeleteResp{} }
+func (m *AdminSetGroupAutoDeleteResp) String() string { return proto.CompactTextString(m) }
+func (*AdminSetGroupAutoDeleteResp) ProtoMessage()    {}
+
+type OpenDirectConversationReq struct {
+	PeerUserId string `protobuf:"bytes,1,opt,name=peer_user_id,json=peerUserId,proto3" json:"peer_user_id,omitempty"`
+}
+
+func (m *OpenDirectConversationReq) Reset()         { *m = OpenDirectConversationReq{} }
+func (m *OpenDirectConversationReq) String() string { return proto.CompactTextString(m) }
+func (*OpenDirectConversationReq) ProtoMessage()    {}
+
+type OpenDirectConversationResp struct {
+	Ok             bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	ConversationId string `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	PeerUserId     string `protobuf:"bytes,3,opt,name=peer_user_id,json=peerUserId,proto3" json:"peer_user_id,omitempty"`
+	LastSeq        uint64 `protobuf:"varint,4,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
+	Message        string `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *OpenDirectConversationResp) Reset()         { *m = OpenDirectConversationResp{} }
+func (m *OpenDirectConversationResp) String() string { return proto.CompactTextString(m) }
+func (*OpenDirectConversationResp) ProtoMessage()    {}
+
+type DirectConversationSummary struct {
+	ConversationId    string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	PeerUserId        string `protobuf:"bytes,2,opt,name=peer_user_id,json=peerUserId,proto3" json:"peer_user_id,omitempty"`
+	PeerDisplayName   string `protobuf:"bytes,3,opt,name=peer_display_name,json=peerDisplayName,proto3" json:"peer_display_name,omitempty"`
+	LastSeq           uint64 `protobuf:"varint,4,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
+	LastMessageAtMs   uint64 `protobuf:"varint,5,opt,name=last_message_at_ms,json=lastMessageAtMs,proto3" json:"last_message_at_ms,omitempty"`
+}
+
+func (m *DirectConversationSummary) Reset()         { *m = DirectConversationSummary{} }
+func (m *DirectConversationSummary) String() string { return proto.CompactTextString(m) }
+func (*DirectConversationSummary) ProtoMessage()    {}
+
+type ListDirectConversationsReq struct{}
+
+func (m *ListDirectConversationsReq) Reset()         { *m = ListDirectConversationsReq{} }
+func (m *ListDirectConversationsReq) String() string { return proto.CompactTextString(m) }
+func (*ListDirectConversationsReq) ProtoMessage()    {}
+
+type ListDirectConversationsResp struct {
+	Conversations []*DirectConversationSummary `protobuf:"bytes,1,rep,name=conversations,proto3" json:"conversations,omitempty"`
+}
+
+func (m *ListDirectConversationsResp) Reset()         { *m = ListDirectConversationsResp{} }
+func (m *ListDirectConversationsResp) String() string { return proto.CompactTextString(m) }
+func (*ListDirectConversationsResp) ProtoMessage()    {}
+
+type SendDirectMessageReq struct {
+	ConversationId string      `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	ToUserId       string      `protobuf:"bytes,2,opt,name=to_user_id,json=toUserId,proto3" json:"to_user_id,omitempty"`
+	ClientMsgId    string      `protobuf:"bytes,3,opt,name=client_msg_id,json=clientMsgId,proto3" json:"client_msg_id,omitempty"`
+	MessageType    MessageType `protobuf:"varint,4,opt,name=message_type,json=messageType,proto3,enum=meshserver.session.v1.MessageType" json:"message_type,omitempty"`
+	Text           string      `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+}
+
+func (m *SendDirectMessageReq) Reset()         { *m = SendDirectMessageReq{} }
+func (m *SendDirectMessageReq) String() string { return proto.CompactTextString(m) }
+func (*SendDirectMessageReq) ProtoMessage()    {}
+
+type SendDirectMessageAck struct {
+	Ok           bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	ConversationId string `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	ClientMsgId    string `protobuf:"bytes,3,opt,name=client_msg_id,json=clientMsgId,proto3" json:"client_msg_id,omitempty"`
+	MessageId      string `protobuf:"bytes,4,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	Seq            uint64 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"`
+	ServerTimeMs   uint64 `protobuf:"varint,6,opt,name=server_time_ms,json=serverTimeMs,proto3" json:"server_time_ms,omitempty"`
+	Message        string `protobuf:"bytes,7,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *SendDirectMessageAck) Reset()         { *m = SendDirectMessageAck{} }
+func (m *SendDirectMessageAck) String() string { return proto.CompactTextString(m) }
+func (*SendDirectMessageAck) ProtoMessage()    {}
+
+type DirectMessageEvent struct {
+	ConversationId string      `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	MessageId      string      `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	Seq            uint64      `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
+	FromUserId     string      `protobuf:"bytes,4,opt,name=from_user_id,json=fromUserId,proto3" json:"from_user_id,omitempty"`
+	ToUserId       string      `protobuf:"bytes,5,opt,name=to_user_id,json=toUserId,proto3" json:"to_user_id,omitempty"`
+	MessageType    MessageType `protobuf:"varint,6,opt,name=message_type,json=messageType,proto3,enum=meshserver.session.v1.MessageType" json:"message_type,omitempty"`
+	Text           string      `protobuf:"bytes,7,opt,name=text,proto3" json:"text,omitempty"`
+	CreatedAtMs    uint64      `protobuf:"varint,8,opt,name=created_at_ms,json=createdAtMs,proto3" json:"created_at_ms,omitempty"`
+}
+
+func (m *DirectMessageEvent) Reset()         { *m = DirectMessageEvent{} }
+func (m *DirectMessageEvent) String() string { return proto.CompactTextString(m) }
+func (*DirectMessageEvent) ProtoMessage()    {}
+
+type AckDirectMessageReq struct {
+	MessageId string `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+}
+
+func (m *AckDirectMessageReq) Reset()         { *m = AckDirectMessageReq{} }
+func (m *AckDirectMessageReq) String() string { return proto.CompactTextString(m) }
+func (*AckDirectMessageReq) ProtoMessage()    {}
+
+type AckDirectMessageResp struct {
+	Ok        bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	MessageId string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	Message   string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (m *AckDirectMessageResp) Reset()         { *m = AckDirectMessageResp{} }
+func (m *AckDirectMessageResp) String() string { return proto.CompactTextString(m) }
+func (*AckDirectMessageResp) ProtoMessage()    {}
+
+type DirectPeerAckEvent struct {
+	ConversationId string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	MessageId      string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	AckedAtMs      uint64 `protobuf:"varint,3,opt,name=acked_at_ms,json=ackedAtMs,proto3" json:"acked_at_ms,omitempty"`
+	PeerUserId     string `protobuf:"bytes,4,opt,name=peer_user_id,json=peerUserId,proto3" json:"peer_user_id,omitempty"`
+}
+
+func (m *DirectPeerAckEvent) Reset()         { *m = DirectPeerAckEvent{} }
+func (m *DirectPeerAckEvent) String() string { return proto.CompactTextString(m) }
+func (*DirectPeerAckEvent) ProtoMessage()    {}
+
+type SyncDirectMessagesReq struct {
+	ConversationId string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	AfterSeq       uint64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
+	Limit          uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+}
+
+func (m *SyncDirectMessagesReq) Reset()         { *m = SyncDirectMessagesReq{} }
+func (m *SyncDirectMessagesReq) String() string { return proto.CompactTextString(m) }
+func (*SyncDirectMessagesReq) ProtoMessage()    {}
+
+type SyncDirectMessagesResp struct {
+	ConversationId string                `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	Messages       []*DirectMessageEvent `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	NextAfterSeq   uint64                `protobuf:"varint,3,opt,name=next_after_seq,json=nextAfterSeq,proto3" json:"next_after_seq,omitempty"`
+	HasMore        bool                  `protobuf:"varint,4,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+}
+
+func (m *SyncDirectMessagesResp) Reset()         { *m = SyncDirectMessagesResp{} }
+func (m *SyncDirectMessagesResp) String() string { return proto.CompactTextString(m) }
+func (*SyncDirectMessagesResp) ProtoMessage()    {}
