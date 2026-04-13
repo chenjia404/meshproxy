@@ -39,3 +39,15 @@ func TestRewriteAdvertisedAddrsWithPublicIPv6(t *testing.T) {
 		t.Fatalf("got[0] = %q, want %q", got[0].String(), "/ip6/2001:db8::10/udp/4001/quic-v1")
 	}
 }
+
+func TestConnManagerWatermarks(t *testing.T) {
+	low, high := connManagerWatermarks(false)
+	if low != defaultConnMgrLowWater || high != defaultConnMgrHighWater {
+		t.Fatalf("default watermarks = (%d,%d), want (%d,%d)", low, high, defaultConnMgrLowWater, defaultConnMgrHighWater)
+	}
+
+	low, high = connManagerWatermarks(true)
+	if low != serverModeConnMgrLowWater || high != serverModeConnMgrHighWater {
+		t.Fatalf("server mode watermarks = (%d,%d), want (%d,%d)", low, high, serverModeConnMgrLowWater, serverModeConnMgrHighWater)
+	}
+}

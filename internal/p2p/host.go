@@ -30,13 +30,21 @@ type Host struct {
 // PeerSource supplies relay candidates to libp2p AutoRelay.
 type PeerSource = autorelay.PeerSource
 
+const (
+	defaultConnMgrLowWater     = 50
+	defaultConnMgrHighWater    = 400
+	serverModeConnMgrLowWater  = 30
+	serverModeConnMgrHighWater = 50
+)
+
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
-func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, relayPeerSource PeerSource, publicIP string) (*Host, error) {
+func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, relayPeerSource PeerSource, publicIP string, serverMode bool) (*Host, error) {
 	var hostRouting routing.Routing
 
+	lowWater, highWater := connManagerWatermarks(serverMode)
 	connmgr_, _ := connmgr.NewConnManager(
-		50,  // Lowwater
-		400, // HighWater,
+		lowWater,
+		highWater,
 		connmgr.WithGracePeriod(time.Minute),
 	)
 
@@ -135,6 +143,13 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 		Routing:     hostRouting,
 		ListenAddrs: advertisedAddrs,
 	}, nil
+}
+
+func connManagerWatermarks(serverMode bool) (lowWater, highWater int) {
+	if serverMode {
+		return serverModeConnMgrLowWater, serverModeConnMgrHighWater
+	}
+	return defaultConnMgrLowWater, defaultConnMgrHighWater
 }
 
 // Close shuts down the underlying libp2p host.
