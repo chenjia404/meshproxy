@@ -497,13 +497,13 @@ func (s *Store) ListMessagesMissingOutbox(limit int) ([]outboxRecoveryItem, erro
 		FROM messages m
 		LEFT JOIN outbox_jobs o ON o.msg_id = m.msg_id
 		WHERE m.direction='outbound'
-			AND m.transport_mode=?
+			AND m.transport_mode IN (?, ?)
 			AND m.state IN (?, ?, ?)
 			AND m.msg_type IN (?, ?, ?)
 			AND o.msg_id IS NULL
 		ORDER BY m.created_at ASC
 		LIMIT ?
-	`, TransportModeDirect, MessageStateLocalOnly, MessageStateQueuedForRetry, MessageStateSentToTransport, MessageTypeChatText, MessageTypeChatFile, MessageTypeGroupInviteNote, limit)
+	`, TransportModeDirect, TransportModeServer, MessageStateLocalOnly, MessageStateQueuedForRetry, MessageStateSentToTransport, MessageTypeChatText, MessageTypeChatFile, MessageTypeGroupInviteNote, limit)
 	if err != nil {
 		return nil, err
 	}

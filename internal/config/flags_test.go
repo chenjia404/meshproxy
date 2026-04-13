@@ -131,3 +131,13 @@ func TestValidateAllowsDisabledSocks5WithoutListen(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
+
+func TestValidateRejectsChatServerModeWithoutURL(t *testing.T) {
+	cfg := Default()
+	cfg.Chat.ServerMode = true
+	cfg.Chat.MeshChatServerURL = ""
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+}

@@ -3,7 +3,12 @@ package chat
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +17,26 @@ import (
 )
 
 const asyncDispatchMaxLatency = 500 * time.Millisecond
+
+type testMeshChatSigner struct {
+	peerID string
+}
+
+func (s testMeshChatSigner) SignChallenge(challenge string) (string, string, string, error) {
+	return "sig", "pub", s.peerID, nil
+}
+
+func waitForChatCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
 
 func TestSendRequestDispatchesAsynchronously(t *testing.T) {
 	t.Parallel()
@@ -201,4 +226,253 @@ func TestAcceptRequestDispatchesAsynchronously(t *testing.T) {
 	}
 
 	close(releaseTransport)
+}
+
+func TestSendTextServerModeUsesMeshChatServer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localPeer  = "12D3KooLOCAL"
+		remotePeer = "12D3KooREMOTE"
+		convID     = "conv-server-send"
+		upConvID   = "up-conv-send"
+		upMsgID    = "up-msg-send"
+	)
+
+	tmp := t.TempDir()
+	st, err := NewStore(filepath.Join(tmp, "chat.db"), localPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Now().UTC()
+	if _, err := st.CreateConversation(Conversation{
+		ConversationID:     convID,
+		PeerID:             remotePeer,
+		State:              ConversationStateActive,
+		LastTransportMode:  TransportModeDirect,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		RetentionSyncState: "synced",
+	}, sessionState{
+		ConversationID: convID,
+		PeerID:         remotePeer,
+		SendKey:        make([]byte, protocol.AEADKeySize),
+		RecvKey:        make([]byte, protocol.AEADKeySize),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var postConversationCalls int
+	var postMessageCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/challenge":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"challenge_id": "cid-1",
+				"challenge":    "hello",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "tok-1"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/dm/conversations":
+			mu.Lock()
+			postConversationCalls++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(dmConversationView{
+				ConversationID: upConvID,
+				PeerID:         remotePeer,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/dm/conversations/"+upConvID+"/messages":
+			mu.Lock()
+			postMessageCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(dmMessageView{
+				MessageID:       upMsgID,
+				ConversationID:  upConvID,
+				Seq:             1,
+				ContentType:     "text",
+				SenderPeerID:    localPeer,
+				RecipientPeerID: remotePeer,
+				ClientMsgID:     "client-msg-1",
+				Status:          "sent",
+				CreatedAt:       time.Now().UTC(),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	s := &Service{
+		ctx:        context.Background(),
+		store:      st,
+		localPeer:  localPeer,
+		eventsHub:  newChatEventHub(),
+		meshChat:   newMeshChatHTTPClient(srv.URL, localPeer, testMeshChatSigner{peerID: localPeer}),
+		serverMode: true,
+	}
+
+	msg, err := s.SendText(convID, "hello server mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitForChatCondition(t, 3*time.Second, func() bool {
+		cur, err := st.GetMessage(msg.MsgID)
+		if err != nil {
+			return false
+		}
+		return cur.TransportMode == TransportModeServer &&
+			cur.State == MessageStateSentToTransport &&
+			cur.UpstreamMessageID == upMsgID
+	})
+
+	cur, err := st.GetMessage(msg.MsgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.TransportMode != TransportModeServer {
+		t.Fatalf("transport mode: want %s got %s", TransportModeServer, cur.TransportMode)
+	}
+	if cur.UpstreamMessageID != upMsgID {
+		t.Fatalf("upstream message id: want %s got %s", upMsgID, cur.UpstreamMessageID)
+	}
+
+	conv, err := st.GetConversation(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.UpstreamConversationID != upConvID {
+		t.Fatalf("upstream conversation id: want %s got %s", upConvID, conv.UpstreamConversationID)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if postConversationCalls != 1 {
+		t.Fatalf("post conversation calls: want 1 got %d", postConversationCalls)
+	}
+	if postMessageCalls != 1 {
+		t.Fatalf("post message calls: want 1 got %d", postMessageCalls)
+	}
+}
+
+func TestSyncConversationServerModePullsFromMeshChat(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localPeer  = "12D3KooLOCAL"
+		remotePeer = "12D3KooREMOTE"
+		convID     = "conv-server-sync"
+		upConvID   = "up-conv-sync"
+		upMsgID    = "up-msg-sync"
+	)
+
+	tmp := t.TempDir()
+	st, err := NewStore(filepath.Join(tmp, "chat.db"), localPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	now := time.Now().UTC()
+	if _, err := st.CreateConversation(Conversation{
+		ConversationID:     convID,
+		PeerID:             remotePeer,
+		State:              ConversationStateActive,
+		LastTransportMode:  TransportModeDirect,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		RetentionSyncState: "synced",
+	}, sessionState{
+		ConversationID: convID,
+		PeerID:         remotePeer,
+		SendKey:        make([]byte, protocol.AEADKeySize),
+		RecvKey:        make([]byte, protocol.AEADKeySize),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var getMessagesCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/challenge":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"challenge_id": "cid-1",
+				"challenge":    "hello",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "tok-1"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/dm/conversations":
+			_ = json.NewEncoder(w).Encode(dmConversationView{
+				ConversationID: upConvID,
+				PeerID:         remotePeer,
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/dm/conversations/"+upConvID+"/messages"):
+			getMessagesCalls++
+			_ = json.NewEncoder(w).Encode([]dmMessageView{
+				{
+					MessageID:       upMsgID,
+					ConversationID:  upConvID,
+					Seq:             1,
+					ContentType:     "text",
+					Payload:         map[string]string{"text": "hello from upstream"},
+					SenderPeerID:    remotePeer,
+					RecipientPeerID: localPeer,
+					ClientMsgID:     "remote-client-msg-1",
+					Status:          "sent",
+					CreatedAt:       time.Now().UTC(),
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	s := &Service{
+		ctx:        context.Background(),
+		store:      st,
+		localPeer:  localPeer,
+		eventsHub:  newChatEventHub(),
+		meshChat:   newMeshChatHTTPClient(srv.URL, localPeer, testMeshChatSigner{peerID: localPeer}),
+		serverMode: true,
+	}
+
+	if err := s.SyncConversation(convID); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := st.ListMessages(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("messages len: want 1 got %d", len(msgs))
+	}
+	if msgs[0].TransportMode != TransportModeServer {
+		t.Fatalf("transport mode: want %s got %s", TransportModeServer, msgs[0].TransportMode)
+	}
+	if msgs[0].UpstreamMessageID != upMsgID {
+		t.Fatalf("upstream message id: want %s got %s", upMsgID, msgs[0].UpstreamMessageID)
+	}
+	if msgs[0].Plaintext != "hello from upstream" {
+		t.Fatalf("plaintext: want %q got %q", "hello from upstream", msgs[0].Plaintext)
+	}
+
+	conv, err := st.GetConversation(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.UpstreamConversationID != upConvID {
+		t.Fatalf("upstream conversation id: want %s got %s", upConvID, conv.UpstreamConversationID)
+	}
+	if conv.LastUpstreamSyncSeq != 1 {
+		t.Fatalf("last upstream sync seq: want 1 got %d", conv.LastUpstreamSyncSeq)
+	}
+	if getMessagesCalls == 0 {
+		t.Fatal("expected upstream messages endpoint to be called")
+	}
 }

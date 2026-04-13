@@ -92,10 +92,10 @@ func (c *meshChatHTTPClient) ensureToken(ctx context.Context) error {
 		return err
 	}
 	loginBody := map[string]string{
-		"peer_id":        pid,
-		"challenge_id":   ch.ChallengeID,
-		"signature":      sig,
-		"public_key":     pub,
+		"peer_id":      pid,
+		"challenge_id": ch.ChallengeID,
+		"signature":    sig,
+		"public_key":   pub,
 	}
 	lraw, _ := json.Marshal(loginBody)
 	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/auth/login", bytes.NewReader(lraw))
@@ -146,16 +146,16 @@ type dmConversationView struct {
 }
 
 type dmMessageView struct {
-	MessageID        string    `json:"message_id"`
-	ConversationID   string    `json:"conversation_id"`
-	Seq              uint64    `json:"seq"`
-	ContentType      string    `json:"content_type"`
-	Payload          any       `json:"payload"`
-	SenderPeerID     string    `json:"sender_peer_id"`
-	RecipientPeerID  string    `json:"recipient_peer_id"`
-	ClientMsgID      string    `json:"client_msg_id"`
-	Status           string    `json:"status"`
-	CreatedAt        time.Time `json:"created_at"`
+	MessageID        string     `json:"message_id"`
+	ConversationID   string     `json:"conversation_id"`
+	Seq              uint64     `json:"seq"`
+	ContentType      string     `json:"content_type"`
+	Payload          any        `json:"payload"`
+	SenderPeerID     string     `json:"sender_peer_id"`
+	RecipientPeerID  string     `json:"recipient_peer_id"`
+	ClientMsgID      string     `json:"client_msg_id"`
+	Status           string     `json:"status"`
+	CreatedAt        time.Time  `json:"created_at"`
 	RecipientAckedAt *time.Time `json:"recipient_acked_at,omitempty"`
 }
 
@@ -288,22 +288,55 @@ func (s *Service) tryMeshChatRelaySend(msgID string) {
 	if m.Direction != "outbound" || m.MsgType != MessageTypeChatText {
 		return
 	}
-	conv, err := s.store.GetConversation(m.ConversationID)
-	if err != nil {
-		return
+	blob, _ := s.store.GetMessageBlob(m.MsgID)
+	if err := s.sendStoredServerMessageWithContext(ctx, m, blob); err != nil {
+		log.Printf("[chat] meshchat post message msg=%s: %v", msgID, err)
+		s.markRelayFailed(&m, err)
+	}
+}
+
+func (s *Service) ensureMeshChatConversation(ctx context.Context, conv Conversation) (string, error) {
+	if s == nil || s.meshChat == nil {
+		return "", errors.New("meshchat relay not configured")
 	}
 	upConvID := strings.TrimSpace(conv.UpstreamConversationID)
+	if upConvID != "" {
+		return upConvID, nil
+	}
+	dcv, err := s.meshChat.postDMConversation(ctx, conv.PeerID)
+	if err != nil {
+		return "", err
+	}
+	upConvID = strings.TrimSpace(dcv.ConversationID)
 	if upConvID == "" {
-		dcv, err := s.meshChat.postDMConversation(ctx, conv.PeerID)
-		if err != nil {
-			log.Printf("[chat] meshchat create conversation: %v", err)
-			s.markRelayFailed(&m, err)
-			return
-		}
-		upConvID = dcv.ConversationID
-		if err := s.store.SetConversationUpstreamMeta(conv.ConversationID, upConvID, conv.LastUpstreamSyncSeq); err != nil {
-			log.Printf("[chat] persist upstream conv id: %v", err)
-		}
+		return "", errors.New("meshchat create conversation returned empty conversation id")
+	}
+	if err := s.store.SetConversationUpstreamMeta(conv.ConversationID, upConvID, conv.LastUpstreamSyncSeq); err != nil {
+		log.Printf("[chat] persist upstream conv id: %v", err)
+	}
+	return upConvID, nil
+}
+
+func (s *Service) sendStoredServerMessage(msg Message, blob []byte) error {
+	ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+	defer cancel()
+	return s.sendStoredServerMessageWithContext(ctx, msg, blob)
+}
+
+func (s *Service) sendStoredServerMessageWithContext(ctx context.Context, m Message, blob []byte) error {
+	if s == nil || s.meshChat == nil {
+		return errors.New("meshchat relay not configured")
+	}
+	if m.Direction != "outbound" || m.MsgType != MessageTypeChatText {
+		return fmt.Errorf("meshchat relay unsupported message type %q", m.MsgType)
+	}
+	conv, err := s.store.GetConversation(m.ConversationID)
+	if err != nil {
+		return err
+	}
+	upConvID, err := s.ensureMeshChatConversation(ctx, conv)
+	if err != nil {
+		return err
 	}
 	cm := strings.TrimSpace(m.ClientMsgID)
 	if cm == "" {
@@ -311,20 +344,29 @@ func (s *Service) tryMeshChatRelaySend(msgID string) {
 	}
 	dmv, err := s.meshChat.postDMMessage(ctx, upConvID, cm, m.Plaintext)
 	if err != nil {
-		log.Printf("[chat] meshchat post message msg=%s: %v", msgID, err)
-		s.markRelayFailed(&m, err)
-		return
+		return err
 	}
+	m.TransportMode = TransportModeServer
 	m.TransportKind = TransportKindRelayStore
 	m.RelayStatus = RelayStatusRelayed
 	m.UpstreamMessageID = dmv.MessageID
 	m.ClientMsgID = cm
 	m.LastRelayAt = time.Now().UTC()
-	blob, _ := s.store.GetMessageBlob(m.MsgID)
 	if _, err := s.store.AddMessage(m, blob); err != nil {
-		log.Printf("[chat] meshchat update relay meta: %v", err)
+		return err
 	}
 	s.publishDirectMessageStateUpdate(m.MsgID)
+	if dmv.Seq > 0 {
+		if err := s.store.SetConversationUpstreamMeta(conv.ConversationID, upConvID, maxUint64(conv.LastUpstreamSyncSeq, dmv.Seq)); err != nil {
+			log.Printf("[chat] meshchat persist upstream seq: %v", err)
+		}
+	}
+	if dmv.RecipientAckedAt != nil {
+		if err := s.store.MarkMessageDelivered(m.MsgID, dmv.RecipientAckedAt.UTC()); err == nil {
+			s.publishDirectMessageStateUpdate(m.MsgID)
+		}
+	}
+	return nil
 }
 
 func (s *Service) markRelayFailed(m *Message, _ error) {
@@ -336,6 +378,13 @@ func (s *Service) markRelayFailed(m *Message, _ error) {
 		log.Printf("[chat] meshchat mark failed: %v", err)
 	}
 	s.publishDirectMessageStateUpdate(m.MsgID)
+}
+
+func maxUint64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // TryMeshChatUpstreamAck 在本地 delivery_ack 已通过 sendEnvelope 成功发出后，对来自上游 relay 的入站消息向 meshchat-server 补 ACK。
@@ -378,12 +427,12 @@ func (s *Service) meshChatBootstrap() {
 	for i := range convs {
 		c := convs[i]
 		if strings.TrimSpace(c.UpstreamConversationID) == "" {
-			dcv, err := s.meshChat.postDMConversation(ctx, c.PeerID)
+			upConvID, err := s.ensureMeshChatConversation(ctx, c)
 			if err != nil {
 				log.Printf("[chat] meshchat bootstrap conv peer=%s: %v", c.PeerID, err)
 				continue
 			}
-			_ = s.store.SetConversationUpstreamMeta(c.ConversationID, dcv.ConversationID, c.LastUpstreamSyncSeq)
+			c.UpstreamConversationID = upConvID
 		}
 	}
 	s.syncMeshChatAllUpstreamConversations(ctx)
@@ -402,29 +451,31 @@ func (s *Service) syncMeshChatAllUpstreamConversations(ctx context.Context) {
 	}
 	for i := range convs {
 		c := convs[i]
-		if strings.TrimSpace(c.UpstreamConversationID) == "" {
-			continue
+		if err := s.syncMeshChatMessages(ctx, c.ConversationID); err != nil {
+			log.Printf("[chat] meshchat sync conversation=%s: %v", c.ConversationID, err)
 		}
-		s.syncMeshChatMessages(ctx, c.ConversationID)
 	}
 }
 
-func (s *Service) syncMeshChatMessages(ctx context.Context, localConvID string) {
+func (s *Service) syncMeshChatMessages(ctx context.Context, localConvID string) error {
 	if s == nil || s.meshChat == nil {
-		return
+		return nil
 	}
 	conv, err := s.store.GetConversation(localConvID)
 	if err != nil {
-		return
+		return err
 	}
-	up := strings.TrimSpace(conv.UpstreamConversationID)
-	if up == "" {
-		return
+	up, err := s.ensureMeshChatConversation(ctx, conv)
+	if err != nil {
+		return err
 	}
 	after := conv.LastUpstreamSyncSeq
 	for {
 		list, err := s.meshChat.listDMAfter(ctx, up, after, 50)
-		if err != nil || len(list) == 0 {
+		if err != nil {
+			return err
+		}
+		if len(list) == 0 {
 			break
 		}
 		for _, dm := range list {
@@ -438,10 +489,13 @@ func (s *Service) syncMeshChatMessages(ctx context.Context, localConvID string) 
 		if err := s.store.SetConversationUpstreamMeta(localConvID, up, after); err != nil {
 			log.Printf("[chat] meshchat sync seq: %v", err)
 		}
+		conv.LastUpstreamSyncSeq = after
+		conv.UpstreamConversationID = up
 		if len(list) < 50 {
 			break
 		}
 	}
+	return nil
 }
 
 func (s *Service) applyUpstreamDMView(ctx context.Context, conv Conversation, dm *dmMessageView) error {
@@ -475,22 +529,22 @@ func (s *Service) applyUpstreamDMView(ctx context.Context, conv Conversation, dm
 		return err
 	}
 	msg := Message{
-		MsgID:               dm.MessageID,
+		MsgID:             dm.MessageID,
 		ConversationID:    conv.ConversationID,
-		SenderPeerID:        dm.SenderPeerID,
-		ReceiverPeerID:      s.localPeer,
-		Direction:           "inbound",
-		MsgType:             MessageTypeChatText,
-		Plaintext:           text,
-		TransportMode:       TransportModeDirect,
-		State:               MessageStateReceived,
-		Counter:             sess.RecvCounter,
-		CreatedAt:           dm.CreatedAt.UTC(),
-		TransportKind:       TransportKindRelayStore,
-		RelayStatus:         RelayStatusRelayed,
-		UpstreamMessageID:   dm.MessageID,
-		ClientMsgID:         dm.ClientMsgID,
-		AckPending:          true,
+		SenderPeerID:      dm.SenderPeerID,
+		ReceiverPeerID:    s.localPeer,
+		Direction:         "inbound",
+		MsgType:           MessageTypeChatText,
+		Plaintext:         text,
+		TransportMode:     TransportModeServer,
+		State:             MessageStateReceived,
+		Counter:           sess.RecvCounter,
+		CreatedAt:         dm.CreatedAt.UTC(),
+		TransportKind:     TransportKindRelayStore,
+		RelayStatus:       RelayStatusRelayed,
+		UpstreamMessageID: dm.MessageID,
+		ClientMsgID:       dm.ClientMsgID,
+		AckPending:        true,
 	}
 	if err := s.store.AddInboundMessageAndAdvanceRecvCounter(msg, ciphertext, sess.RecvCounter+1, true); err != nil {
 		return err
@@ -539,6 +593,10 @@ func (s *Service) applyUpstreamDMAcked(payload *dmRealtimePayload) {
 	m.RelayStatus = RelayStatusAcked
 	if m.Direction == "inbound" {
 		m.AckPending = false
+	} else if payload.Message.RecipientAckedAt != nil {
+		m.State = MessageStateDeliveredRemote
+		m.DeliveredAt = payload.Message.RecipientAckedAt.UTC()
+		_ = s.store.DeleteOutboxJob(m.MsgID)
 	}
 	blob, _ := s.store.GetMessageBlob(m.MsgID)
 	if _, err := s.store.AddMessage(m, blob); err != nil {

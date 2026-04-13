@@ -83,6 +83,7 @@ type PublicChannelConfig struct {
 type ChatConfig struct {
 	OfflineStorePeers []string                        `yaml:"offline_store_peers"`
 	MeshChatServerURL string                          `yaml:"meshchat_server_url"`
+	ServerMode        bool                            `yaml:"server_mode"`
 	OfflineStoreNodes []offlinestore.OfflineStoreNode `yaml:"-"`
 }
 
@@ -625,6 +626,9 @@ func (c *Config) Validate() error {
 		if _, err := peer.Decode(pid); err != nil {
 			return fmt.Errorf("chat.offline_store_peers[%d]: %w", i, err)
 		}
+	}
+	if c.Chat.ServerMode && strings.TrimSpace(c.Chat.MeshChatServerURL) == "" {
+		return errors.New("chat.meshchat_server_url required when chat.server_mode=true")
 	}
 	return nil
 }

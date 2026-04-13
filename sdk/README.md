@@ -286,6 +286,13 @@ func main() {
 | `--p2p.nodisc` | bool | `false` | 关闭 DHT rendezvous 发现 |
 | `--p2p.discovery_tag` | string | `meshproxy` | 发现标签 |
 
+### Chat
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--chat.meshchat_server_url` | string | `""` | 可选的 `meshchat-server` HTTP 根地址 |
+| `--chat.server_mode` | bool | `false` | 开启后，私聊文本消息只通过 `meshchat-server` 发送与同步 |
+
 ### SOCKS5
 
 | 参数 | 类型 | 默认值 | 说明 |

@@ -281,6 +281,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		return nil, fmt.Errorf("init chat service: %w", err)
 	}
 	a.chat = chatSvc
+	chatSvc.SetServerMode(cfg.Chat.ServerMode)
 	if strings.TrimSpace(cfg.Chat.MeshChatServerURL) != "" {
 		chatSvc.SetMeshChatRelay(cfg.Chat.MeshChatServerURL, a.idMgr)
 	}

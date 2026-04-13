@@ -45,6 +45,7 @@ const (
 
 const (
 	TransportModeDirect       = "direct"
+	TransportModeServer       = "server"
 	TransportModeOfflineStore = "offline_store" // 來自離線 store 拉取（可選跳過序號空洞）
 )
 

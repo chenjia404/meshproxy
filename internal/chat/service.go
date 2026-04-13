@@ -81,7 +81,8 @@ type Service struct {
 	chatSyncPending      sync.Map // key: conversation_id -> chan ChatSyncResponse
 	chatFileFetchPending sync.Map // key: conversation_id\x00msg_id\x00offset -> chan ChatFileFetchResponse
 
-	meshChat *meshChatHTTPClient // 上游 meshchat-server relay（可选）
+	meshChat   *meshChatHTTPClient // 上游 meshchat-server relay（可选）
+	serverMode bool                // 服务器优先模式：文本私聊走 meshchat-server，跳过聊天侧直连/中继同步保活
 }
 
 type chatRequestProbeState struct {
@@ -185,13 +186,16 @@ func (s *Service) runRelayKeepConnectedLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			if s.isServerModeActive() {
+				continue
+			}
 			s.keepRelaysConnected(relayKeepConnectedMax)
 		}
 	}
 }
 
 func (s *Service) keepRelaysConnected(max int) {
-	if s == nil || s.host == nil || s.discovery == nil || max <= 0 {
+	if s == nil || s.host == nil || s.discovery == nil || max <= 0 || s.isServerModeActive() {
 		return
 	}
 
@@ -253,6 +257,17 @@ func (s *Service) Close() error {
 		return nil
 	}
 	return s.store.Close()
+}
+
+func (s *Service) SetServerMode(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.serverMode = enabled
+}
+
+func (s *Service) isServerModeActive() bool {
+	return s != nil && s.serverMode && s.meshChat != nil
 }
 
 func (s *Service) GetProfile() (Profile, error) {
@@ -778,6 +793,9 @@ func (s *Service) SendFile(conversationID, fileName, mimeType string, data []byt
 	if len(data) > MaxChatFileBytes {
 		return Message{}, fmt.Errorf("file too large: max %d bytes", MaxChatFileBytes)
 	}
+	if s.isServerModeActive() {
+		return Message{}, errors.New("chat server mode currently only supports text direct messages")
+	}
 	fileName = NormalizeChatFileName(fileName)
 	conv, err := s.store.GetConversation(conversationID)
 	if err != nil {
@@ -854,6 +872,9 @@ func (s *Service) RevokeMessage(conversationID, msgID string) error {
 	}
 	if msg.Direction != "outbound" || msg.SenderPeerID != s.localPeer {
 		return errors.New("only outbound local messages can be revoked")
+	}
+	if msg.TransportMode == TransportModeServer {
+		return errors.New("chat server mode does not support revoking sent messages yet")
 	}
 	revoke := MessageRevoke{
 		Type:           MessageTypeMessageRevoke,
@@ -1319,6 +1340,9 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 		Counter:        counter,
 		CreatedAt:      time.Now().UTC(),
 	}
+	if s.isServerModeActive() {
+		msg.TransportMode = TransportModeServer
+	}
 	msg, err = s.store.AddMessage(msg, ciphertext)
 	if err != nil {
 		return Message{}, err
@@ -1332,13 +1356,18 @@ func (s *Service) SendText(conversationID, text string) (Message, error) {
 	safe.Go("chat.sendDirectText."+msg.MsgID, func() {
 		s.completeOutboundDirectSend(msg, ciphertext, nil)
 	})
-	if s.meshChat != nil {
+	if s.meshChat != nil && !s.isServerModeActive() {
 		safe.Go("chat.meshchat.send."+msg.MsgID, func() { s.tryMeshChatRelaySend(msg.MsgID) })
 	}
 	return msg, nil
 }
 
 func (s *Service) SyncConversation(conversationID string) error {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+		defer cancel()
+		return s.syncMeshChatMessages(ctx, conversationID)
+	}
 	conv, err := s.store.GetConversation(conversationID)
 	if err != nil {
 		return err
@@ -1396,6 +1425,7 @@ func (s *Service) NetworkStatus() map[string]any {
 	out := map[string]any{
 		"local_peer_id":   s.localPeer,
 		"connected_peers": len(s.host.Network().Peers()),
+		"server_mode":     s.isServerModeActive(),
 	}
 
 	// Provide which relay peers are currently connected so the console can display it.
@@ -1445,6 +1475,9 @@ func (s *Service) ConnectPeer(peerID string) error {
 }
 
 func (s *Service) OnPeerDiscovered(peerID string) {
+	if s.isServerModeActive() {
+		return
+	}
 	peerID = strings.TrimSpace(peerID)
 	if peerID == "" || peerID == s.localPeer {
 		return
@@ -1473,6 +1506,9 @@ func (s *Service) OnPeerDiscovered(peerID string) {
 }
 
 func (s *Service) OnPeerConnected(peerID string) {
+	if s.isServerModeActive() {
+		return
+	}
 	peerID = strings.TrimSpace(peerID)
 	if peerID == "" || peerID == s.localPeer {
 		return
@@ -3217,7 +3253,8 @@ func (s *Service) publishDirectMessageStateUpdate(msgID string) {
 	s.publishChatEvent(newDirectMessageStateEvent(m))
 }
 
-// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往对端（sendStoredDirectMessage：无直连时先离线 store 再连对方；已有直连则直連失敗再寫離線 store 再試中繼）；失败则标记 queued 并调度重试。
+// completeOutboundDirectSend 在消息已落库、outbox 已登记后尝试发往传输层。
+// 服务器模式文本消息走 meshchat-server，其它消息仍按原有直连/中继/离线 store 逻辑发送。
 // 若用户在发送完成前撤回并删除本地消息，则放弃发送（避免对已删消息改状态）。
 func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cachedCiphertext []byte) {
 	cur, err := s.store.GetMessage(msg.MsgID)
@@ -3233,8 +3270,14 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 	if cur.State != MessageStateLocalOnly {
 		return
 	}
-	if err := s.sendStoredDirectMessage(msg, storedBlob, cachedCiphertext); err != nil {
-		log.Printf("[chat] outbound send failed msg=%s peer=%s: %v", msg.MsgID, msg.ReceiverPeerID, err)
+	sendErr := error(nil)
+	if msg.TransportMode == TransportModeServer {
+		sendErr = s.sendStoredServerMessage(msg, storedBlob)
+	} else {
+		sendErr = s.sendStoredDirectMessage(msg, storedBlob, cachedCiphertext)
+	}
+	if sendErr != nil {
+		log.Printf("[chat] outbound send failed msg=%s peer=%s: %v", msg.MsgID, msg.ReceiverPeerID, sendErr)
 		msg.State = MessageStateQueuedForRetry
 		if _, updateErr := s.store.AddMessage(msg, storedBlob); updateErr != nil {
 			log.Printf("[chat] persist queued state failed msg=%s: %v", msg.MsgID, updateErr)
@@ -3245,6 +3288,12 @@ func (s *Service) completeOutboundDirectSend(msg Message, storedBlob []byte, cac
 		}
 		s.publishDirectMessageStateUpdate(msg.MsgID)
 		return
+	}
+	if msg.TransportMode == TransportModeServer {
+		cur, err = s.store.GetMessage(msg.MsgID)
+		if err == nil {
+			msg = cur
+		}
 	}
 	msg.State = MessageStateSentToTransport
 	if _, err := s.store.AddMessage(msg, storedBlob); err != nil {
@@ -3374,7 +3423,12 @@ func (s *Service) retryOutboxJob(item outboxRetryItem) error {
 	if err != nil {
 		return err
 	}
-	if err := s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil); err != nil {
+	if msg.TransportMode == TransportModeServer {
+		err = s.sendStoredServerMessage(msg, item.CiphertextBlob)
+	} else {
+		err = s.sendStoredDirectMessage(msg, item.CiphertextBlob, nil)
+	}
+	if err != nil {
 		log.Printf("[chat] retry outbox send failed msg=%s peer=%s: %v", item.MsgID, item.PeerID, err)
 		_ = s.store.UpdateMessageState(item.MsgID, MessageStateQueuedForRetry)
 		s.publishDirectMessageStateUpdate(item.MsgID)
