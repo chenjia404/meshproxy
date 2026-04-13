@@ -120,6 +120,7 @@ $env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpa
 - **`p2p.public_ip`**：手动指定对外广播的公网 IP。设置后，libp2p 会把监听地址里的内网/任意地址改写成这个公网 IP，并关闭 identify 地址发现，避免广播大量内网地址。
 - **`p2p.bootstrap_peers`**：其他节点的 multiaddr，用于启动时连接引导。
 - **`p2p.nodisc`**：是否禁用 DHT 节点发现。为 `true` 时不会执行 rendezvous `Advertise/FindPeers`，只依赖 `bootstrap_peers`、已连接节点的 gossip descriptor 与 peer exchange。
+- **`socks5.enabled`**：是否启用本地 SOCKS5 代理入口；设为 `false` 时，不启动本地代理监听，但节点的 P2P、聊天、公开频道、IPFS、本地 API 等能力仍可继续使用。
 - **`socks5.listen`**：本地 SOCKS5 监听地址，例如 `127.0.0.1:1080`。
 - **`socks5.allow_udp_associate`**：是否啟用 SOCKS5 UDP ASSOCIATE（預設 `false`）；啟用後需出口策略 `exit.policy.allow_udp: true` 配合。
 - **`socks5.tunnel_to_exit`**：是否开启“本地原样转发到 exit 的 SOCKS5”模式。开启后，本地 `socks5.listen` 接收到的 TCP 连接不会在本地解析 SOCKS5，而是直接通过 raw libp2p stream 原样转发到 exit 节点上的 SOCKS5 服务。

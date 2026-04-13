@@ -302,6 +302,13 @@
       '当前可选出口': 'Available exits',
       '暂无符合当前规则的出口节点，或尚未发现任何 Exit。': 'No exits match the current rules, or no exits have been discovered yet.',
       '已保存出口选择设置。': 'Exit selection saved.',
+      '本地代理': 'Local Proxy',
+      '当前监听地址：': 'Current listen address:',
+      'SOCKS5 已启用，关闭后会立即停止本地代理监听；P2P、聊天、IPFS 和本地 API 不受影响。': 'SOCKS5 is enabled. Turning it off stops the local proxy listener immediately; P2P, chat, IPFS, and local API stay available.',
+      'SOCKS5 已关闭，开启后会立即启动本地代理监听；监听地址取当前配置中的 socks5.listen。': 'SOCKS5 is disabled. Turning it on starts the local proxy listener immediately using the configured socks5.listen address.',
+      '保存 SOCKS5 设置失败: ': 'Failed to save SOCKS5 settings: ',
+      '已启用': 'Enabled',
+      '已关闭': 'Disabled',
       '自动更新': 'Auto Update',
       '正在读取自动更新设置…': 'Loading auto-update settings…',
       '开启后会定期检查 GitHub，并在发现新版本后自动下载安装。': 'When enabled, it periodically checks GitHub and automatically downloads and installs new releases.',
@@ -393,6 +400,7 @@
 
     var lastUpdateInfo = null;
     var lastAutoUpdateEnabled = null;
+    var lastSocks5Enabled = null;
 
     function renderUpdateInfo(info, applying) {
       if (!info) return '<p class="empty">点击按钮后会从 GitHub 检查最新 release。</p>';
@@ -468,6 +476,37 @@
       };
     }
 
+    function renderSocks5Settings(enabled, listenAddr) {
+      lastSocks5Enabled = !!enabled;
+      var hint = enabled
+        ? 'SOCKS5 已启用，关闭后会立即停止本地代理监听；P2P、聊天、IPFS 和本地 API 不受影响。'
+        : 'SOCKS5 已关闭，开启后会立即启动本地代理监听；监听地址取当前配置中的 socks5.listen。';
+      var addr = enabled && listenAddr
+        ? '<span class="hint">当前监听地址：<code>' + escapeHtml(listenAddr) + '</code></span>'
+        : '<span class="hint">当前监听地址：-</span>';
+      return '<div class="update-settings" id="socks5-settings">' +
+        '<label><input type="checkbox" id="socks5-enabled-toggle"' + (enabled ? ' checked' : '') + '> 本地代理</label>' +
+        '<span class="hint">' + escapeHtml(hint) + '</span>' +
+        addr +
+        '</div>';
+    }
+
+    function bindSocks5Toggle() {
+      var toggle = document.getElementById('socks5-enabled-toggle');
+      if (!toggle) return;
+      toggle.onchange = function() {
+        var enabled = !!toggle.checked;
+        toggle.disabled = true;
+        post('/api/v1/socks5/settings', { enabled: enabled }).then(function(info) {
+          lastSocks5Enabled = !!(info && info.enabled);
+          show('status');
+        }).catch(function(err) {
+          alert('保存 SOCKS5 设置失败: ' + err.message);
+          show('status');
+        });
+      };
+    }
+
     function bindUpdateControls() {
       var checkBtn = document.getElementById('check-update-btn');
       var applyBtn = document.getElementById('apply-update-btn');
@@ -512,17 +551,22 @@
         ? '<dl class="kv"><dt>电路池</dt><dd><pre style="margin:0;font-size:0.8rem">' + JSON.stringify(pool.kinds, null, 2) + '</pre></dd></dl>'
         : '';
       setTimeout(bindUpdateControls, 0);
+      setTimeout(bindSocks5Toggle, 0);
       setTimeout(refreshAutoUpdateSettings, 0);
+      var socks5Html = data.socks5_enabled
+        ? '<code>' + escapeHtml(data.socks5_listen || '-') + '</code> <span class="badge ok">已启用</span>'
+        : '- <span class="badge warn">已关闭</span>';
       return '<h1>节点状态</h1><div class="card"><h3>基本信息</h3><dl class="kv">' +
         '<dt>Peer ID</dt><dd><code>' + escapeHtml(data.peer_id || '-') + '</code></dd>' +
         '<dt>版本</dt><dd>' + escapeHtml(data.version || 'devel') + '</dd>' +
         '<dt>模式</dt><dd><span class="badge ok">' + escapeHtml(data.mode || '-') + '</span></dd>' +
-        '<dt>SOCKS5</dt><dd>' + escapeHtml(data.socks5_listen || '-') + '</dd>' +
+        '<dt>SOCKS5</dt><dd>' + socks5Html + '</dd>' +
         '<dt>运行时长</dt><dd>' + formatUptime(data.uptime_seconds) + '</dd>' +
         '<dt>本次流量</dt><dd>' + formatBytes((data.traffic && data.traffic.bytes_total) || 0) + ' <span class="muted">上行 ' + formatBytes((data.traffic && data.traffic.bytes_sent) || 0) + ' · 下行 ' + formatBytes((data.traffic && data.traffic.bytes_received) || 0) + '</span></dd>' +
         '<dt>已知 Relay</dt><dd>' + (data.relays_known ?? '-') + '</dd>' +
         '<dt>已知 Exit</dt><dd>' + (data.exits_known ?? '-') + '</dd>' +
         '<dt>P2P 监听</dt><dd><pre style="margin:0;font-size:0.8rem">' + (data.p2p_listen_addrs || []).map(escapeHtml).join('\n') + '</pre></dd></dl>' + poolHtml + '</div>' +
+        '<div class="card"><h3>本地代理</h3>' + renderSocks5Settings(!!data.socks5_enabled, data.socks5_listen || '') + '</div>' +
         '<div class="card"><h3>程序更新</h3><div id="update-result">' + renderUpdateInfo(lastUpdateInfo, false) + '</div>' + renderAutoUpdateSettings(lastAutoUpdateEnabled) + '<div class="actions"><button class="btn btn-primary" id="check-update-btn">检查更新</button><button class="btn btn-secondary" id="apply-update-btn">立即更新</button></div></div>';
     }
     function renderNodeTable(list, title) {

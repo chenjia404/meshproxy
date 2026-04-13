@@ -81,9 +81,9 @@ type PublicChannelConfig struct {
 // OfflineStoreNodes 由 Normalize 從 OfflineStorePeers 解析得到，不參與 YAML 反序列化。
 // MeshChatServerURL 可选：唯一上游 meshchat-server（HTTP 根，如 http://127.0.0.1:8581），用于私聊 relay/offline store；仅 mesh-proxy 使用，Android 不直连。
 type ChatConfig struct {
-	OfflineStorePeers   []string                        `yaml:"offline_store_peers"`
-	MeshChatServerURL   string                          `yaml:"meshchat_server_url"`
-	OfflineStoreNodes   []offlinestore.OfflineStoreNode `yaml:"-"`
+	OfflineStorePeers []string                        `yaml:"offline_store_peers"`
+	MeshChatServerURL string                          `yaml:"meshchat_server_url"`
+	OfflineStoreNodes []offlinestore.OfflineStoreNode `yaml:"-"`
 }
 
 // IPFSConfig 嵌入式 IPFS 子系統（boxo + 共享 host）。
@@ -258,6 +258,8 @@ type P2PConfig struct {
 
 // Socks5Config groups SOCKS5 listener configuration.
 type Socks5Config struct {
+	// Enabled controls whether the local SOCKS5 server is started.
+	Enabled bool `yaml:"enabled"`
 	// Listen is the address for the local SOCKS5 server.
 	Listen string `yaml:"listen"`
 	// TunnelToExit forwards accepted TCP streams to the selected exit's local SOCKS5 service without parsing SOCKS5 locally.
@@ -296,6 +298,7 @@ func Default() Config {
 			DiscoveryTag: "meshproxy",
 		},
 		Socks5: Socks5Config{
+			Enabled:           true,
 			TunnelToExit:      true,
 			ExitUpstream:      "127.0.0.1:1081",
 			Listen:            "127.0.0.1:1080",
@@ -588,13 +591,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid mode %q, must be %q or %q", c.Mode, ModeRelay, ModeRelayExit)
 	}
 
-	if c.Socks5.Listen == "" {
-		return errors.New("socks5.listen must not be empty")
+	if c.Socks5.Enabled && c.Socks5.Listen == "" {
+		return errors.New("socks5.listen must not be empty when socks5.enabled=true")
 	}
 	if c.Socks5.ExitUpstream == "" {
 		c.Socks5.ExitUpstream = "127.0.0.1:1081"
 	}
-	if c.Socks5.TunnelToExit {
+	if c.Socks5.Enabled && c.Socks5.TunnelToExit {
 		if _, _, err := net.SplitHostPort(c.Socks5.ExitUpstream); err != nil {
 			return fmt.Errorf("invalid socks5.exit_upstream %q: %w", c.Socks5.ExitUpstream, err)
 		}
@@ -697,5 +700,18 @@ func SaveAutoUpdateSettings(path string, enabled bool) error {
 		return fmt.Errorf("load config for save: %w", err)
 	}
 	c.AutoUpdate = enabled
+	return Write(path, &c)
+}
+
+// SaveSocks5Settings updates socks5.enabled and persists it to the config file.
+func SaveSocks5Settings(path string, enabled bool) error {
+	if path == "" {
+		return nil
+	}
+	c, err := Load(path)
+	if err != nil {
+		return fmt.Errorf("load config for save: %w", err)
+	}
+	c.Socks5.Enabled = enabled
 	return Write(path, &c)
 }

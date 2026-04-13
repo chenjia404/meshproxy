@@ -41,6 +41,7 @@ const ChatPageCID = "QmQmAf4B4kwpKavdhbyKFDev7Mohcbn1BP4ACCyRYSdadm"
 type StatusProvider interface {
 	PeerID() string
 	Mode() string
+	Socks5Enabled() bool
 	Socks5Listen() string
 	P2PListenAddrs() []string
 	StartTime() time.Time
@@ -150,6 +151,12 @@ type Socks5TunnelProvider interface {
 	SetTunnelToExit(enabled bool)
 }
 
+// Socks5SettingsProvider provides read/update of the local SOCKS5 service state.
+type Socks5SettingsProvider interface {
+	GetSocks5Enabled() bool
+	SetSocks5Enabled(enabled bool) error
+}
+
 // ExitCandidatesProvider returns the current list of exit candidates (after applying selection rules).
 type ExitCandidatesProvider interface {
 	ListExitCandidates() ([]*discovery.NodeDescriptor, error)
@@ -172,6 +179,7 @@ type LocalAPIOpts struct {
 	Metrics             MetricsSummaryProvider
 	ExitSelection       ExitSelectionProvider
 	Socks5Tunnel        Socks5TunnelProvider
+	Socks5Settings      Socks5SettingsProvider
 	ExitCandidates      ExitCandidatesProvider
 	ExitCountryResolver ExitCountryResolver // optional: for resolved country in exit-candidates / display
 	// ConfigPath 若非空，保存出口選擇時會寫回該配置文件，使重啟後仍生效。
@@ -331,6 +339,7 @@ func NewLocalAPI(listen string, sp StatusProvider, np NodeProvider, cp CircuitPr
 	mux.HandleFunc("/api/v1/client/exit-selection", api.handleExitSelection)
 	mux.HandleFunc("/api/v1/client/exit-candidates", api.handleExitCandidates)
 	mux.HandleFunc("/api/v1/client/circuit-pool", api.handleCircuitPoolConfig)
+	mux.HandleFunc("/api/v1/socks5/settings", api.handleSocks5Settings)
 	mux.HandleFunc("/api/v1/chat/me", api.handleChatMe)
 	mux.HandleFunc("/api/v1/chat/profile", api.handleChatProfile)
 	mux.HandleFunc("/api/v1/chat/profile/avatar", api.handleChatProfileAvatar)
@@ -493,6 +502,7 @@ func (a *LocalAPI) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"peer_id":          p.PeerID(),
 		"mode":             p.Mode(),
+		"socks5_enabled":   p.Socks5Enabled(),
 		"socks5_listen":    p.Socks5Listen(),
 		"p2p_listen_addrs": p.P2PListenAddrs(),
 		"uptime_seconds":   int64(time.Since(p.StartTime()).Seconds()),
@@ -890,6 +900,36 @@ func (a *LocalAPI) handleCircuitPoolConfig(w http.ResponseWriter, r *http.Reques
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+}
+
+func (a *LocalAPI) handleSocks5Settings(w http.ResponseWriter, r *http.Request) {
+	if a.opts == nil || a.opts.Socks5Settings == nil {
+		http.Error(w, "socks5 settings not available", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{
+			"enabled": a.opts.Socks5Settings.GetSocks5Enabled(),
+		})
+	case http.MethodPost:
+		var payload struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.opts.Socks5Settings.SetSocks5Enabled(payload.Enabled); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"enabled": a.opts.Socks5Settings.GetSocks5Enabled(),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

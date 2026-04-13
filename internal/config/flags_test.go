@@ -22,6 +22,7 @@ func TestRegisterFlagsMapsNestedConfigFields(t *testing.T) {
 		"--p2p.public_ip=203.0.113.10",
 		"--p2p.nodisc",
 		"--p2p.bootstrap_peers=/ip4/1.2.3.4/tcp/1234/p2p/QmTest,/dnsaddr/bootstrap.libp2p.io/p2p/QmFoo",
+		"--socks5.enabled=false",
 		"--socks5.listen=127.0.0.1:1089",
 		"--api.listen=127.0.0.1:19081",
 		"--client.exit_selection.mode=fixed_peer",
@@ -49,6 +50,9 @@ func TestRegisterFlagsMapsNestedConfigFields(t *testing.T) {
 	}
 	if cfg.Socks5.Listen != "127.0.0.1:1089" {
 		t.Fatalf("cfg.Socks5.Listen = %q, want %q", cfg.Socks5.Listen, "127.0.0.1:1089")
+	}
+	if cfg.Socks5.Enabled {
+		t.Fatalf("cfg.Socks5.Enabled = true, want false")
 	}
 	if cfg.API.Listen != "127.0.0.1:19081" {
 		t.Fatalf("cfg.API.Listen = %q, want %q", cfg.API.Listen, "127.0.0.1:19081")
@@ -115,5 +119,15 @@ func TestValidateRejectsInvalidPublicIP(t *testing.T) {
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() error = nil, want error")
+	}
+}
+
+func TestValidateAllowsDisabledSocks5WithoutListen(t *testing.T) {
+	cfg := Default()
+	cfg.Socks5.Enabled = false
+	cfg.Socks5.Listen = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }

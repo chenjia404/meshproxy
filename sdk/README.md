@@ -290,6 +290,7 @@ func main() {
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
+| `--socks5.enabled` | bool | `true` | 是否启用本地 SOCKS5 |
 | `--socks5.listen` | string | `127.0.0.1:1080` | 本地 SOCKS5 监听地址 |
 | `--socks5.tunnel_to_exit` | bool | `true` | 是否透传到 exit 的 SOCKS5 |
 | `--socks5.exit_upstream` | string | `127.0.0.1:1081` | exit 节点上游 SOCKS5 地址 |

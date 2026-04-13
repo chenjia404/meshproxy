@@ -60,7 +60,7 @@ func main() {
 	}
 
 	application, err := sdk.New(ctx, cfg, sdk.Options{
-		EnableSOCKS5:   true,
+		EnableSOCKS5:   cfg.Socks5.Enabled,
 		EnableLocalAPI: true,
 	})
 	if err != nil {

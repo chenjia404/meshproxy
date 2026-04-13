@@ -18,7 +18,9 @@ p2p:
   # nodisc: true               # 为 true 时禁用 DHT Advertise/FindPeers 节点发现，仅使用 bootstrap、已连接节点 gossip 和 peer exchange
 
 socks5:
+  enabled: true
   listen: "127.0.0.1:1080"
+  # enabled: false             # 关闭后不启动本地 SOCKS5 代理，仅保留 P2P / 聊天 / IPFS / API 等能力
   # tunnel_to_exit: true        # 客户端启用后，本地 1080 收到的 TCP 原样转发到 exit 的 SOCKS5
   # exit_upstream: "127.0.0.1:1081"   # exit 节点上的直连 SOCKS5，直接出网并受出口策略限制
   # allow_udp_associate: true   # 啟用 SOCKS5 UDP ASSOCIATE（需出口策略 allow_udp 配合）

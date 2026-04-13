@@ -57,6 +57,7 @@ type App struct {
 
 	discovery *discovery.Manager
 
+	socks5Mu         sync.RWMutex
 	socks5           *client.Socks5Server
 	exitSocks5       *exit.Socks5Server
 	localAPI         *api.LocalAPI
@@ -153,16 +154,16 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	a := &App{
-		ctx:                   ctx,
-		cfg:                   cfg,
-		startTime:             time.Now(),
-		store:                 store.NewMemoryStore(),
-		circuitStore:          store.NewCircuitStore(),
-		relayCache:            relayCache,
-		bootstrapCache:        bootstrapCache,
-		updater:               update.NewService("chenjia404", "meshproxy", "meshproxy"),
-		autoUpdate:            cfg.AutoUpdate,
-		traffic:               traffic.NewRecorder(),
+		ctx:            ctx,
+		cfg:            cfg,
+		startTime:      time.Now(),
+		store:          store.NewMemoryStore(),
+		circuitStore:   store.NewCircuitStore(),
+		relayCache:     relayCache,
+		bootstrapCache: bootstrapCache,
+		updater:        update.NewService("chenjia404", "meshproxy", "meshproxy"),
+		autoUpdate:     cfg.AutoUpdate,
+		traffic:        traffic.NewRecorder(),
 	}
 
 	// Identity
@@ -430,13 +431,9 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	if opts.EnableSOCKS5 {
-		socks := client.NewSocks5Server(cfg.Socks5.Listen, a.Host(), cm, selector, streamMgr, &errorRecorderAdapter{store: a.recentErrors}, a.traffic)
-		socks.SetAllowUDPAssociate(cfg.Socks5.AllowUDPAssociate)
-		socks.SetTunnelToExit(cfg.Socks5.TunnelToExit, cfg.Socks5.ExitUpstream)
-		if err := socks.Start(); err != nil {
+		if err := a.startSocks5Locked(); err != nil {
 			return nil, fmt.Errorf("start socks5: %w", err)
 		}
-		a.socks5 = socks
 	}
 
 	if opts.EnableLocalAPI {
@@ -452,6 +449,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 			Metrics:             &metricsSummaryAdapter{app: a},
 			ExitSelection:       selector,
 			Socks5Tunnel:        &socks5TunnelAPIAdapter{app: a},
+			Socks5Settings:      a,
 			ExitCandidates:      selector,
 			ExitCountryResolver: selector,
 			ConfigPath:          cfg.ConfigFilePath,
@@ -498,10 +496,8 @@ func (a *App) Close() error {
 				firstErr = err
 			}
 		}
-		if a.socks5 != nil {
-			if err := a.socks5.Close(); err != nil && firstErr == nil {
-				firstErr = err
-			}
+		if err := a.stopSocks5(); err != nil && firstErr == nil {
+			firstErr = err
 		}
 		if a.chat != nil {
 			if err := a.chat.Close(); err != nil && firstErr == nil {
@@ -577,10 +573,25 @@ func (a *App) Mode() string {
 
 // Socks5Listen returns the listen address of the local SOCKS5 server.
 func (a *App) Socks5Listen() string {
+	a.socks5Mu.RLock()
+	defer a.socks5Mu.RUnlock()
 	if a.socks5 == nil {
 		return ""
 	}
 	return a.socks5.Addr()
+}
+
+func (a *App) Socks5Enabled() bool {
+	if a == nil {
+		return false
+	}
+	a.socks5Mu.RLock()
+	defer a.socks5Mu.RUnlock()
+	return a.cfg.Socks5.Enabled
+}
+
+func (a *App) GetSocks5Enabled() bool {
+	return a.Socks5Enabled()
 }
 
 // LocalAPIListen returns the configured HTTP API listen address, or empty when the local API is disabled.
@@ -663,6 +674,31 @@ func (a *App) SetAutoUpdate(enabled bool) error {
 			a.autoUpdateOnce(ctx)
 		})
 	}
+	return nil
+}
+
+func (a *App) SetSocks5Enabled(enabled bool) error {
+	if a == nil {
+		return fmt.Errorf("app is nil")
+	}
+	if a.cfg.ConfigFilePath != "" {
+		if err := config.SaveSocks5Settings(a.cfg.ConfigFilePath, enabled); err != nil {
+			return err
+		}
+	}
+	a.socks5Mu.Lock()
+	defer a.socks5Mu.Unlock()
+	if enabled {
+		if err := a.startSocks5Locked(); err != nil {
+			return err
+		}
+		a.cfg.Socks5.Enabled = true
+		return nil
+	}
+	if err := a.stopSocks5Locked(); err != nil {
+		return err
+	}
+	a.cfg.Socks5.Enabled = false
 	return nil
 }
 
@@ -813,6 +849,8 @@ func (s *socks5TunnelAPIAdapter) GetTunnelToExit() bool {
 	if s.app == nil {
 		return false
 	}
+	s.app.socks5Mu.RLock()
+	defer s.app.socks5Mu.RUnlock()
 	return s.app.cfg.Socks5.TunnelToExit
 }
 
@@ -820,10 +858,46 @@ func (s *socks5TunnelAPIAdapter) SetTunnelToExit(enabled bool) {
 	if s.app == nil {
 		return
 	}
+	s.app.socks5Mu.Lock()
+	defer s.app.socks5Mu.Unlock()
 	s.app.cfg.Socks5.TunnelToExit = enabled
 	if s.app.socks5 != nil {
 		s.app.socks5.SetTunnelToExit(enabled, s.app.cfg.Socks5.ExitUpstream)
 	}
+}
+
+func (a *App) startSocks5Locked() error {
+	if a == nil {
+		return fmt.Errorf("app is nil")
+	}
+	if a.socks5 != nil {
+		a.cfg.Socks5.Enabled = true
+		return nil
+	}
+	socks := client.NewSocks5Server(a.cfg.Socks5.Listen, a.Host(), a.circuitManager, a.pathSelector, a.streamMgr, &errorRecorderAdapter{store: a.recentErrors}, a.traffic)
+	socks.SetAllowUDPAssociate(a.cfg.Socks5.AllowUDPAssociate)
+	socks.SetTunnelToExit(a.cfg.Socks5.TunnelToExit, a.cfg.Socks5.ExitUpstream)
+	if err := socks.Start(); err != nil {
+		return err
+	}
+	a.socks5 = socks
+	a.cfg.Socks5.Enabled = true
+	return nil
+}
+
+func (a *App) stopSocks5() error {
+	a.socks5Mu.Lock()
+	defer a.socks5Mu.Unlock()
+	return a.stopSocks5Locked()
+}
+
+func (a *App) stopSocks5Locked() error {
+	if a == nil || a.socks5 == nil {
+		return nil
+	}
+	socks := a.socks5
+	a.socks5 = nil
+	return socks.Close()
 }
 
 // errorRecorderAdapter adapts api.RecentErrorsStore to client.ErrorRecorder.
