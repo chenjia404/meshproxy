@@ -103,7 +103,7 @@ go build -o bin/meshproxy ./cmd/node
 在 Windows PowerShell 下，将 `./cmd/node` 编译为 Android arm64 二进制文件的示例命令为：
 
 ```powershell
-$env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpath -buildvcs=false -o bin/meshproxy.so -ldflags="-w -s" -ldflags "-checklinkname=0" ./cmd/node
+$env:GOOS="android"; $env:GOARCH="arm64"; $env:CGO_ENABLED="0"; go build -trimpath -buildvcs=false -o bin/meshproxy.so -ldflags="-w -s -checklinkname=0" -asmflags="./dontoptimizeme=-N" ./cmd/node
 ```
 
 配置说明

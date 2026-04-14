@@ -2192,12 +2192,16 @@ func (s *Service) sendJSONConnectedOnly(peerID string, protocolID coreprotocol.I
 }
 
 func (s *Service) sendEnvelope(peerID string, v any) error {
+	// server_mode 下消息投递已走 meshchat-server，辅助信令（ACK/撤回等）仅尝试直连，不走 P2P 中继。
+	if s.isServerModeActive() {
+		protoID := protocolForEnvelope(v)
+		return s.sendJSON(peerID, protoID, v)
+	}
 	// 已有未過期 relay-v1 會話時優先走中繼，避免每條消息先嘗試直連造成路徑抖動與額外延遲。
 	if _, ok := s.relayV1PreferredRelayForDst(peerID); ok {
 		if err := s.sendViaRelay(peerID, v); err == nil {
 			return nil
 		}
-		// 本輪中繼均失敗時回落直連，再按原邏輯試中繼。
 	}
 	protoID := protocolForEnvelope(v)
 	if err := s.sendJSON(peerID, protoID, v); err == nil {
@@ -2209,6 +2213,10 @@ func (s *Service) sendEnvelope(peerID string, v any) error {
 // sendEnvelopeDirectOrRelay 默認先直連再中繼；若已有健康 relay-v1 則與 sendEnvelope 一致優先中繼。若走了中繼則 usedRelay 為 true。
 // 私聊已發送消息請用 sendStoredDirectMessage（无直连先离线 store 再连对方；已有直连则直連失敗再寫離線 store 再試中繼）。
 func (s *Service) sendEnvelopeDirectOrRelay(peerID string, v any) (usedRelay bool, err error) {
+	if s.isServerModeActive() {
+		protoID := protocolForEnvelope(v)
+		return false, s.sendJSON(peerID, protoID, v)
+	}
 	if _, ok := s.relayV1PreferredRelayForDst(peerID); ok {
 		if err := s.sendViaRelay(peerID, v); err == nil {
 			return true, nil
