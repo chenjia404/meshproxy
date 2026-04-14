@@ -65,6 +65,203 @@ func TestServicePinFetchesFromHTTPMirrorCAR(t *testing.T) {
 	}
 }
 
+func TestEnsureLocalSubpathFetchesCARWithSubpath(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+
+	data := []byte("hello ipfs subpath car mirror")
+	target := mustCIDForConfig(t, cfg, data)
+	carBytes := mustCARForConfig(t, cfg, data)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/ipfs/" + target + "/js/app.js"
+		if r.URL.Path != wantPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("format") != "car" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		_, _ = w.Write(carBytes)
+	}))
+	defer srv.Close()
+
+	cfg.HTTPMirrorGateway = srv.URL
+	svc := newTestService(t, cfg)
+	originalP2P := svc.fetchFromP2PFn
+	defer func() { svc.fetchFromP2PFn = originalP2P }()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	e := &EmbeddedIPFS{svc: svc}
+	c := mustDecodeCID(t, target)
+	if err := e.EnsureLocalSubpath(context.Background(), c, "js/app.js"); err != nil {
+		t.Fatalf("EnsureLocalSubpath should fetch car with subpath from mirror: %v", err)
+	}
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal after subpath ensure: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected cid to be present locally after subpath car mirror fetch")
+	}
+}
+
+func TestEnsureLocalSubpathWithMirrorOverridesConfig(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+	cfg.HTTPMirrorGateway = "https://invalid.example"
+
+	data := []byte("hello ipfs subpath mirror override")
+	target := mustCIDForConfig(t, cfg, data)
+	carBytes := mustCARForConfig(t, cfg, data)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/ipfs/" + target + "/css/style.css"
+		if r.URL.Path != wantPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("format") != "car" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		_, _ = w.Write(carBytes)
+	}))
+	defer srv.Close()
+
+	svc := newTestService(t, cfg)
+	originalP2P := svc.fetchFromP2PFn
+	defer func() { svc.fetchFromP2PFn = originalP2P }()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	e := &EmbeddedIPFS{svc: svc}
+	c := mustDecodeCID(t, target)
+	if err := e.EnsureLocalSubpathWithMirror(context.Background(), c, "css/style.css", srv.URL); err != nil {
+		t.Fatalf("EnsureLocalSubpathWithMirror should use request mirror override: %v", err)
+	}
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal after subpath mirror override: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected cid to be present locally after subpath mirror override")
+	}
+}
+
+func TestEnsureLocalSubpathFetchesEvenWhenRootBlockCached(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+
+	data := []byte("hello ipfs root-cached subpath")
+	target := mustCIDForConfig(t, cfg, data)
+	carBytes := mustCARForConfig(t, cfg, data)
+	c := mustDecodeCID(t, target)
+
+	mirrorCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mirrorCalled = true
+		wantPath := "/ipfs/" + target + "/js/app.js"
+		if r.URL.Path != wantPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("format") != "car" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.ipld.car")
+		_, _ = w.Write(carBytes)
+	}))
+	defer srv.Close()
+
+	cfg.HTTPMirrorGateway = srv.URL
+	svc := newTestService(t, cfg)
+	originalP2P := svc.fetchFromP2PFn
+	defer func() { svc.fetchFromP2PFn = originalP2P }()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	// 只存入根块，子路径块不在本地
+	rootBlock, err := svc.dag.Get(context.Background(), c)
+	if rootBlock != nil {
+		t.Logf("root block already exists unexpectedly, skip pre-store")
+	}
+	_ = err
+	// 直接向 blockstore 写入根块（通过单文件 CID，根块即文件本身）
+	storeTestContentLocally(t, svc, cfg, data)
+
+	local, err := svc.HasLocal(context.Background(), c)
+	if err != nil {
+		t.Fatalf("HasLocal before subpath ensure: %v", err)
+	}
+	if !local {
+		t.Fatalf("expected root cid to be present locally before subpath ensure")
+	}
+
+	// 子路径 "js/app.js" 在本地不可解析（根 CID 是单文件，没有目录结构），
+	// 所以 ensureLocalSubpath 应该仍然触发镜像拉取
+	e := &EmbeddedIPFS{svc: svc}
+	if err := e.EnsureLocalSubpath(context.Background(), c, "js/app.js"); err != nil {
+		t.Fatalf("EnsureLocalSubpath should still fetch when subpath not resolvable: %v", err)
+	}
+
+	if !mirrorCalled {
+		t.Fatalf("expected mirror to be called when root block is cached but subpath is not resolvable")
+	}
+}
+
+func TestEnsureLocalSubpathSkipsWhenFullyResolvable(t *testing.T) {
+	cfg := config.Default().IPFS
+	cfg.AutoProvide = false
+
+	data := []byte("hello ipfs fully-local")
+	target := mustCIDForConfig(t, cfg, data)
+	c := mustDecodeCID(t, target)
+
+	mirrorCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mirrorCalled = true
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	cfg.HTTPMirrorGateway = srv.URL
+	svc := newTestService(t, cfg)
+	p2pCalled := false
+	originalP2P := svc.fetchFromP2PFn
+	defer func() { svc.fetchFromP2PFn = originalP2P }()
+	svc.fetchFromP2PFn = func(ctx context.Context, target cid.Cid, fileOnly bool) error {
+		p2pCalled = true
+		return nil
+	}
+
+	// 存入内容到本地
+	storeTestContentLocally(t, svc, cfg, data)
+
+	// 对于单文件 CID 请求空子路径，根块即文件本身，应该跳过拉取
+	e := &EmbeddedIPFS{svc: svc}
+	if err := e.EnsureLocalSubpath(context.Background(), c, ""); err != nil {
+		t.Fatalf("EnsureLocalSubpath with empty subpath should succeed: %v", err)
+	}
+
+	if mirrorCalled || p2pCalled {
+		t.Fatalf("expected no fetch when content is fully resolvable locally (mirror=%t, p2p=%t)", mirrorCalled, p2pCalled)
+	}
+}
+
 func TestEmbeddedIPFSEnsureLocalFileOnlySkipsCAR(t *testing.T) {
 	cfg := config.Default().IPFS
 	cfg.AutoProvide = false
@@ -240,6 +437,7 @@ func newTestService(t *testing.T, cfg config.IPFSConfig) *service {
 		httpClient:        http.DefaultClient,
 	}
 	svc.fetchFromHTTPMirrorFn = svc.fetchFromHTTPMirror
+	svc.fetchCARSubpathFromHTTPMirrorFn = svc.fetchCARFromHTTPMirrorWithSubpath
 	svc.fetchFromP2PFn = svc.fetchFromP2P
 	return svc
 }

@@ -96,6 +96,18 @@ func (f *fakeIPFSMirrorEnsurer) EnsureLocalFileOnlyWithMirror(ctx context.Contex
 	return nil
 }
 
+func (f *fakeIPFSMirrorEnsurer) EnsureLocalSubpath(ctx context.Context, c cid.Cid, subpath string) error {
+	f.record("EnsureLocalSubpath:" + c.String() + ":" + subpath)
+	f.wait()
+	return nil
+}
+
+func (f *fakeIPFSMirrorEnsurer) EnsureLocalSubpathWithMirror(ctx context.Context, c cid.Cid, subpath string, mirrorURL string) error {
+	f.record("EnsureLocalSubpathWithMirror:" + c.String() + ":" + subpath + ":" + mirrorURL)
+	f.wait()
+	return nil
+}
+
 func TestAsyncEnsureIPFSContentReturnsImmediately(t *testing.T) {
 	target, err := cid.Decode("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
 	if err != nil {
@@ -106,7 +118,7 @@ func TestAsyncEnsureIPFSContentReturnsImmediately(t *testing.T) {
 	ensurer := &fakeIPFSMirrorEnsurer{blockUntil: done}
 
 	start := time.Now()
-	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, false, "https://mirror.example.com")
+	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, false, "https://mirror.example.com", "")
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Fatalf("asyncEnsureIPFSContent blocked for %v", elapsed)
 	}
@@ -143,7 +155,7 @@ func TestAsyncEnsureIPFSContentUsesFileOnlyPath(t *testing.T) {
 	}
 
 	ensurer := &fakeIPFSMirrorEnsurer{}
-	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, true, "")
+	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, true, "", "")
 
 	deadline := time.After(200 * time.Millisecond)
 	for {
@@ -168,6 +180,71 @@ func TestAsyncEnsureIPFSContentUsesFileOnlyPath(t *testing.T) {
 	}
 }
 
+func TestAsyncEnsureIPFSContentUsesSubpathPath(t *testing.T) {
+	target, err := cid.Decode("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+	if err != nil {
+		t.Fatalf("decode cid: %v", err)
+	}
+
+	ensurer := &fakeIPFSMirrorEnsurer{}
+	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, false, "", "js/chunk-vendors.js")
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		ensurer.mu.Lock()
+		count := len(ensurer.calls)
+		ensurer.mu.Unlock()
+		if count == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("asyncEnsureIPFSContent did not invoke ensurer")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	ensurer.mu.Lock()
+	defer ensurer.mu.Unlock()
+	if got := ensurer.calls[0]; got != "EnsureLocalSubpath:"+target.String()+":js/chunk-vendors.js" {
+		t.Fatalf("unexpected call %q", got)
+	}
+}
+
+func TestAsyncEnsureIPFSContentUsesSubpathWithMirrorPath(t *testing.T) {
+	target, err := cid.Decode("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
+	if err != nil {
+		t.Fatalf("decode cid: %v", err)
+	}
+
+	ensurer := &fakeIPFSMirrorEnsurer{}
+	asyncEnsureIPFSContent(context.Background(), time.Second, ensurer, target, false, "https://mirror.example.com", "js/chunk-vendors.js")
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		ensurer.mu.Lock()
+		count := len(ensurer.calls)
+		ensurer.mu.Unlock()
+		if count == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("asyncEnsureIPFSContent did not invoke ensurer")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	ensurer.mu.Lock()
+	defer ensurer.mu.Unlock()
+	want := "EnsureLocalSubpathWithMirror:" + target.String() + ":js/chunk-vendors.js:https://mirror.example.com"
+	if got := ensurer.calls[0]; got != want {
+		t.Fatalf("unexpected call %q, want %q", got, want)
+	}
+}
+
 func TestAsyncEnsureIPFSContentIgnoresParentCancellation(t *testing.T) {
 	target, err := cid.Decode("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku")
 	if err != nil {
@@ -179,7 +256,7 @@ func TestAsyncEnsureIPFSContentIgnoresParentCancellation(t *testing.T) {
 	cancel()
 
 	ensurer := &fakeIPFSMirrorEnsurer{blockUntil: done}
-	asyncEnsureIPFSContent(parent, time.Second, ensurer, target, false, "")
+	asyncEnsureIPFSContent(parent, time.Second, ensurer, target, false, "", "")
 
 	deadline := time.After(200 * time.Millisecond)
 	for {

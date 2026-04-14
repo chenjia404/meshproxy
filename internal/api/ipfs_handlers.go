@@ -63,9 +63,11 @@ type ipfsMirrorEnsurer interface {
 	EnsureLocalFileOnly(ctx context.Context, c cid.Cid) error
 	EnsureLocalWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error
 	EnsureLocalFileOnlyWithMirror(ctx context.Context, c cid.Cid, mirrorURL string) error
+	EnsureLocalSubpath(ctx context.Context, c cid.Cid, subpath string) error
+	EnsureLocalSubpathWithMirror(ctx context.Context, c cid.Cid, subpath string, mirrorURL string) error
 }
 
-func asyncEnsureIPFSContent(ctx context.Context, timeout time.Duration, ensurer ipfsMirrorEnsurer, c cid.Cid, fileOnly bool, mirrorURL string) {
+func asyncEnsureIPFSContent(ctx context.Context, timeout time.Duration, ensurer ipfsMirrorEnsurer, c cid.Cid, fileOnly bool, mirrorURL string, subpath string) {
 	if ensurer == nil {
 		return
 	}
@@ -77,7 +79,13 @@ func asyncEnsureIPFSContent(ctx context.Context, timeout time.Duration, ensurer 
 			defer cancel()
 		}
 		var err error
-		if fileOnly {
+		if subpath != "" {
+			if mirrorURL != "" {
+				err = ensurer.EnsureLocalSubpathWithMirror(bg, c, subpath, mirrorURL)
+			} else {
+				err = ensurer.EnsureLocalSubpath(bg, c, subpath)
+			}
+		} else if fileOnly {
 			if mirrorURL != "" {
 				err = ensurer.EnsureLocalFileOnlyWithMirror(bg, c, mirrorURL)
 			} else {
@@ -91,7 +99,7 @@ func asyncEnsureIPFSContent(ctx context.Context, timeout time.Duration, ensurer 
 			}
 		}
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t mirror=%q error=%v", c.String(), fileOnly, mirrorURL, err)
+			log.Printf("[ipfs] module=ipfs op=mirror-fetch cid=%s file_only=%t subpath=%q mirror=%q error=%v", c.String(), fileOnly, subpath, mirrorURL, err)
 		}
 	}()
 }
@@ -234,12 +242,15 @@ func (a *LocalAPI) serveIPFSGateway(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				fileOnly := strings.TrimSpace(r.URL.Query().Get("filename")) != ""
+				subpath := ""
 				if !fileOnly {
 					remainder := strings.TrimPrefix(suffix, rootCID)
-					remainder = strings.TrimSpace(remainder)
-					fileOnly = remainder != ""
+					remainder = strings.Trim(remainder, "/ ")
+					if remainder != "" {
+						subpath = remainder
+					}
 				}
-				asyncEnsureIPFSContent(r.Context(), a.opts.IPFS.FetchTimeout(), a.opts.IPFS, c, fileOnly, mirrorURL)
+				asyncEnsureIPFSContent(r.Context(), a.opts.IPFS.FetchTimeout(), a.opts.IPFS, c, fileOnly, mirrorURL, subpath)
 			}
 		}
 	}

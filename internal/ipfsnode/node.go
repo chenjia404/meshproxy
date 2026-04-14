@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,10 +158,11 @@ type service struct {
 	dag   ipld.DAGService
 	pins  *ipfspin.FileStore
 
-	httpMirrorGateway     string
-	httpClient            *http.Client
-	fetchFromHTTPMirrorFn func(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error
-	fetchFromP2PFn        func(ctx context.Context, c cid.Cid, fileOnly bool) error
+	httpMirrorGateway              string
+	httpClient                     *http.Client
+	fetchFromHTTPMirrorFn          func(ctx context.Context, target cid.Cid, fileOnly bool, mirrorURL string) error
+	fetchCARSubpathFromHTTPMirrorFn func(ctx context.Context, target cid.Cid, subpath string, mirrorURL string) error
+	fetchFromP2PFn                 func(ctx context.Context, c cid.Cid, fileOnly bool) error
 }
 
 // NewEmbeddedIPFS 使用既有 host 與 routing（DHT）建立嵌入式 IPFS；baseIPFSDir 通常為 $DataDir/ipfs。
@@ -209,6 +211,7 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 		},
 	}
 	svc.fetchFromHTTPMirrorFn = svc.fetchFromHTTPMirror
+	svc.fetchCARSubpathFromHTTPMirrorFn = svc.fetchCARFromHTTPMirrorWithSubpath
 	svc.fetchFromP2PFn = svc.fetchFromP2P
 	return &EmbeddedIPFS{
 		svc:             svc,
@@ -258,6 +261,22 @@ func (e *EmbeddedIPFS) EnsureLocalFileOnlyWithMirror(ctx context.Context, c cid.
 		return errors.New("ipfs service not initialized")
 	}
 	return e.svc.ensureLocal(ctx, c, true, mirrorURL)
+}
+
+// EnsureLocalSubpath 當根 CID 為目錄且需解析子路徑時，使用含子路徑的 CAR 從鏡像拉取，與 P2P 並發（先成功優先）。
+func (e *EmbeddedIPFS) EnsureLocalSubpath(ctx context.Context, c cid.Cid, subpath string) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocalSubpath(ctx, c, subpath, "")
+}
+
+// EnsureLocalSubpathWithMirror 使用請求指定的鏡像，當根 CID 為目錄且需解析子路徑時，使用含子路徑的 CAR 拉取，與 P2P 並發（先成功優先）。
+func (e *EmbeddedIPFS) EnsureLocalSubpathWithMirror(ctx context.Context, c cid.Cid, subpath string, mirrorURL string) error {
+	if e == nil || e.svc == nil {
+		return errors.New("ipfs service not initialized")
+	}
+	return e.svc.ensureLocalSubpath(ctx, c, subpath, mirrorURL)
 }
 
 func (s *service) AddFile(ctx context.Context, r io.Reader, opt AddFileOptions) (cid.Cid, error) {
@@ -361,6 +380,85 @@ func (s *service) Provide(ctx context.Context, c cid.Cid, recursive bool) error 
 
 func (s *service) HasLocal(ctx context.Context, c cid.Cid) (bool, error) {
 	return s.bs.Has(ctx, c)
+}
+
+func (s *service) ensureLocalSubpath(ctx context.Context, c cid.Cid, subpath string, mirrorURL string) error {
+	if s.isSubpathResolvableLocally(ctx, c, subpath) {
+		return nil
+	}
+	mirrorURL = strings.TrimSpace(mirrorURL)
+	if mirrorURL == "" {
+		mirrorURL = strings.TrimSpace(s.httpMirrorGateway)
+	}
+	if mirrorURL == "" {
+		return s.fetchFromP2PFn(ctx, c, false)
+	}
+	return s.ensureLocalSubpathMirrorOrP2P(ctx, c, subpath, mirrorURL)
+}
+
+// isSubpathResolvableLocally 使用離線 DAG（不走 bitswap）檢查子路徑上每一段目錄節點和最終目標塊是否都在本地。
+func (s *service) isSubpathResolvableLocally(ctx context.Context, root cid.Cid, subpath string) bool {
+	offlineBsvc := blockservice.New(s.bs, offlineexchange.Exchange(s.bs))
+	offlineDAG := merkledag.NewDAGService(offlineBsvc)
+
+	current := root
+	for _, seg := range strings.Split(strings.Trim(subpath, "/"), "/") {
+		if seg == "" {
+			continue
+		}
+		nd, err := offlineDAG.Get(ctx, current)
+		if err != nil {
+			return false
+		}
+		found := false
+		for _, lnk := range nd.Links() {
+			if lnk.Name == seg {
+				current = lnk.Cid
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	has, err := s.bs.Has(ctx, current)
+	return err == nil && has
+}
+
+// ensureLocalSubpathMirrorOrP2P 同時從帶子路徑的 CAR 鏡像與 P2P 拉取，先成功者為準。
+func (s *service) ensureLocalSubpathMirrorOrP2P(ctx context.Context, c cid.Cid, subpath string, mirrorURL string) error {
+	ctxM, cancelM := context.WithCancel(ctx)
+	ctxP, cancelP := context.WithCancel(ctx)
+	defer cancelM()
+	defer cancelP()
+
+	type srcErr struct {
+		src string
+		err error
+	}
+	ch := make(chan srcErr, 2)
+	go func() {
+		ch <- srcErr{"mirror", s.fetchCARSubpathFromHTTPMirrorFn(ctxM, c, subpath, mirrorURL)}
+	}()
+	go func() {
+		ch <- srcErr{"p2p", s.fetchFromP2PFn(ctxP, c, false)}
+	}()
+
+	var errs []error
+	for i := 0; i < 2; i++ {
+		se := <-ch
+		if se.err == nil {
+			if se.src == "mirror" {
+				cancelP()
+			} else {
+				cancelM()
+			}
+			return nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", se.src, se.err))
+	}
+	return errors.Join(errs...)
 }
 
 func (s *service) ensureLocal(ctx context.Context, c cid.Cid, fileOnly bool, mirrorURL string) error {
@@ -506,8 +604,26 @@ func (s *service) fetchFromHTTPMirror(ctx context.Context, target cid.Cid, fileO
 	return nil
 }
 
+// fetchCARFromHTTPMirrorWithSubpath 從 HTTP 鏡像以 CAR 格式拉取帶子路徑的內容（只含路徑所需的塊）。
+func (s *service) fetchCARFromHTTPMirrorWithSubpath(ctx context.Context, target cid.Cid, subpath string, mirrorURL string) error {
+	urlPath := "/ipfs/" + target.String()
+	if subpath != "" {
+		for _, seg := range strings.Split(strings.Trim(subpath, "/"), "/") {
+			if seg == "" {
+				continue
+			}
+			urlPath += "/" + url.PathEscape(seg)
+		}
+	}
+	return s.doFetchCARFromHTTPMirror(ctx, target, mirrorURL, urlPath)
+}
+
 func (s *service) fetchCARFromHTTPMirror(ctx context.Context, target cid.Cid, mirrorURL string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(mirrorURL, "/")+"/ipfs/"+target.String()+"?format=car", nil)
+	return s.doFetchCARFromHTTPMirror(ctx, target, mirrorURL, "/ipfs/"+target.String())
+}
+
+func (s *service) doFetchCARFromHTTPMirror(ctx context.Context, target cid.Cid, mirrorURL string, urlPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(mirrorURL, "/")+urlPath+"?format=car", nil)
 	if err != nil {
 		return err
 	}
