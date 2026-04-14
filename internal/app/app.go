@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	host "github.com/libp2p/go-libp2p/core/host"
 	network "github.com/libp2p/go-libp2p/core/network"
 	peer "github.com/libp2p/go-libp2p/core/peer"
@@ -190,7 +191,7 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		}
 		a.ownsHost = opts.CloseHost
 	} else {
-		h, err = p2p.NewHost(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs, relayPeerSourceFromCache(a.relayCache), cfg.P2P.PublicIP, cfg.Chat.ServerMode)
+		h, err = p2p.NewHostWithConfig(ctx, idMgr.PrivateKey(), cfg.P2P.ListenAddrs, relayPeerSourceFromCache(a.relayCache), cfg.P2P.PublicIP, p2p.HostConfig{ServerMode: cfg.Chat.ServerMode, Offline: cfg.P2P.Offline})
 		if err != nil {
 			return nil, fmt.Errorf("init p2p host: %w", err)
 		}
@@ -199,9 +200,14 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.host = h
 
 	// Embedded IPFS（可選）：復用同一 libp2p host + DHT routing。
+	// 离线模式下传 nil routing，IPFS 仅用 HTTP 镜像 + 本地缓存。
 	if cfg.IPFS.Enabled {
 		ipfsRoot := filepath.Join(cfg.DataDir, cfg.IPFS.DataDir)
-		n, err := ipfsnode.NewEmbeddedIPFS(ctx, h.Host, h.Routing, ipfsRoot, cfg.IPFS)
+		ipfsRouting := h.Routing
+		if cfg.P2P.Offline {
+			ipfsRouting = nil
+		}
+		n, err := ipfsnode.NewEmbeddedIPFS(ctx, h.Host, ipfsRouting, ipfsRoot, cfg.IPFS)
 		if err != nil {
 			return nil, fmt.Errorf("init embedded ipfs: %w", err)
 		}
@@ -231,49 +237,52 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		})
 	}
 
-	// Gossip
-	gossipComp, err := p2p.NewGossip(ctx, h.Host)
-	if err != nil {
-		return nil, fmt.Errorf("init gossip: %w", err)
-	}
-	a.gossip = gossipComp
+	// Gossip + Discovery + Bootstrap — 离线模式全部跳过
+	var discoveryStore *discovery.Store
+	if !cfg.P2P.Offline {
+		gossipComp, err := p2p.NewGossip(ctx, h.Host)
+		if err != nil {
+			return nil, fmt.Errorf("init gossip: %w", err)
+		}
+		a.gossip = gossipComp
 
-	// Discovery manager
-	selfVersion := update.Version
-	if selfVersion == "" {
-		selfVersion = "devel"
-	}
-	selfDesc, err := discovery.BuildSelfDescriptor(selfVersion, idMgr.PrivateKey(), a.P2PListenAddrs(), true, cfg.Mode == config.ModeRelayExit, time.Minute*2)
-	if err != nil {
-		return nil, fmt.Errorf("build self descriptor: %w", err)
-	}
-	if err := discovery.SignDescriptor(idMgr.PrivateKey(), selfDesc); err != nil {
-		return nil, fmt.Errorf("sign self descriptor: %w", err)
-	}
-	a.selfDesc = selfDesc
-	// Second descriptor: identical fields + started_at_unix, for peer-exchange/1.0.1 (gossip and 1.0.0 use selfDesc without this field).
-	pxDesc := *selfDesc
-	pxDesc.StartedAtUnix = a.startTime.Unix()
-	pxDesc.Signature = ""
-	if err := discovery.SignDescriptor(idMgr.PrivateKey(), &pxDesc); err != nil {
-		return nil, fmt.Errorf("sign peer-exchange self descriptor: %w", err)
-	}
-	a.selfPeerExchangeDesc = &pxDesc
-	discoveryStore := discovery.NewStore()
-	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
-	if cfg.Chat.ServerMode {
-		discoveryMgr.SetMuteAnnounce(true)
-	}
-	discoveryMgr.Start()
-	a.discovery = discoveryMgr
-	a.installDirectPeerExchange()
-	if !cfg.Chat.ServerMode {
-		safe.Go("app.runPeerExchange", func() { a.runPeerExchange(ctx) })
-		safe.Go("app.runPeerAddrLearner", func() { runPeerAddrLearner(ctx, h.Host, h.Routing, discoveryStore, 25*time.Second) })
-	}
+		selfVersion := update.Version
+		if selfVersion == "" {
+			selfVersion = "devel"
+		}
+		selfDesc, err := discovery.BuildSelfDescriptor(selfVersion, idMgr.PrivateKey(), a.P2PListenAddrs(), true, cfg.Mode == config.ModeRelayExit, time.Minute*2)
+		if err != nil {
+			return nil, fmt.Errorf("build self descriptor: %w", err)
+		}
+		if err := discovery.SignDescriptor(idMgr.PrivateKey(), selfDesc); err != nil {
+			return nil, fmt.Errorf("sign self descriptor: %w", err)
+		}
+		a.selfDesc = selfDesc
+		pxDesc := *selfDesc
+		pxDesc.StartedAtUnix = a.startTime.Unix()
+		pxDesc.Signature = ""
+		if err := discovery.SignDescriptor(idMgr.PrivateKey(), &pxDesc); err != nil {
+			return nil, fmt.Errorf("sign peer-exchange self descriptor: %w", err)
+		}
+		a.selfPeerExchangeDesc = &pxDesc
+		discoveryStore = discovery.NewStore()
+		discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
+		if cfg.Chat.ServerMode {
+			discoveryMgr.SetMuteAnnounce(true)
+		}
+		discoveryMgr.Start()
+		a.discovery = discoveryMgr
+		a.installDirectPeerExchange()
+		if !cfg.Chat.ServerMode {
+			safe.Go("app.runPeerExchange", func() { a.runPeerExchange(ctx) })
+			safe.Go("app.runPeerAddrLearner", func() { runPeerAddrLearner(ctx, h.Host, h.Routing, discoveryStore, 25*time.Second) })
+		}
 
-	// Bootstrap
-	p2p.Bootstrap(ctx, h.Host, cfg.P2P.BootstrapPeers)
+		p2p.Bootstrap(ctx, h.Host, cfg.P2P.BootstrapPeers)
+	} else {
+		discoveryStore = discovery.NewStore()
+		log.Println("[app] P2P offline mode: gossip/discovery/bootstrap disabled")
+	}
 
 	// Local SOCKS5 and observability
 	streamMgr := client.NewStreamManager()
@@ -289,7 +298,11 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	if strings.TrimSpace(cfg.Chat.MeshChatServerURL) != "" {
 		chatSvc.SetMeshChatRelay(cfg.Chat.MeshChatServerURL, a.idMgr)
 	}
-	publicChannelSvc, err := publicchannel.NewService(ctx, filepath.Join(cfg.DataDir, "public_channels.db"), a.Host(), h.Routing, gossipComp.PubSub())
+	var pubsubInstance *pubsub.PubSub
+	if a.gossip != nil {
+		pubsubInstance = a.gossip.PubSub()
+	}
+	publicChannelSvc, err := publicchannel.NewService(ctx, filepath.Join(cfg.DataDir, "public_channels.db"), a.Host(), h.Routing, pubsubInstance)
 	if err != nil {
 		return nil, fmt.Errorf("init public channel service: %w", err)
 	}

@@ -35,13 +35,27 @@ const (
 	defaultConnMgrHighWater    = 400
 	serverModeConnMgrLowWater  = 30
 	serverModeConnMgrHighWater = 50
+	offlineConnMgrLowWater     = 0
+	offlineConnMgrHighWater    = 0
 )
+
+// HostConfig bundles the options for NewHost.
+type HostConfig struct {
+	ServerMode bool
+	Offline    bool
+}
 
 // NewHost creates and starts a libp2p host with the given identity and listen addresses.
 func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, relayPeerSource PeerSource, publicIP string, serverMode bool) (*Host, error) {
+	return NewHostWithConfig(ctx, priv, listenAddrs, relayPeerSource, publicIP, HostConfig{ServerMode: serverMode})
+}
+
+// NewHostWithConfig creates and starts a libp2p host. Offline mode creates a minimal host
+// without DHT, NAT, relay or any network services — only identity is preserved.
+func NewHostWithConfig(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, relayPeerSource PeerSource, publicIP string, hcfg HostConfig) (*Host, error) {
 	var hostRouting routing.Routing
 
-	lowWater, highWater := connManagerWatermarks(serverMode)
+	lowWater, highWater := connManagerWatermarks(hcfg)
 	connmgr_, _ := connmgr.NewConnManager(
 		lowWater,
 		highWater,
@@ -51,81 +65,74 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.UserAgent("meshproxy"),
-		libp2p.ConnectionGater(NewAddrFilterGater()),
-
-		//尝试开启upnp协议
-		libp2p.NATPortMap(),
-		libp2p.EnableNATService(),
-
 		libp2p.DefaultTransports,
 		libp2p.Security(libp2ptls.ID, libp2ptls.New),
 		libp2p.Security(noise.ID, noise.New),
-		// 中繼功能配置
-		libp2p.EnableRelay(),        // 啟用中繼功能
-		libp2p.EnableRelayService(), // 啟用中繼服務
-
 		libp2p.DefaultPeerstore,
-
-		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			r, err := dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
-			if err == nil {
-				hostRouting = r
-			}
-			return r, err
-		}),
 		libp2p.ConnectionManager(connmgr_),
 	}
 
-	if relayPeerSource != nil {
-		// AutoRelay reads candidates from relays.json via the caller-provided peer source.
-		// This keeps relay discovery aligned with the actual relay cache rather than bootstrap peers.
-		opts = append(opts, libp2p.EnableAutoRelayWithPeerSource(relayPeerSource))
-	}
-
-	if publicIP != "" {
-		// When the public IP is known upfront, advertise only rewritten public addresses
-		// and skip identify-based address discovery to avoid leaking private addrs.
-		opts = append(opts,
-			libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-				return rewriteAdvertisedAddrs(addrs, publicIP)
-			}),
-			libp2p.DisableIdentifyAddressDiscovery(),
-		)
+	if hcfg.Offline {
+		opts = append(opts, libp2p.NoListenAddrs)
 	} else {
-		// 过滤对外宣告地址
 		opts = append(opts,
-			libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-				out := make([]multiaddr.Multiaddr, 0, len(addrs))
-				for _, a := range addrs {
-					s := a.String()
-					// 按你的场景过滤 Docker/私网/链路本地地址
-					if strings.Contains(s, "/ip4/127.") ||
-						strings.Contains(s, "/ip4/10.") ||
-						strings.Contains(s, "/ip4/172.16.") ||
-						strings.Contains(s, "/ip4/172.17.") ||
-						strings.Contains(s, "/ip4/172.18.") ||
-						strings.Contains(s, "/ip4/172.19.") ||
-						strings.Contains(s, "/ip4/192.168.") {
-						continue
-					}
-					out = append(out, a)
+			libp2p.ConnectionGater(NewAddrFilterGater()),
+			libp2p.NATPortMap(),
+			libp2p.EnableNATService(),
+			libp2p.EnableRelay(),
+			libp2p.EnableRelayService(),
+			libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+				r, err := dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
+				if err == nil {
+					hostRouting = r
 				}
-
-				// 也可以直接只返回你手工指定的公网/域名地址
-				// return []ma.Multiaddr{mustMA("/dns4/example.com/tcp/4001")}
-				return out
+				return r, err
 			}),
 		)
+
+		if relayPeerSource != nil {
+			opts = append(opts, libp2p.EnableAutoRelayWithPeerSource(relayPeerSource))
+		}
 	}
 
-	for _, addrStr := range listenAddrs {
-		// 先打印配置中的监听地址，便于区分容器内绑定地址和对外广播地址。
-		log.Printf("[p2p] listen configured: %s", addrStr)
-		maddr, err := multiaddr.NewMultiaddr(addrStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid listen multiaddr %q: %w", addrStr, err)
+	if !hcfg.Offline {
+		if publicIP != "" {
+			opts = append(opts,
+				libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+					return rewriteAdvertisedAddrs(addrs, publicIP)
+				}),
+				libp2p.DisableIdentifyAddressDiscovery(),
+			)
+		} else {
+			opts = append(opts,
+				libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+					out := make([]multiaddr.Multiaddr, 0, len(addrs))
+					for _, a := range addrs {
+						s := a.String()
+						if strings.Contains(s, "/ip4/127.") ||
+							strings.Contains(s, "/ip4/10.") ||
+							strings.Contains(s, "/ip4/172.16.") ||
+							strings.Contains(s, "/ip4/172.17.") ||
+							strings.Contains(s, "/ip4/172.18.") ||
+							strings.Contains(s, "/ip4/172.19.") ||
+							strings.Contains(s, "/ip4/192.168.") {
+							continue
+						}
+						out = append(out, a)
+					}
+					return out
+				}),
+			)
 		}
-		opts = append(opts, libp2p.ListenAddrs(maddr))
+
+		for _, addrStr := range listenAddrs {
+			log.Printf("[p2p] listen configured: %s", addrStr)
+			maddr, err := multiaddr.NewMultiaddr(addrStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid listen multiaddr %q: %w", addrStr, err)
+			}
+			opts = append(opts, libp2p.ListenAddrs(maddr))
+		}
 	}
 
 	h, err := libp2p.New(opts...)
@@ -145,8 +152,11 @@ func NewHost(ctx context.Context, priv crypto.PrivKey, listenAddrs []string, rel
 	}, nil
 }
 
-func connManagerWatermarks(serverMode bool) (lowWater, highWater int) {
-	if serverMode {
+func connManagerWatermarks(hcfg HostConfig) (lowWater, highWater int) {
+	if hcfg.Offline {
+		return offlineConnMgrLowWater, offlineConnMgrHighWater
+	}
+	if hcfg.ServerMode {
 		return serverModeConnMgrLowWater, serverModeConnMgrHighWater
 	}
 	return defaultConnMgrLowWater, defaultConnMgrHighWater

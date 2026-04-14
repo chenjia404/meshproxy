@@ -166,19 +166,24 @@ type service struct {
 }
 
 // NewEmbeddedIPFS 使用既有 host 與 routing（DHT）建立嵌入式 IPFS；baseIPFSDir 通常為 $DataDir/ipfs。
+// rt 为 nil 时进入离线模式（无 bitswap），仅支持 HTTP 镜像 + 本地缓存。
 func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseIPFSDir string, cfg config.IPFSConfig) (*EmbeddedIPFS, error) {
-	if rt == nil {
-		return nil, fmt.Errorf("ipfs: routing is required (DHT / ContentDiscovery)")
-	}
 	dsPath := filepath.Join(baseIPFSDir, "datastore")
 	ds, closeDS, err := ipfsstore.OpenLevelDB(dsPath)
 	if err != nil {
 		return nil, err
 	}
 	bs := ipfsstore.NewBlockstore(ds)
-	net := bsnet.NewFromIpfsHost(h)
-	bswapEx := bitswap.New(ctx, net, rt, bs)
-	bsvc := blockservice.New(bs, bswapEx)
+
+	var bswapEx *bitswap.Bitswap
+	var bsvc blockservice.BlockService
+	if rt != nil {
+		net := bsnet.NewFromIpfsHost(h)
+		bswapEx = bitswap.New(ctx, net, rt, bs)
+		bsvc = blockservice.New(bs, bswapEx)
+	} else {
+		bsvc = blockservice.New(bs, nil)
+	}
 	dag := merkledag.NewDAGService(bsvc)
 
 	pinsPath := filepath.Join(baseIPFSDir, "pins.json")
@@ -212,7 +217,13 @@ func NewEmbeddedIPFS(ctx context.Context, h host.Host, rt routing.Routing, baseI
 	}
 	svc.fetchFromHTTPMirrorFn = svc.fetchFromHTTPMirror
 	svc.fetchCARSubpathFromHTTPMirrorFn = svc.fetchCARFromHTTPMirrorWithSubpath
-	svc.fetchFromP2PFn = svc.fetchFromP2P
+	if rt != nil {
+		svc.fetchFromP2PFn = svc.fetchFromP2P
+	} else {
+		svc.fetchFromP2PFn = func(ctx context.Context, c cid.Cid, fileOnly bool) error {
+			return fmt.Errorf("ipfs: P2P disabled (offline mode)")
+		}
+	}
 	return &EmbeddedIPFS{
 		svc:             svc,
 		closeDS:         closeDS,

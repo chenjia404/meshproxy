@@ -255,6 +255,10 @@ type P2PConfig struct {
 	// DiscoveryTag is the rendezvous string used for DHT-based peer discovery.
 	// Nodes sharing the same tag will try to discover and connect to each other.
 	DiscoveryTag string `yaml:"discovery_tag"`
+
+	// Offline 完全禁用 P2P 网络活动，仅保留身份签名能力。
+	// 聊天走 meshchat-server（自动启用 server_mode），IPFS 仅用 HTTP 镜像 + 本地缓存。
+	Offline bool `yaml:"offline"`
 }
 
 // Socks5Config groups SOCKS5 listener configuration.
@@ -473,6 +477,13 @@ func (c *Config) postProcess() error {
 		if err := c.Exit.Policy.Validate(); err != nil {
 			return err
 		}
+	}
+	// 离线模式：禁用所有 P2P，聊天强制走服务器，SOCKS5 禁用
+	if c.P2P.Offline {
+		c.P2P.ListenAddrs = nil
+		c.P2P.NoDiscovery = true
+		c.Chat.ServerMode = true
+		c.Socks5.Enabled = false
 	}
 	if err := c.IPFS.normalize(); err != nil {
 		return err

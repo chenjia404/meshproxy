@@ -41,13 +41,18 @@ func TestRewriteAdvertisedAddrsWithPublicIPv6(t *testing.T) {
 }
 
 func TestConnManagerWatermarks(t *testing.T) {
-	low, high := connManagerWatermarks(false)
+	low, high := connManagerWatermarks(HostConfig{})
 	if low != defaultConnMgrLowWater || high != defaultConnMgrHighWater {
 		t.Fatalf("default watermarks = (%d,%d), want (%d,%d)", low, high, defaultConnMgrLowWater, defaultConnMgrHighWater)
 	}
 
-	low, high = connManagerWatermarks(true)
+	low, high = connManagerWatermarks(HostConfig{ServerMode: true})
 	if low != serverModeConnMgrLowWater || high != serverModeConnMgrHighWater {
 		t.Fatalf("server mode watermarks = (%d,%d), want (%d,%d)", low, high, serverModeConnMgrLowWater, serverModeConnMgrHighWater)
+	}
+
+	low, high = connManagerWatermarks(HostConfig{Offline: true})
+	if low != offlineConnMgrLowWater || high != offlineConnMgrHighWater {
+		t.Fatalf("offline watermarks = (%d,%d), want (%d,%d)", low, high, offlineConnMgrLowWater, offlineConnMgrHighWater)
 	}
 }

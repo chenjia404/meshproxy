@@ -16,6 +16,7 @@ p2p:
   # public_ip: "203.0.113.10"   # 指定公网 IP 后，libp2p 会对外广播这个 IP，并关闭 identify 地址发现
   bootstrap_peers: []
   # nodisc: true               # 为 true 时禁用 DHT Advertise/FindPeers 节点发现，仅使用 bootstrap、已连接节点 gossip 和 peer exchange
+  # offline: true              # 完全禁用 P2P 网络（不监听、不连接、无 DHT/gossip/bitswap），聊天自动走 meshchat-server，IPFS 仅用 HTTP 镜像 + 本地缓存，最低流量
 
 socks5:
   enabled: true
