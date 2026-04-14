@@ -294,6 +294,9 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	chatSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	publicChannelSvc.SetNodePrivateKey(idMgr.PrivateKey())
 	publicChannelSvc.SetStoreNodes(cfg.Chat.OfflineStoreNodes)
+	if strings.TrimSpace(cfg.Chat.MeshChatServerURL) != "" {
+		publicChannelSvc.SetMeshChatServerMode(cfg.Chat.ServerMode, cfg.Chat.MeshChatServerURL, a.idMgr)
+	}
 	safe.Go("app.syncExistingPublicChannelPeers", func() { a.syncExistingPublicChannelPeers() })
 	safe.Go("chat.offlineStoreInitialSync", func() { chatSvc.SyncOfflineStoresNow() })
 	if a.ipfsEmb != nil {
@@ -1179,7 +1182,7 @@ func (a *App) onPeerConnected(pid peer.ID) {
 	if a.chat != nil {
 		a.chat.OnPeerConnected(pid.String())
 	}
-	if a.publicChannels != nil && a.cfg.PublicChannel.ExchangeOnConnect {
+	if a.publicChannels != nil && a.cfg.PublicChannel.ExchangeOnConnect && !a.cfg.Chat.ServerMode {
 		if _, loaded := a.publicChannelExchangeOnce.LoadOrStore(pid.String(), struct{}{}); !loaded {
 			safe.Go("app.exchangePublicChannelSubscriptions", func() { a.exchangePublicChannelSubscriptions(pid) })
 		}
@@ -1314,7 +1317,7 @@ func (a *App) exchangePeerSnapshot(pid peer.ID) {
 }
 
 func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
-	if a == nil || a.host == nil || a.publicChannels == nil || pid == "" {
+	if a == nil || a.host == nil || a.publicChannels == nil || pid == "" || a.cfg.Chat.ServerMode {
 		return
 	}
 	// log.Printf("[publicchannel] exchange subscriptions start peer=%s", pid.String())
@@ -1344,7 +1347,7 @@ func (a *App) exchangePublicChannelSubscriptions(pid peer.ID) {
 }
 
 func (a *App) syncExistingPublicChannelPeers() {
-	if a == nil || a.host == nil || a.publicChannels == nil || !a.cfg.PublicChannel.ExchangeOnConnect {
+	if a == nil || a.host == nil || a.publicChannels == nil || !a.cfg.PublicChannel.ExchangeOnConnect || a.cfg.Chat.ServerMode {
 		return
 	}
 	peers := a.Host().Network().Peers()

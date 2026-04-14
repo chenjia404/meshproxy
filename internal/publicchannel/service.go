@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
+	"github.com/gorilla/websocket"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
@@ -38,6 +39,12 @@ type Service struct {
 	localPeer string
 	nodePriv  crypto.PrivKey
 	ipfs      ipfsFilePinner
+	serverMode bool
+	meshChat   *meshChatPublicChannelClient
+	meshChatWSMu sync.Mutex
+	meshChatWSWriteMu sync.Mutex
+	meshChatWSConn *websocket.Conn
+	meshChatWSSubs map[string]struct{}
 
 	subMu       sync.Mutex
 	subs        map[string]*channelSubscription
@@ -147,6 +154,7 @@ func newServiceWithConfig(ctx context.Context, dbPath string, h host.Host, routi
 		pubsub:                  ps,
 		store:                   store,
 		localPeer:               h.ID().String(),
+		meshChatWSSubs:          make(map[string]struct{}),
 		subs:                    make(map[string]*channelSubscription),
 		provideStates:           make(map[string]*provideState),
 		provideWakeCh:           make(chan struct{}, 1),
@@ -263,34 +271,123 @@ func (s *Service) buildPinnedAvatar(fileName, mimeType string, data []byte) (Ava
 }
 
 func (s *Service) GetChannelProfile(channelID string) (ChannelProfile, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		summary, err := s.meshChat.getChannelSummary(ctx, s.resolveCanonicalChannelID(channelID))
+		if err != nil {
+			return ChannelProfile{}, err
+		}
+		if err := s.cacheServerSummary(summary); err != nil {
+			return ChannelProfile{}, err
+		}
+		return summary.Profile, nil
+	}
 	return s.store.GetChannelProfile(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelHead(channelID string) (ChannelHead, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		head, err := s.meshChat.getChannelHead(ctx, s.resolveCanonicalChannelID(channelID))
+		if err != nil {
+			return ChannelHead{}, err
+		}
+		_ = s.store.ApplyHead(head)
+		return head, nil
+	}
 	return s.store.GetChannelHead(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelSummary(channelID string) (ChannelSummary, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		summary, err := s.meshChat.getChannelSummary(ctx, s.resolveCanonicalChannelID(channelID))
+		if err != nil {
+			return ChannelSummary{}, err
+		}
+		if err := s.cacheServerSummary(summary); err != nil {
+			return ChannelSummary{}, err
+		}
+		return summary, nil
+	}
 	return s.store.GetChannelSummary(s.resolveCanonicalChannelID(channelID))
 }
 
 func (s *Service) GetChannelMessage(channelID string, messageID int64) (ChannelMessage, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		msg, err := s.meshChat.getMessage(ctx, s.resolveCanonicalChannelID(channelID), messageID)
+		if err != nil {
+			return ChannelMessage{}, err
+		}
+		_ = s.cacheServerMessage(channelID, msg)
+		return msg, nil
+	}
 	return s.store.GetChannelMessage(s.resolveCanonicalChannelID(channelID), messageID)
 }
 
 func (s *Service) GetChannelMessages(channelID string, beforeMessageID int64, limit int) ([]ChannelMessage, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		items, err := s.meshChat.getMessages(ctx, s.resolveCanonicalChannelID(channelID), beforeMessageID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.cacheServerMessages(s.resolveCanonicalChannelID(channelID), items); err != nil {
+			return nil, err
+		}
+		return items, nil
+	}
 	return s.store.GetChannelMessages(s.resolveCanonicalChannelID(channelID), beforeMessageID, limit)
 }
 
 func (s *Service) GetChannelChanges(channelID string, afterSeq int64, limit int) (GetChangesResponse, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		resp, err := s.meshChat.getChanges(ctx, s.resolveCanonicalChannelID(channelID), afterSeq, limit)
+		if err != nil {
+			return GetChangesResponse{}, err
+		}
+		return resp, nil
+	}
 	return s.store.GetChannelChanges(s.resolveCanonicalChannelID(channelID), afterSeq, limit)
 }
 
 func (s *Service) ListChannelsByOwner(ownerPeerID string) ([]ChannelSummary, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		items, err := s.meshChat.listChannelsByOwner(ctx, strings.TrimSpace(ownerPeerID))
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			_ = s.cacheServerSummary(item)
+		}
+		return items, nil
+	}
 	return s.store.ListChannelsByOwner(strings.TrimSpace(ownerPeerID))
 }
 
 func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		items, err := s.meshChat.listSubscribedChannels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			_ = s.cacheServerSummary(item)
+		}
+		return items, nil
+	}
 	return s.store.ListSubscribedChannels(s.localPeer)
 }
 
@@ -354,6 +451,9 @@ func (s *Service) CompareSubscribedChannelDigests(remote []ChannelSubscriptionDi
 }
 
 func (s *Service) SyncPeerSubscriptions(ctx context.Context, peerID string, limit int) error {
+	if s.isServerModeActive() {
+		return nil
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -424,6 +524,9 @@ func (s *Service) ClearChannelUnreadCount(channelID string) (ChannelSummary, err
 }
 
 func (s *Service) ListProviders(channelID string) ([]ChannelProvider, error) {
+	if s.isServerModeActive() {
+		return s.serverModeProviderView(s.resolveCanonicalChannelID(channelID)), nil
+	}
 	return s.store.ListProviders(s.resolveCanonicalChannelID(channelID))
 }
 
@@ -544,6 +647,19 @@ func (s *Service) switchSubscriptionChannelID(oldChannelID, newChannelID string)
 }
 
 func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		summary, err := s.meshChat.createChannel(ctx, input)
+		if err != nil {
+			return ChannelSummary{}, err
+		}
+		if err := s.cacheServerSummary(summary); err != nil {
+			return ChannelSummary{}, err
+		}
+		s.serverModeRefreshWSSubscriptions()
+		return summary, nil
+	}
 	if s.nodePriv == nil {
 		return ChannelSummary{}, errors.New("public channel signer not configured")
 	}
@@ -613,6 +729,18 @@ func (s *Service) CreateChannelWithAvatar(name, bio string, messageRetentionMinu
 }
 
 func (s *Service) UpdateChannelProfile(channelID string, input UpdateChannelProfileInput) (ChannelSummary, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		summary, err := s.meshChat.updateChannel(ctx, s.resolveCanonicalChannelID(channelID), input)
+		if err != nil {
+			return ChannelSummary{}, err
+		}
+		if err := s.cacheServerSummary(summary); err != nil {
+			return ChannelSummary{}, err
+		}
+		return summary, nil
+	}
 	if s.nodePriv == nil {
 		return ChannelSummary{}, errors.New("public channel signer not configured")
 	}
@@ -690,6 +818,18 @@ func (s *Service) UpdateChannelProfileWithAvatar(channelID, name, bio string, me
 }
 
 func (s *Service) CreateChannelMessage(channelID string, input UpsertMessageInput) (ChannelMessage, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		msg, err := s.meshChat.createMessage(ctx, s.resolveCanonicalChannelID(channelID), input)
+		if err != nil {
+			return ChannelMessage{}, err
+		}
+		if err := s.cacheServerMessage(channelID, msg); err != nil {
+			return ChannelMessage{}, err
+		}
+		return msg, nil
+	}
 	profile, err := s.store.GetChannelProfile(channelID)
 	if err != nil {
 		return ChannelMessage{}, err
@@ -799,6 +939,18 @@ func (s *Service) CreateChannelFileMessage(channelID, text, fileName, mimeType s
 }
 
 func (s *Service) UpdateChannelMessage(ctx context.Context, channelID string, messageID int64, input UpsertMessageInput) (ChannelMessage, error) {
+	if s.isServerModeActive() {
+		reqCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		msg, err := s.meshChat.updateMessage(reqCtx, s.resolveCanonicalChannelID(channelID), messageID, input)
+		if err != nil {
+			return ChannelMessage{}, err
+		}
+		if err := s.cacheServerMessage(channelID, msg); err != nil {
+			return ChannelMessage{}, err
+		}
+		return msg, nil
+	}
 	if err := s.ensureMessageAvailable(ctx, channelID, messageID); err != nil {
 		return ChannelMessage{}, err
 	}
@@ -856,6 +1008,18 @@ func (s *Service) UpdateChannelMessage(ctx context.Context, channelID string, me
 }
 
 func (s *Service) DeleteChannelMessage(ctx context.Context, channelID string, messageID int64) (ChannelMessage, error) {
+	if s.isServerModeActive() {
+		reqCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		msg, err := s.meshChat.deleteMessage(reqCtx, s.resolveCanonicalChannelID(channelID), messageID)
+		if err != nil {
+			return ChannelMessage{}, err
+		}
+		if err := s.cacheServerMessage(channelID, msg); err != nil {
+			return ChannelMessage{}, err
+		}
+		return msg, nil
+	}
 	if err := s.ensureMessageAvailable(ctx, channelID, messageID); err != nil {
 		return ChannelMessage{}, err
 	}
@@ -906,6 +1070,19 @@ func (s *Service) DeleteChannelMessage(ctx context.Context, channelID string, me
 }
 
 func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPeerIDs []string, lastSeenSeq int64) (SubscribeResult, error) {
+	if s.isServerModeActive() {
+		reqCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		out, err := s.meshChat.subscribeChannel(reqCtx, s.resolveCanonicalChannelID(channelID), lastSeenSeq)
+		if err != nil {
+			return SubscribeResult{}, err
+		}
+		if err := s.cacheServerSubscribeResult(channelID, out, lastSeenSeq); err != nil {
+			return SubscribeResult{}, err
+		}
+		s.serverModeRefreshWSSubscriptions()
+		return out, nil
+	}
 	if err := ValidateChannelID(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
@@ -949,6 +1126,19 @@ func (s *Service) SubscribeChannel(ctx context.Context, channelID string, seedPe
 }
 
 func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, lastSeenSeq int64) (SubscribeResult, error) {
+	if s.isServerModeActive() {
+		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		out, err := s.meshChat.subscribeChannel(ctx, s.resolveCanonicalChannelID(channelID), lastSeenSeq)
+		if err != nil {
+			return SubscribeResult{}, err
+		}
+		if err := s.cacheServerSubscribeResult(channelID, out, lastSeenSeq); err != nil {
+			return SubscribeResult{}, err
+		}
+		s.serverModeRefreshWSSubscriptions()
+		return out, nil
+	}
 	if err := ValidateChannelID(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
@@ -1105,6 +1295,17 @@ func (s *Service) localSubscribeResult(channelID string) (SubscribeResult, error
 }
 
 func (s *Service) UnsubscribeChannel(channelID string) error {
+	if s.isServerModeActive() {
+		now := time.Now().Unix()
+		state, err := s.store.GetChannelSyncState(channelID)
+		if err == nil {
+			if err := s.store.UpdateSyncState(channelID, state.LastSeenSeq, state.LastSyncedSeq, false, now); err != nil {
+				return err
+			}
+		}
+		s.serverModeRefreshWSSubscriptions()
+		return nil
+	}
 	now := time.Now().Unix()
 	state, err := s.store.GetChannelSyncState(channelID)
 	if err != nil && err != sql.ErrNoRows {
@@ -1134,6 +1335,18 @@ func (s *Service) UnsubscribeChannel(channelID string) error {
 }
 
 func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID string, beforeMessageID int64, limit int) ([]ChannelMessage, error) {
+	if s.isServerModeActive() {
+		reqCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		items, err := s.meshChat.getMessages(reqCtx, s.resolveCanonicalChannelID(channelID), beforeMessageID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.cacheServerMessages(channelID, items); err != nil {
+			return nil, err
+		}
+		return items, nil
+	}
 	if limit <= 0 {
 		limit = DefaultPageLimit
 	}
@@ -1209,6 +1422,11 @@ func (s *Service) LoadMessagesFromProviders(ctx context.Context, channelID strin
 }
 
 func (s *Service) SyncChannel(ctx context.Context, channelID string) error {
+	if s.isServerModeActive() {
+		reqCtx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		defer cancel()
+		return s.serverModeSyncChannel(reqCtx, s.resolveCanonicalChannelID(channelID))
+	}
 	state, err := s.store.GetChannelSyncState(channelID)
 	if err != nil {
 		return err

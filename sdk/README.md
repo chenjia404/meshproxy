@@ -290,8 +290,8 @@ func main() {
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `--chat.meshchat_server_url` | string | `""` | 可选的 `meshchat-server` HTTP 根地址 |
-| `--chat.server_mode` | bool | `false` | 开启后，私聊文本消息只通过 `meshchat-server` 发送与同步 |
+| `--chat.meshchat_server_url` | string | `""` | 可选的 `meshchat-server` HTTP 根地址；也作为公开频道服务器模式的上游地址 |
+| `--chat.server_mode` | bool | `false` | 开启后，私聊文本消息与公开频道都只通过 `meshchat-server` 发送、拉取与同步 |
 
 ### SOCKS5
 

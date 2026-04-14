@@ -11,6 +11,7 @@
 ### 可选上游 relay / offline store（meshchat-server）
 
 - 在配置 `chat.meshchat_server_url` 填入 **meshchat-server** 的 HTTP 根地址（如 `http://127.0.0.1:8581`）后，mesh-proxy 会用本机 libp2p 身份登录上游，并在**不改变 Android 接入方式**的前提下，将文本私聊额外上送到上游、拉取补全、转发 ACK。
+- 当 `chat.server_mode=true` 时，公开频道也会改为通过 `meshchat-server` 的 public channel API 与 WebSocket 进行读写、补拉和实时同步；原有 P2P 公开频道代码仍保留，但此模式下不再参与公开频道的 P2P 同步。
 - 私聊主模型仍在本地 SQLite；单聊 REST/WebSocket 仍为 `/api/v1/chat/...`。消息 JSON 可多出可选字段：`transport_kind`、`relay_status`、`upstream_message_id`、`client_msg_id`、`ack_pending`、`last_relay_at`（见实现与数据字典）。
 
 ---
