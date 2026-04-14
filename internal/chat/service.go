@@ -3193,6 +3193,12 @@ func (s *Service) sendDeliveryAck(conv Conversation, msgID, toPeerID string) err
 		ToPeerID:       toPeerID,
 		AckedAtUnix:    time.Now().UTC().UnixMilli(),
 	}
+	// server_mode 下 ACK 直接走 meshchat-server，不依赖 P2P 直连
+	if s.isServerModeActive() {
+		s.TryMeshChatUpstreamAck(msgID)
+		_ = s.sendEnvelope(conv.PeerID, ack)
+		return nil
+	}
 	err := s.sendEnvelope(conv.PeerID, ack)
 	if err == nil {
 		s.TryMeshChatUpstreamAck(msgID)
