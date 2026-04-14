@@ -593,9 +593,13 @@ func (s *Service) applyUpstreamDMAcked(payload *dmRealtimePayload) {
 	m.RelayStatus = RelayStatusAcked
 	if m.Direction == "inbound" {
 		m.AckPending = false
-	} else if payload.Message.RecipientAckedAt != nil {
+	} else {
 		m.State = MessageStateDeliveredRemote
-		m.DeliveredAt = payload.Message.RecipientAckedAt.UTC()
+		if payload.Message.RecipientAckedAt != nil {
+			m.DeliveredAt = payload.Message.RecipientAckedAt.UTC()
+		} else {
+			m.DeliveredAt = time.Now().UTC()
+		}
 		_ = s.store.DeleteOutboxJob(m.MsgID)
 	}
 	blob, _ := s.store.GetMessageBlob(m.MsgID)
