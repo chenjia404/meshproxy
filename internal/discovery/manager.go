@@ -20,7 +20,8 @@ type Manager struct {
 	gossip *p2p.Gossip
 	store  *Store
 
-	self *NodeDescriptor
+	self           *NodeDescriptor
+	muteAnnounce   bool // 为 true 时不广播自身 descriptor（server_mode 省流量）
 }
 
 // NewManager creates a new discovery manager.
@@ -46,6 +47,11 @@ func (m *Manager) Start() {
 	go m.runAnnouncements()
 	go m.runSubscriber(TopicAnnounceRelay)
 	go m.runSubscriber(TopicAnnounceExit)
+}
+
+// SetMuteAnnounce 禁止广播自身 descriptor（server_mode 下不需要被其他节点发现）。
+func (m *Manager) SetMuteAnnounce(mute bool) {
+	m.muteAnnounce = mute
 }
 
 // Stop stops the manager.
@@ -74,7 +80,7 @@ func (m *Manager) runAnnouncements() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			if m.self == nil {
+			if m.self == nil || m.muteAnnounce {
 				continue
 			}
 			payload, err := json.Marshal(m.self)

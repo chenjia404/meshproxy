@@ -515,6 +515,9 @@ func offlineSentAtUnix(env *OfflineMessageEnvelope) int64 {
 }
 
 func (s *Service) runOfflineStoreFetchLoop() {
+	if s.isServerModeActive() {
+		return
+	}
 	delay := time.Duration(5+rand.Intn(25)) * time.Second
 	t := time.NewTimer(delay)
 	defer t.Stop()
@@ -539,6 +542,9 @@ func (s *Service) SyncOfflineStoresNow() {
 
 // runOfflineStoreKeepConnectedLoop 启动后尽早连接各离线 store，并周期性重连 + Protect，复用底层连接、减少频繁建连。
 func (s *Service) runOfflineStoreKeepConnectedLoop() {
+	if s.isServerModeActive() {
+		return
+	}
 	delay := time.Duration(2+rand.Intn(8)) * time.Second
 	t := time.NewTimer(delay)
 	defer t.Stop()

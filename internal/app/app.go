@@ -209,7 +209,8 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 
 	// DHT-based rendezvous discovery can be disabled for fixed-topology deployments.
-	if !cfg.P2P.NoDiscovery {
+	// server_mode 下也跳过，减少 P2P 流量。
+	if !cfg.P2P.NoDiscovery && !cfg.Chat.ServerMode {
 		p2p.StartDiscovery(ctx, h.Host, h.Routing, cfg.P2P.DiscoveryTag, func(info peer.AddrInfo) {
 			if a.relayCache == nil || info.ID == "" {
 				return
@@ -260,13 +261,16 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	a.selfPeerExchangeDesc = &pxDesc
 	discoveryStore := discovery.NewStore()
 	discoveryMgr := discovery.NewManager(ctx, h.Host, gossipComp, discoveryStore, selfDesc)
+	if cfg.Chat.ServerMode {
+		discoveryMgr.SetMuteAnnounce(true)
+	}
 	discoveryMgr.Start()
 	a.discovery = discoveryMgr
 	a.installDirectPeerExchange()
-	safe.Go("app.runPeerExchange", func() { a.runPeerExchange(ctx) })
-
-	// Learn exit peer addrs (DHT FindPeer + Connect) so GeoIP gets real IP soon after discovery.
-	safe.Go("app.runPeerAddrLearner", func() { runPeerAddrLearner(ctx, h.Host, h.Routing, discoveryStore, 25*time.Second) })
+	if !cfg.Chat.ServerMode {
+		safe.Go("app.runPeerExchange", func() { a.runPeerExchange(ctx) })
+		safe.Go("app.runPeerAddrLearner", func() { runPeerAddrLearner(ctx, h.Host, h.Routing, discoveryStore, 25*time.Second) })
+	}
 
 	// Bootstrap
 	p2p.Bootstrap(ctx, h.Host, cfg.P2P.BootstrapPeers)
