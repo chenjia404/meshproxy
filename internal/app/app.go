@@ -307,61 +307,62 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 		a.restoreCachedPeerConnections()
 	}
 
-	// Path selector and circuit manager
-	localPeerID := a.PeerID()
-	selector := client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
-	selector.SetExitSelection(&cfg.Client.ExitSelection)
-	// GeoIP: resolve exit node country from IP when descriptor has no ExitInfo.Country
-	switch g := cfg.Client.GeoIP.Provider; g {
-	case "ip-api", "ip_api":
-		ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
-		if ttl <= 0 {
-			ttl = 24 * time.Hour
+	// Path selector, circuit manager, circuit pool — 仅在 SOCKS5 代理需要时初始化
+	var selector *client.PathSelector
+	var cm *client.CircuitManager
+	if opts.EnableSOCKS5 {
+		localPeerID := a.PeerID()
+		selector = client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
+		selector.SetExitSelection(&cfg.Client.ExitSelection)
+		switch g := cfg.Client.GeoIP.Provider; g {
+		case "ip-api", "ip_api":
+			ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
+			if ttl <= 0 {
+				ttl = 24 * time.Hour
+			}
+			selector.SetGeoIPResolver(geoip.NewCachedResolver(geoip.NewIPAPIResolver(), ttl))
+		case "geolite2", "maxmind":
+			inner, err := geoip.NewGeoLite2Resolver(cfg.DataDir)
+			if err != nil {
+				return nil, fmt.Errorf("geoip geolite2: %w", err)
+			}
+			ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
+			if ttl <= 0 {
+				ttl = 24 * time.Hour
+			}
+			selector.SetGeoIPResolver(geoip.NewCachedResolver(inner, ttl))
 		}
-		selector.SetGeoIPResolver(geoip.NewCachedResolver(geoip.NewIPAPIResolver(), ttl))
-	case "geolite2", "maxmind":
-		inner, err := geoip.NewGeoLite2Resolver(cfg.DataDir)
-		if err != nil {
-			return nil, fmt.Errorf("geoip geolite2: %w", err)
-		}
-		ttl := time.Duration(cfg.Client.GeoIP.CacheTTLMinutes) * time.Minute
-		if ttl <= 0 {
-			ttl = 24 * time.Hour
-		}
-		selector.SetGeoIPResolver(geoip.NewCachedResolver(inner, ttl))
-	}
-	// Prefer peerstore/observed addrs for GeoIP so we get the peer's real public IP (not NAT/local from descriptor).
-	selector.SetPeerAddrsProvider(func(peerID string) []string {
-		pid, err := peer.Decode(peerID)
-		if err != nil {
-			return nil
-		}
-		addrs := a.Host().Peerstore().Addrs(pid)
-		out := make([]string, 0, len(addrs))
-		for _, m := range addrs {
-			out = append(out, m.String())
-		}
-		return out
-	})
-	a.pathSelector = selector
-	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr, a.traffic)
-	a.circuitManager = cm
-	cm.SetBuildRetries(cfg.Client.BuildRetries)
-	cm.SetBeginTCPRetries(cfg.Client.BeginTCPRetries)
-	cm.SetBeginConnectTimeout(time.Duration(cfg.Client.BeginConnectTimeoutSeconds) * time.Second)
-	cm.SetHeartbeatConfig(client.HeartbeatConfig{
-		Enabled:           cfg.Client.HeartbeatEnabled,
-		Interval:          time.Duration(cfg.Client.HeartbeatIntervalSeconds) * time.Second,
-		Timeout:           time.Duration(cfg.Client.HeartbeatTimeoutSeconds) * time.Second,
-		FailureThreshold:  cfg.Client.HeartbeatFailureThreshold,
-		SkipWhenActiveFor: time.Duration(cfg.Client.SkipHeartbeatWhenActiveSeconds) * time.Second,
-	})
-	cm.StartHeartbeatLoop(ctx)
+		selector.SetPeerAddrsProvider(func(peerID string) []string {
+			pid, err := peer.Decode(peerID)
+			if err != nil {
+				return nil
+			}
+			addrs := a.Host().Peerstore().Addrs(pid)
+			out := make([]string, 0, len(addrs))
+			for _, m := range addrs {
+				out = append(out, m.String())
+			}
+			return out
+		})
+		a.pathSelector = selector
+		cm = client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, streamMgr, a.traffic)
+		a.circuitManager = cm
+		cm.SetBuildRetries(cfg.Client.BuildRetries)
+		cm.SetBeginTCPRetries(cfg.Client.BeginTCPRetries)
+		cm.SetBeginConnectTimeout(time.Duration(cfg.Client.BeginConnectTimeoutSeconds) * time.Second)
+		cm.SetHeartbeatConfig(client.HeartbeatConfig{
+			Enabled:           cfg.Client.HeartbeatEnabled,
+			Interval:          time.Duration(cfg.Client.HeartbeatIntervalSeconds) * time.Second,
+			Timeout:           time.Duration(cfg.Client.HeartbeatTimeoutSeconds) * time.Second,
+			FailureThreshold:  cfg.Client.HeartbeatFailureThreshold,
+			SkipWhenActiveFor: time.Duration(cfg.Client.SkipHeartbeatWhenActiveSeconds) * time.Second,
+		})
+		cm.StartHeartbeatLoop(ctx)
 
-	// Circuit pool: pre-build circuits, replenish on failure, idle timeout
-	pool := client.NewCircuitPool(cfg.CircuitPool, cm)
-	cm.SetPool(pool)
-	pool.StartMaintenance(ctx)
+		pool := client.NewCircuitPool(cfg.CircuitPool, cm)
+		cm.SetPool(pool)
+		pool.StartMaintenance(ctx)
+	}
 
 	// Relay service when this node relays (relay or relay+exit).
 	var relaySvc *relay.Service
@@ -445,27 +446,31 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	if opts.EnableLocalAPI {
 		// Local API (full observability: status, nodes, relays, exits, circuits, streams, pool, scores, errors, metrics)
 		apiOpts := &api.LocalAPIOpts{
-			Relays:              discoveryStore,
-			Exits:               discoveryStore,
-			Streams:             &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
-			Pool:                &poolStatusAPIAdapter{cm: cm},
-			CircuitPoolConfig:   &poolConfigAPIAdapter{cm: cm},
-			Scores:              &scoresPlaceholder{},
-			Errors:              a.recentErrors,
-			Metrics:             &metricsSummaryAdapter{app: a},
-			ExitSelection:       selector,
-			Socks5Tunnel:        &socks5TunnelAPIAdapter{app: a},
-			Socks5Settings:      a,
-			ExitCandidates:      selector,
-			ExitCountryResolver: selector,
-			ConfigPath:          cfg.ConfigFilePath,
-			ExitService:         exitSvc,
-			ChatService:         chatSvc,
-			PublicChannels:      publicChannelSvc,
-			UpdateService:       a,
-			UpdateSettings:      a,
-			Identity:            a,
-			IPFS:                a.ipfsEmb,
+			Relays:         discoveryStore,
+			Exits:          discoveryStore,
+			Streams:        &streamsAPIAdapter{sm: streamMgr, circuits: a.circuitStore},
+			Scores:         &scoresPlaceholder{},
+			Errors:         a.recentErrors,
+			Metrics:        &metricsSummaryAdapter{app: a},
+			Socks5Tunnel:   &socks5TunnelAPIAdapter{app: a},
+			Socks5Settings: a,
+			ConfigPath:     cfg.ConfigFilePath,
+			ExitService:    exitSvc,
+			ChatService:    chatSvc,
+			PublicChannels: publicChannelSvc,
+			UpdateService:  a,
+			UpdateSettings: a,
+			Identity:       a,
+			IPFS:           a.ipfsEmb,
+		}
+		if cm != nil {
+			apiOpts.Pool = &poolStatusAPIAdapter{cm: cm}
+			apiOpts.CircuitPoolConfig = &poolConfigAPIAdapter{cm: cm}
+		}
+		if selector != nil {
+			apiOpts.ExitSelection = selector
+			apiOpts.ExitCandidates = selector
+			apiOpts.ExitCountryResolver = selector
 		}
 		localAPI := api.NewLocalAPI(cfg.API.Listen, a, a.discovery, a, apiOpts)
 		localAPI.Start()
@@ -820,6 +825,9 @@ type poolStatusAPIAdapter struct {
 }
 
 func (p *poolStatusAPIAdapter) GetPoolStatus() *api.PoolStatusResponse {
+	if p.cm == nil {
+		return nil
+	}
 	s := p.cm.GetPoolStatus()
 	if s == nil {
 		return nil
@@ -840,10 +848,16 @@ type poolConfigAPIAdapter struct {
 }
 
 func (p *poolConfigAPIAdapter) GetPoolConfig() *config.CircuitPoolConfig {
+	if p.cm == nil {
+		return nil
+	}
 	return p.cm.GetPoolConfig()
 }
 
 func (p *poolConfigAPIAdapter) SetPoolTotalLimits(minTotal, maxTotal int) bool {
+	if p.cm == nil {
+		return false
+	}
 	return p.cm.SetPoolTotalLimits(minTotal, maxTotal)
 }
 
@@ -872,6 +886,47 @@ func (s *socks5TunnelAPIAdapter) SetTunnelToExit(enabled bool) {
 	}
 }
 
+func (a *App) ensureCircuitInfraLocked(ctx context.Context) {
+	if a.pathSelector != nil {
+		return
+	}
+	localPeerID := a.PeerID()
+	discoveryStore := a.discovery.Store()
+	selector := client.NewPathSelector(discoveryStore, localPeerID, client.DefaultRoutePolicy())
+	selector.SetExitSelection(&a.cfg.Client.ExitSelection)
+	selector.SetPeerAddrsProvider(func(peerID string) []string {
+		pid, err := peer.Decode(peerID)
+		if err != nil {
+			return nil
+		}
+		addrs := a.Host().Peerstore().Addrs(pid)
+		out := make([]string, 0, len(addrs))
+		for _, m := range addrs {
+			out = append(out, m.String())
+		}
+		return out
+	})
+	a.pathSelector = selector
+
+	cm := client.NewCircuitManager(ctx, a.Host(), a.circuitStore, selector, a.streamMgr, a.traffic)
+	a.circuitManager = cm
+	cm.SetBuildRetries(a.cfg.Client.BuildRetries)
+	cm.SetBeginTCPRetries(a.cfg.Client.BeginTCPRetries)
+	cm.SetBeginConnectTimeout(time.Duration(a.cfg.Client.BeginConnectTimeoutSeconds) * time.Second)
+	cm.SetHeartbeatConfig(client.HeartbeatConfig{
+		Enabled:           a.cfg.Client.HeartbeatEnabled,
+		Interval:          time.Duration(a.cfg.Client.HeartbeatIntervalSeconds) * time.Second,
+		Timeout:           time.Duration(a.cfg.Client.HeartbeatTimeoutSeconds) * time.Second,
+		FailureThreshold:  a.cfg.Client.HeartbeatFailureThreshold,
+		SkipWhenActiveFor: time.Duration(a.cfg.Client.SkipHeartbeatWhenActiveSeconds) * time.Second,
+	})
+	cm.StartHeartbeatLoop(ctx)
+
+	pool := client.NewCircuitPool(a.cfg.CircuitPool, cm)
+	cm.SetPool(pool)
+	pool.StartMaintenance(ctx)
+}
+
 func (a *App) startSocks5Locked() error {
 	if a == nil {
 		return fmt.Errorf("app is nil")
@@ -880,6 +935,7 @@ func (a *App) startSocks5Locked() error {
 		a.cfg.Socks5.Enabled = true
 		return nil
 	}
+	a.ensureCircuitInfraLocked(a.ctx)
 	socks := client.NewSocks5Server(a.cfg.Socks5.Listen, a.Host(), a.circuitManager, a.pathSelector, a.streamMgr, &errorRecorderAdapter{store: a.recentErrors}, a.traffic)
 	socks.SetAllowUDPAssociate(a.cfg.Socks5.AllowUDPAssociate)
 	socks.SetTunnelToExit(a.cfg.Socks5.TunnelToExit, a.cfg.Socks5.ExitUpstream)
