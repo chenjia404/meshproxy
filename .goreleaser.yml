@@ -20,7 +20,7 @@ builds:
       - -trimpath
       - -buildvcs=false
     ldflags:
-      - -s -w -X github.com/chenjia404/meshproxy/internal/update.Version={{.Version}}
+      - -s -w -checklinkname=0 -X github.com/chenjia404/meshproxy/internal/update.Version={{.Version}}
     asmflags:
       # - all=-trimpath={{.Env.GOPATH}}
       - ./dontoptimizeme=-N
