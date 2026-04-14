@@ -8,6 +8,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	_ "github.com/wlynxg/anet" // 替换 net.Interfaces/InterfaceAddrs，修复 Android netlink 权限问题
 )
 
 // Android 上 CGO_ENABLED=0 时，Go 纯 Go DNS 解析器读 /etc/resolv.conf
