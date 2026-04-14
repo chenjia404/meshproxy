@@ -1,6 +1,6 @@
 module github.com/chenjia404/meshproxy
 
-go 1.25.7
+go 1.26.2
 
 require (
 	filippo.io/edwards25519 v1.2.0
