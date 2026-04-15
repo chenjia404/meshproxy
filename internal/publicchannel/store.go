@@ -196,6 +196,46 @@ func (s *Store) ensureSyncStateTx(tx *sql.Tx, channelDBID int64, now int64) erro
 	return err
 }
 
+func resolveLegacyChannelAliasQuery(channelID string) (string, bool) {
+	ownerPeerID, channelUUID, err := ParseChannelID(channelID)
+	if err != nil || ownerPeerID != "" {
+		return "", false
+	}
+	return "%:" + channelUUID.String(), true
+}
+
+func resolveLegacyChannelIDBySuffixTx(tx *sql.Tx, channelID string) (string, error) {
+	pattern, ok := resolveLegacyChannelAliasQuery(channelID)
+	if !ok {
+		return "", sql.ErrNoRows
+	}
+	var canonical string
+	err := tx.QueryRow(`
+		SELECT channel_id
+		FROM public_channels
+		WHERE channel_id LIKE ?
+		ORDER BY updated_at DESC, channel_id DESC
+		LIMIT 1
+	`, pattern).Scan(&canonical)
+	return canonical, err
+}
+
+func (s *Store) resolveLegacyChannelIDBySuffix(channelID string) (string, error) {
+	pattern, ok := resolveLegacyChannelAliasQuery(channelID)
+	if !ok {
+		return "", sql.ErrNoRows
+	}
+	var canonical string
+	err := s.db.QueryRow(`
+		SELECT channel_id
+		FROM public_channels
+		WHERE channel_id LIKE ?
+		ORDER BY updated_at DESC, channel_id DESC
+		LIMIT 1
+	`, pattern).Scan(&canonical)
+	return canonical, err
+}
+
 func (s *Store) resolveChannelIDTx(tx *sql.Tx, channelID string) (string, error) {
 	channelID = stringsTrim(channelID)
 	if channelID == "" {
@@ -210,6 +250,13 @@ func (s *Store) resolveChannelIDTx(tx *sql.Tx, channelID string) (string, error)
 		return "", err
 	}
 	err = tx.QueryRow(`SELECT channel_id FROM public_channel_aliases WHERE alias_channel_id=?`, channelID).Scan(&canonical)
+	switch {
+	case err == nil:
+		return canonical, nil
+	case err != sql.ErrNoRows:
+		return "", err
+	}
+	canonical, err = resolveLegacyChannelIDBySuffixTx(tx, channelID)
 	if err != nil {
 		return "", err
 	}
@@ -230,6 +277,13 @@ func (s *Store) resolveChannelID(channelID string) (string, error) {
 		return "", err
 	}
 	err = s.db.QueryRow(`SELECT channel_id FROM public_channel_aliases WHERE alias_channel_id=?`, channelID).Scan(&canonical)
+	switch {
+	case err == nil:
+		return canonical, nil
+	case err != sql.ErrNoRows:
+		return "", err
+	}
+	canonical, err = s.resolveLegacyChannelIDBySuffix(channelID)
 	if err != nil {
 		return "", err
 	}

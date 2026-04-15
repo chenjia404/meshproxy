@@ -294,6 +294,9 @@ func (s *Service) cacheServerSummary(summary ChannelSummary) error {
 	if summary.Sync.UnreadCount == 0 {
 		_ = s.store.ClearChannelUnreadCount(summary.Profile.ChannelID, now)
 	}
+	if ownerPeerID, channelUUID, err := ParseChannelID(summary.Profile.ChannelID); err == nil && ownerPeerID != "" {
+		_ = s.store.AddChannelAlias(channelUUID.String(), summary.Profile.ChannelID, now)
+	}
 	return nil
 }
 
@@ -322,7 +325,11 @@ func (s *Service) cacheServerSubscribeResult(channelID string, result SubscribeR
 	if lastSeenSeq <= 0 {
 		lastSeenSeq = result.Head.LastSeq
 	}
-	return s.store.UpdateSyncState(channelID, lastSeenSeq, result.Head.LastSeq, true, time.Now().Unix())
+	now := time.Now().Unix()
+	if ownerPeerID, channelUUID, err := ParseChannelID(result.Profile.ChannelID); err == nil && ownerPeerID != "" {
+		_ = s.store.AddChannelAlias(channelUUID.String(), result.Profile.ChannelID, now)
+	}
+	return s.store.UpdateSyncState(channelID, lastSeenSeq, result.Head.LastSeq, true, now)
 }
 
 func (s *Service) cacheServerMessage(channelID string, msg ChannelMessage) error {
