@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ipfs/go-cid"
 	"github.com/gorilla/websocket"
+	"github.com/ipfs/go-cid"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
@@ -30,21 +30,21 @@ import (
 )
 
 type Service struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	host      host.Host
-	routing   corerouting.Routing
-	pubsub    *pubsub.PubSub
-	store     *Store
-	localPeer string
-	nodePriv  crypto.PrivKey
-	ipfs      ipfsFilePinner
-	serverMode bool
-	meshChat   *meshChatPublicChannelClient
-	meshChatWSMu sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	host              host.Host
+	routing           corerouting.Routing
+	pubsub            *pubsub.PubSub
+	store             *Store
+	localPeer         string
+	nodePriv          crypto.PrivKey
+	ipfs              ipfsFilePinner
+	serverMode        bool
+	meshChat          *meshChatPublicChannelClient
+	meshChatWSMu      sync.Mutex
 	meshChatWSWriteMu sync.Mutex
-	meshChatWSConn *websocket.Conn
-	meshChatWSSubs map[string]struct{}
+	meshChatWSConn    *websocket.Conn
+	meshChatWSSubs    map[string]struct{}
 
 	subMu       sync.Mutex
 	subs        map[string]*channelSubscription
@@ -650,7 +650,13 @@ func (s *Service) CreateChannel(input CreateChannelInput) (ChannelSummary, error
 	if s.isServerModeActive() {
 		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
 		defer cancel()
-		summary, err := s.meshChat.createChannel(ctx, input)
+		summary, err := s.meshChat.createChannel(ctx, meshChatCreateChannelInput{
+			ChannelID:               strings.TrimSpace(input.ChannelID),
+			Name:                    input.Name,
+			Bio:                     input.Bio,
+			Avatar:                  input.Avatar,
+			MessageRetentionMinutes: input.MessageRetentionMinutes,
+		})
 		if err != nil {
 			return ChannelSummary{}, err
 		}
@@ -1129,7 +1135,14 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 	if s.isServerModeActive() {
 		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
 		defer cancel()
-		out, err := s.meshChat.subscribeChannel(ctx, s.resolveCanonicalChannelID(channelID), lastSeenSeq)
+		canonicalChannelID := s.resolveCanonicalChannelID(channelID)
+		out, err := s.meshChat.subscribeChannel(ctx, canonicalChannelID, lastSeenSeq)
+		if err != nil && isMeshChatChannelNotFoundError(err) {
+			if ensureErr := s.ensureServerModeOwnedChannelExists(ctx, canonicalChannelID); ensureErr != nil {
+				return SubscribeResult{}, fmt.Errorf("meshchat publicchannel auto-create %s: %w", canonicalChannelID, ensureErr)
+			}
+			out, err = s.meshChat.subscribeChannel(ctx, canonicalChannelID, lastSeenSeq)
+		}
 		if err != nil {
 			return SubscribeResult{}, err
 		}

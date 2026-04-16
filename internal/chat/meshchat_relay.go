@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenjia404/meshproxy/internal/meshchatdns"
 	"github.com/chenjia404/meshproxy/internal/protocol"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/gorilla/websocket"
@@ -45,7 +46,7 @@ func newMeshChatHTTPClient(baseURL, localPeerID string, signer MeshChatChallenge
 	return &meshChatHTTPClient{
 		baseURL: strings.TrimRight(u, "/"),
 		peerID:  strings.TrimSpace(localPeerID),
-		hc:      &http.Client{Timeout: 45 * time.Second},
+		hc:      meshchatdns.NewHTTPClient(45 * time.Second),
 		signer:  signer,
 	}
 }
@@ -685,10 +686,7 @@ func (s *Service) startMeshChatWebSocket(ctx context.Context) {
 	const maxDialBackoff = 60 * time.Second
 	const disconnectPause = 2 * time.Second
 
-	dialer := websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
-		HandshakeTimeout: 45 * time.Second,
-	}
+	dialer := meshchatdns.NewWebSocketDialer(s.meshChat.baseURL, 45*time.Second)
 
 	for {
 		select {

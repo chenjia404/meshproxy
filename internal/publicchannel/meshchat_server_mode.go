@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,12 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenjia404/meshproxy/internal/meshchatdns"
 	"github.com/chenjia404/meshproxy/internal/safe"
 	"github.com/gorilla/websocket"
 )
 
 type MeshChatChallengeSigner interface {
 	SignChallenge(challenge string) (signatureBase64, publicKeyBase64, peerID string, err error)
+}
+
+type meshChatCreateChannelInput struct {
+	ChannelID               string `json:"channel_id,omitempty"`
+	Name                    string `json:"name"`
+	Bio                     string `json:"bio"`
+	Avatar                  Avatar `json:"avatar"`
+	MessageRetentionMinutes int    `json:"message_retention_minutes"`
 }
 
 type meshChatPublicChannelClient struct {
@@ -40,7 +50,7 @@ func newMeshChatPublicChannelClient(baseURL, localPeerID string, signer MeshChat
 		baseURL: strings.TrimRight(u, "/"),
 		peerID:  strings.TrimSpace(localPeerID),
 		signer:  signer,
-		hc:      &http.Client{Timeout: 45 * time.Second},
+		hc:      meshchatdns.NewHTTPClient(45 * time.Second),
 	}
 }
 
@@ -154,7 +164,7 @@ func (c *meshChatPublicChannelClient) doJSON(ctx context.Context, method, path s
 	return json.Unmarshal(respBody, out)
 }
 
-func (c *meshChatPublicChannelClient) createChannel(ctx context.Context, input CreateChannelInput) (ChannelSummary, error) {
+func (c *meshChatPublicChannelClient) createChannel(ctx context.Context, input meshChatCreateChannelInput) (ChannelSummary, error) {
 	var out ChannelSummary
 	err := c.doJSON(ctx, http.MethodPost, "/api/public-channels", input, &out)
 	return out, err
@@ -246,6 +256,44 @@ func (c *meshChatPublicChannelClient) getChanges(ctx context.Context, channelID 
 
 func (s *Service) isServerModeActive() bool {
 	return s != nil && s.serverMode && s.meshChat != nil
+}
+
+func isMeshChatChannelNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "channel_not_found") || strings.Contains(msg, "channel not found")
+}
+
+func (s *Service) ensureServerModeOwnedChannelExists(ctx context.Context, channelID string) error {
+	if s == nil || s.meshChat == nil || s.store == nil {
+		return errors.New("meshchat publicchannel: server_mode not configured")
+	}
+	canonicalChannelID := s.resolveCanonicalChannelID(channelID)
+	profile, err := s.store.GetChannelProfile(canonicalChannelID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(profile.OwnerPeerID) != s.localPeer {
+		return fmt.Errorf("meshchat publicchannel: channel %s is not owned by local peer", canonicalChannelID)
+	}
+	input := meshChatCreateChannelInput{
+		ChannelID:               profile.ChannelID,
+		Name:                    profile.Name,
+		Bio:                     profile.Bio,
+		Avatar:                  profile.Avatar,
+		MessageRetentionMinutes: profile.MessageRetentionMinutes,
+	}
+	summary, createErr := s.meshChat.createChannel(ctx, input)
+	if createErr != nil {
+		existing, getErr := s.meshChat.getChannelSummary(ctx, canonicalChannelID)
+		if getErr != nil {
+			return createErr
+		}
+		summary = existing
+	}
+	return s.cacheServerSummary(summary)
 }
 
 func (s *Service) SetMeshChatServerMode(enabled bool, baseURL string, signer MeshChatChallengeSigner) {
@@ -472,7 +520,7 @@ func (s *Service) handleMeshChatWSFrame(data []byte) {
 	switch env.Type {
 	case "publicchannel.profile.updated":
 		var payload struct {
-			ChannelID string       `json:"channel_id"`
+			ChannelID string         `json:"channel_id"`
 			Profile   ChannelProfile `json:"profile"`
 			Head      ChannelHead    `json:"head"`
 		}
@@ -486,7 +534,7 @@ func (s *Service) handleMeshChatWSFrame(data []byte) {
 		})
 	case "publicchannel.message.created", "publicchannel.message.updated", "publicchannel.message.deleted":
 		var payload struct {
-			ChannelID string         `json:"channel_id"`
+			ChannelID string          `json:"channel_id"`
 			Message   *ChannelMessage `json:"message"`
 		}
 		if json.Unmarshal(env.Data, &payload) != nil || payload.Message == nil {
@@ -524,7 +572,7 @@ func (s *Service) startMeshChatWebSocket(ctx context.Context) {
 	}
 	dialBackoff := time.Second
 	const maxDialBackoff = 60 * time.Second
-	dialer := websocket.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: 45 * time.Second}
+	dialer := meshchatdns.NewWebSocketDialer(s.meshChat.baseURL, 45*time.Second)
 	for {
 		if s.ctx.Err() != nil || !s.isServerModeActive() {
 			return
@@ -592,5 +640,3 @@ func maxInt64(a, b int64) int64 {
 	}
 	return b
 }
-
-

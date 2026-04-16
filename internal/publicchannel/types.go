@@ -178,6 +178,7 @@ type ExchangeSubscriptionsResponse struct {
 }
 
 type CreateChannelInput struct {
+	ChannelID               string `json:"channel_id,omitempty"`
 	Name                    string `json:"name"`
 	Bio                     string `json:"bio"`
 	Avatar                  Avatar `json:"avatar"`
