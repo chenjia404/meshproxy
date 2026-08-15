@@ -262,8 +262,31 @@ func isMeshChatChannelNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "channel_not_found") || strings.Contains(msg, "channel not found")
+	return strings.Contains(msg, "channel_not_found") ||
+		strings.Contains(msg, "channel not found") ||
+		strings.Contains(msg, "sql: no rows")
+}
+
+// isLocallyOwnedChannel 只根据 channel_id 绑定的 owner 或本地 profile 判断，避免把别人的频道当成自己的去创建。
+func (s *Service) isLocallyOwnedChannel(channelID string) bool {
+	if s == nil || strings.TrimSpace(s.localPeer) == "" {
+		return false
+	}
+	if owner, _, err := ParseChannelID(channelID); err == nil && owner != "" {
+		return owner == s.localPeer
+	}
+	if s.store == nil {
+		return false
+	}
+	profile, err := s.store.GetChannelProfile(channelID)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(profile.OwnerPeerID) == s.localPeer
 }
 
 func (s *Service) ensureServerModeOwnedChannelExists(ctx context.Context, channelID string) error {

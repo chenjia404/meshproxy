@@ -386,6 +386,27 @@ func (s *Service) ListSubscribedChannels() ([]ChannelSummary, error) {
 		for _, item := range items {
 			_ = s.cacheServerSummary(item)
 		}
+		local, localErr := s.store.ListSubscribedChannels(s.localPeer)
+		if localErr != nil || len(local) == 0 {
+			return items, nil
+		}
+		seen := make(map[string]struct{}, len(items))
+		for _, item := range items {
+			id := strings.TrimSpace(item.Profile.ChannelID)
+			if id != "" {
+				seen[id] = struct{}{}
+			}
+		}
+		for _, item := range local {
+			id := strings.TrimSpace(item.Profile.ChannelID)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			items = append(items, item)
+		}
 		return items, nil
 	}
 	return s.store.ListSubscribedChannels(s.localPeer)
@@ -1138,10 +1159,16 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 		canonicalChannelID := s.resolveCanonicalChannelID(channelID)
 		out, err := s.meshChat.subscribeChannel(ctx, canonicalChannelID, lastSeenSeq)
 		if err != nil && isMeshChatChannelNotFoundError(err) {
-			if ensureErr := s.ensureServerModeOwnedChannelExists(ctx, canonicalChannelID); ensureErr != nil {
-				return SubscribeResult{}, fmt.Errorf("meshchat publicchannel auto-create %s: %w", canonicalChannelID, ensureErr)
+			if s.isLocallyOwnedChannel(canonicalChannelID) {
+				if ensureErr := s.ensureServerModeOwnedChannelExists(ctx, canonicalChannelID); ensureErr != nil {
+					return SubscribeResult{}, fmt.Errorf("meshchat publicchannel auto-create %s: %w", canonicalChannelID, ensureErr)
+				}
+				out, err = s.meshChat.subscribeChannel(ctx, canonicalChannelID, lastSeenSeq)
+			} else {
+				// 别人的频道：服务端没有时走本地 P2P 订阅，不要当成自己的频道去创建
+				log.Printf("[publicchannel] server-mode subscribe miss remote channel=%s, fallback p2p", canonicalChannelID)
+				return s.subscribeChannelP2P(canonicalChannelID, seedPeerIDs, lastSeenSeq)
 			}
-			out, err = s.meshChat.subscribeChannel(ctx, canonicalChannelID, lastSeenSeq)
 		}
 		if err != nil {
 			return SubscribeResult{}, err
@@ -1152,6 +1179,10 @@ func (s *Service) SubscribeChannelAsync(channelID string, seedPeerIDs []string, 
 		s.serverModeRefreshWSSubscriptions()
 		return out, nil
 	}
+	return s.subscribeChannelP2P(channelID, seedPeerIDs, lastSeenSeq)
+}
+
+func (s *Service) subscribeChannelP2P(channelID string, seedPeerIDs []string, lastSeenSeq int64) (SubscribeResult, error) {
 	if err := ValidateChannelID(channelID); err != nil {
 		return SubscribeResult{}, err
 	}
